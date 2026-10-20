@@ -1,0 +1,6 @@
+/target/
+/AGENTS.md
+/config.toml
+/.env
+*.lock.tmp
+/state.json

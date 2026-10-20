@@ -1,0 +1,21 @@
+id = "local.white-noise"
+name = "White Noise Remote"
+version = "0.1.0"
+min_herdr_version = "0.9.1"
+description = "One encrypted White Noise group per HERDR agent session"
+platforms = ["linux"]
+
+[[startup]]
+command = ["sh", "plugin-start.sh"]
+
+[[actions]]
+id = "start"
+title = "Start White Noise remote"
+contexts = ["workspace"]
+command = ["sh", "plugin-start.sh"]
+
+[[actions]]
+id = "status"
+title = "White Noise remote status"
+contexts = ["workspace"]
+command = ["sh", "plugin-status.sh"]

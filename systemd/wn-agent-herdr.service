@@ -1,0 +1,10 @@
+[Unit]
+Description=MDK transport for HERDR White Noise remote
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/wn-agent --home %h/.marmot-agents/herdr --socket %h/.marmot-agents/herdr/dev/wn-agent.sock --relay wss://relay.eu.whitenoise.chat --relay wss://relay.us.whitenoise.chat
+Restart=on-failure
+RestartSec=5
+UMask=0077

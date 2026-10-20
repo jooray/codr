@@ -1,0 +1,15 @@
+[Unit]
+Description=HERDR White Noise remote plugin worker
+After=network-online.target wn-agent-herdr.service
+Requires=wn-agent-herdr.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/herdr-white-noise-bridge run
+Environment=PATH=%h/.local/bin:%h/.opencode/bin:/usr/local/bin:/usr/bin:/bin
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=default.target

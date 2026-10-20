@@ -1,0 +1,9 @@
+# Reference only. Replace every placeholder with values for the installing user.
+# The installation guide generates this file from the user's public npub and bootstrap output.
+phone_npub = "npub1REPLACE_WITH_YOUR_WHITE_NOISE_PUBLIC_KEY"
+herdr_socket = "/home/YOUR_USER/.config/herdr/herdr.sock"
+wn_agent_socket = "/home/YOUR_USER/.marmot-agents/herdr/dev/wn-agent.sock"
+# Replace with the dedicated bridge account ID from wn-agent bootstrap.
+account_id_hex = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+state_path = "/home/YOUR_USER/.local/state/herdr-white-noise-bridge/state.json"
+opencode_bin = "/absolute/path/to/opencode"
