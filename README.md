@@ -1,8 +1,8 @@
 # HERDR White Noise Remote
 
-A Linux HERDR plugin with one encrypted White Noise group per local agent session.
+A Linux [HERDR](https://github.com/herdrdev/herdr) plugin with one encrypted [White Noise](https://github.com/marmot-protocol/whitenoise) group per local agent session.
 
-The plugin uses the maintained MDK `wn-agent` transport. One dedicated bridge identity joins every group. Your phone uses the normal White Noise app.
+The plugin uses the maintained [Marmot Development Kit (MDK)](https://github.com/marmot-protocol/mdk) `wn-agent` transport. One dedicated bridge identity joins every group. Your phone uses the normal White Noise app.
 
 The current release runs on Linux, with structured final replies supported for OpenCode.
 
@@ -141,3 +141,15 @@ Stop the worker before using its state-changing CLI. To send a notice to one map
 ```
 
 Without `--group`, the command sends the notice to every mapped group. The command returns success only after MDK confirms publication.
+
+## Acknowledgements
+
+codr builds on the work of these projects and their maintainers and contributors:
+
+- [White Noise](https://github.com/marmot-protocol/whitenoise): the mobile messaging application used as codr's phone interface.
+- [Marmot Development Kit (MDK)](https://github.com/marmot-protocol/mdk): the `wn-agent` connector that provides identity management, encrypted group state, relay transport, invitations, and message delivery.
+- [Marmot protocol](https://github.com/marmot-protocol/marmot): the end-to-end encrypted group messaging protocol built on MLS with Nostr identity.
+- [HERDR](https://github.com/herdrdev/herdr): the agent runtime, plugin system, and local API that codr uses to discover and control sessions.
+- [OpenCode](https://github.com/anomalyco/opencode): the coding-agent runtime whose stored final replies codr currently reads.
+
+codr provides the routing bridge between these systems. The messaging protocol, encryption, transport, mobile app, and agent runtimes come from the upstream projects above.
