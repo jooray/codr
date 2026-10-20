@@ -4,6 +4,8 @@ A Linux HERDR plugin with one encrypted White Noise group per local agent sessio
 
 The plugin uses the maintained MDK `wn-agent` transport. One dedicated bridge identity joins every group. Your phone uses the normal White Noise app.
 
+The current release runs on Linux, with structured final replies supported for OpenCode.
+
 ## Install with a coding agent
 
 Copy this prompt into your coding agent. Replace `npub1…` with **your own White Noise public key**:
@@ -15,8 +17,6 @@ The [agent installation guide](docs/INSTALL.md#instructions-for-coding-agents) c
 The session groups and their connection/status messages show installation progress in White Noise. A separate completion message is optional.
 
 For manual installation, follow the [human installation guide](docs/INSTALL.md#manual-installation).
-
-This release targets **Linux with systemd user services**. Structured final replies currently support **OpenCode**.
 
 ## Behaviour
 
