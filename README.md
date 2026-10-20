@@ -32,6 +32,11 @@ For manual installation, follow the [human installation guide](docs/INSTALL.md#m
 
 HERDR snapshots refresh every three seconds. Very short intermediate states can occur between snapshots. Native session references preserve routing across pane moves. Group creation waits for HERDR to report a native session reference. During identity uncertainty, the bridge defers prompts and preserves the existing group.
 
+## To-do
+
+- [ ] Support additional agents directly, including structured final replies for Codex, Claude Code, and other HERDR-supported agents.
+- [ ] Create new agent conversations from White Noise by messaging the main worker, which starts a HERDR session and creates its mapped group.
+
 ## Requirements
 
 - Linux with a systemd user manager.
