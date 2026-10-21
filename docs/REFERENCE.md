@@ -73,11 +73,11 @@ The installer preserves the pinned MDK transport. Editable progress needs a sepa
 
 ### Answer decisions from the phone
 
-When OpenCode asks one single-choice question, codr sends a clean question card with numbered options. Reply with **1**, **2**, or an exact option label. The answer goes to the active question, even while HERDR reports the agent as blocked; it is not submitted as a new chat prompt.
+When OpenCode asks one single-choice question, **codr** sends a clean question card with numbered options. Reply with **1**, **2**, or an exact option label. The answer goes to the active question, even while HERDR reports the agent as blocked; it is not submitted as a new chat prompt.
 
 Decision cards and answers do not require editable progress.
 
-The bridge checks the session, pending tool request, and visible question before sending the native number shortcut. If a question was not answered through codr and is replaced, the new card requires its short code, for example `qabc123 1`. Duplicate deliveries and uncertain submissions are not sent again automatically.
+The bridge checks the session, pending tool request, and visible question before sending the native number shortcut. If a question was not answered through **codr** and is replaced, the new card requires its short code, for example `qabc123 1`. Duplicate deliveries and uncertain submissions are not sent again automatically.
 
 Decision routing was verified against OpenCode 1.18.35's single-choice question UI with 1–9 listed options. The gallery uses OpenCode 1.19.3, but does not verify live decision routing on that version. Custom text entry, multi-select/multi-question dialogs, permission approvals, and decisions in other backends require the terminal. Unsupported OpenCode blockers show a short notice instead of forwarding unrelated tool output.
 
@@ -85,9 +85,9 @@ HERDR 0.9.1 cannot make the final identity check and terminal input atomic. Avoi
 
 ## Shared chats and owner-only control
 
-Group members can discuss a project and read the agent's replies. Only messages from the phone public key in codr's configuration become agent prompts. Other participants' messages are not added to the agent's context. The owner can relay a suggestion in a new prompt.
+Group members can discuss a project and read the agent's replies. Only messages from the phone public key in **codr**'s configuration become agent prompts. Other participants' messages are not added to the agent's context. The owner can relay a suggestion in a new prompt.
 
-Invitations require group admin authority in White Noise. Group membership and codr prompt permission are separate. Automatic codr groups make the bridge identity their admin. The phone owner needs separate admin authority to invite from the app.
+Invitations require group admin authority in White Noise. Group membership and **codr** prompt permission are separate. Automatic **codr** groups make the bridge identity their admin. The phone owner needs separate admin authority to invite from the app.
 
 The gallery uses an owner-created group, bound to an isolated demo session. Alex creates the group and invites Sam through White Noise. Sam is a scripted second demo identity. Its message appears in the chat but produces no agent prompt. Alex's next message produces one prompt and a separate reply. This does not grant additional people agent control.
 
@@ -95,13 +95,13 @@ The gallery uses an owner-created group, bound to an isolated demo session. Alex
 
 These features require the current source build. The published v0.4.0 binary predates them.
 
-codr asks MDK's `download_media` API to fetch and decrypt each attachment. Keys stay in MDK. PNG, JPEG, WebP, and GIF images are copied into a private `media` directory beside bridge state. The prompt includes the local file paths and the original caption. The agent needs its normal local-file access to inspect them. Files remain there for later conversation access until you remove them.
+**codr** asks MDK's `download_media` API to fetch and decrypt each attachment. Keys stay in MDK. PNG, JPEG, WebP, and GIF images are copied into a private `media` directory beside bridge state. The prompt includes the local file paths and the original caption. The agent needs its normal local-file access to inspect them. Files remain there for later conversation access until you remove them.
 
 Audio goes through FFmpeg to 16 kHz mono WAV, then to a local Phonon-2 worker. Its transcript enters the same prompt route as typed text. There is no confirmation step or transcript echo. Supported question answers also use that route. The phone sees `> downloading` or `> transcribing` while preparation runs.
 
 Downloads and transcription run separately from session updates, one media message at a time. Pending messages survive bridge restarts. Sender checks and session checks still apply. A preparation failure sends no agent prompt. An uncertain terminal submission is not repeated automatically.
 
-Offline media recovery also needs `timeline_message_get` with opt-in `include_media` download references. The local MDK source extension provides this. Older connectors return only attachment summaries. codr defers these without consuming the message and can accept a complete live event later. This extension is not in the published MDK 0.13.0 binaries.
+Offline media recovery also needs `timeline_message_get` with opt-in `include_media` download references. The local MDK source extension provides this. Older connectors return only attachment summaries. **codr** defers these without consuming the message and can accept a complete live event later. This extension is not in the published MDK 0.13.0 binaries.
 
 Limits are four attachments per message, 25 MiB per file, and five minutes per audio file. Combined captions, transcripts, and image paths must fit within 30,000 UTF-8 bytes. Unsupported files, truncated messages, and empty transcripts do not reach the agent.
 
@@ -109,7 +109,7 @@ Limits are four attachments per message, 25 MiB per file, and five minutes per a
 
 Source setup installs `fermion-research` 0.2.12 with CPU-only PyTorch and downloads Phonon-2, approximately 164 MB plus runtime dependencies. FFmpeg is required. The worker uses an owner-only Unix socket under `$XDG_RUNTIME_DIR/codr-phonon` and processes recordings locally.
 
-`codr-phonon.service` has a 1 GiB memory limit and no swap allowance. The bridge starts it as a dependency. A healthy existing codr worker is reused. If the worker cannot start within the limit, setup reports failure rather than raising the limit.
+`codr-phonon.service` has a 1 GiB memory limit and no swap allowance. The bridge starts it as a dependency. A healthy existing **codr** worker is reused. If the worker cannot start within the limit, setup reports failure rather than raising the limit.
 
 Fresh source setup includes audio by default. Use `--no-audio` for a text/image-only installation. To add Phonon to an existing source installation:
 
@@ -124,7 +124,7 @@ systemctl --user status codr-phonon.service
 journalctl --user -u codr-phonon.service
 ```
 
-Normalised audio files are temporary and removed after each attempt. MDK manages its downloaded temporary files. Image copies stay in codr's private media directory. Do not commit media, transcripts, or model files to Git.
+Normalised audio files are temporary and removed after each attempt. MDK manages its downloaded temporary files. Image copies stay in **codr**'s private media directory. Do not commit media, transcripts, or model files to Git.
 
 ## Supported reply sources
 
@@ -180,7 +180,7 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo build --locked --release
 ```
 
-`Cargo.lock` is committed because codr is an application. It pins the dependency versions used by the build and installation commands.
+`Cargo.lock` is committed because **codr** is an application. It pins the dependency versions used by the build and installation commands.
 
 ## Install
 
@@ -193,7 +193,7 @@ herdr plugin install tidley/codr --ref v0.4.0
 herdr plugin action invoke local.white-noise.setup
 ```
 
-The installation hook downloads and verifies the matching codr binary from GitHub Releases. Setup asks for your public `npub`, installs or reuses the pinned MDK transport, and configures dedicated user services. No Rust toolchain is required for this path.
+The installation hook downloads and verifies the matching **codr** binary from GitHub Releases. Setup asks for your public `npub`, installs or reuses the pinned MDK transport, and configures dedicated user services. No Rust toolchain is required for this path.
 
 For a non-interactive installation by a coding agent, see the [agent instructions](INSTALL.md#instructions-for-coding-agents).
 
@@ -264,7 +264,7 @@ To update existing group names without changing their session mappings, stop the
 ~/.local/bin/herdr-white-noise-bridge rename-groups
 ```
 
-Then start the worker again. This refreshes names and descriptions without changing group IDs. Ended sessions without a stored tab label use their existing title, replacing earlier codr prefixes or suffixes. Unavailable historical workspace details appear as `unknown`.
+Then start the worker again. This refreshes names and descriptions without changing group IDs. Ended sessions without a stored tab label use their existing title, replacing earlier **codr** prefixes or suffixes. Unavailable historical workspace details appear as `unknown`.
 
 Tab renames do not automatically rewrite White Noise titles; run `rename-groups` to apply them. Sessions in tabs with identical labels can share a display name, while their routing remains separate.
 
@@ -282,9 +282,9 @@ Without `--group`, the command sends the notice to every mapped group. The comma
 
 The [README gallery](../README.md#screenshots) contains side-by-side composites of real HERDR 0.9.1, OpenCode 1.19.3, and White Noise Android interfaces.
 
-All seven images use the same fictional Garden planner project. The desktop replays matching history imported into an isolated OpenCode installation. The phone uses a dedicated Alex demo profile. A synthetic HERDR/OpenCode fixture supplies agent state and scripted replies through the real codr bridge and an isolated MDK transport.
+All seven images use the same fictional Garden planner project. The desktop replays matching history imported into an isolated OpenCode installation. The phone uses a dedicated Alex demo profile. A synthetic HERDR/OpenCode fixture supplies agent state and scripted replies through the real **codr** bridge and an isolated MDK transport.
 
-The captures show current `[cd]` names, blockquote status labels, editable tasks, decisions, separate replies, images, local voice transcription, a three-member chat, and a White Noise project folder. The folder is configured manually, not created by codr.
+The captures show current `[cd]` names, blockquote status labels, editable tasks, decisions, separate replies, images, local voice transcription, a three-member chat, and a White Noise project folder. The folder is configured manually, not created by **codr**.
 
 The reminder design is a generated demo image. The voice clip uses synthetic speech and passes through the real Phonon-2 worker. Its actual transcript reaches the fixture as the prompt, without confirmation. Sam uses a separate MDK identity. Alex's invitation and both participants' chat messages use real encrypted group messaging. Verification checks that Sam's message causes zero agent prompts and Alex's message causes exactly one.
 
@@ -292,15 +292,15 @@ The phone's `1` reply continues the question fixture, not a live OpenCode dialog
 
 ## Acknowledgements
 
-codr builds on the work of these projects and their maintainers and contributors:
+**codr** builds on the work of these projects and their maintainers and contributors:
 
-- White Noise: the mobile messaging application used as codr's phone interface, maintained in the [iOS](https://github.com/marmot-protocol/whitenoise-ios) and [Android](https://github.com/marmot-protocol/whitenoise-android) repositories.
+- White Noise: the mobile messaging application used as **codr**'s phone interface, maintained in the [iOS](https://github.com/marmot-protocol/whitenoise-ios) and [Android](https://github.com/marmot-protocol/whitenoise-android) repositories.
 - [Marmot Development Kit (MDK)](https://github.com/marmot-protocol/mdk): the `wn-agent` connector that provides identity management, encrypted group state, relay transport, invitations, and message delivery.
 - [Marmot protocol](https://github.com/marmot-protocol/marmot): the end-to-end encrypted group messaging protocol built on MLS with Nostr identity.
-- [HERDR](https://github.com/herdrdev/herdr): the agent runtime, plugin system, and local API that codr uses to discover and control sessions.
-- [OpenCode](https://github.com/anomalyco/opencode): the coding-agent runtime whose stored final replies codr currently reads.
-- [Codex](https://github.com/openai/codex): the coding-agent runtime and native rollout records used by codr's Codex reply reader.
-- [Claude Code](https://github.com/anthropics/claude-code): the coding-agent runtime whose native session transcripts codr reads for completed main-conversation replies.
+- [HERDR](https://github.com/herdrdev/herdr): the agent runtime, plugin system, and local API that **codr** uses to discover and control sessions.
+- [OpenCode](https://github.com/anomalyco/opencode): the coding-agent runtime whose stored final replies **codr** currently reads.
+- [Codex](https://github.com/openai/codex): the coding-agent runtime and native rollout records used by **codr**'s Codex reply reader.
+- [Claude Code](https://github.com/anthropics/claude-code): the coding-agent runtime whose native session transcripts **codr** reads for completed main-conversation replies.
 - [Phonon-2](https://github.com/fermionresearch/phonon): the local speech model and Fermion runtime used for audio transcription. Its model weights and runtime remain upstream software.
 
-codr provides the routing bridge between these systems. The messaging protocol, encryption, transport, mobile app, and agent runtimes come from the upstream projects above.
+**codr** provides the routing bridge between these systems. The messaging protocol, encryption, transport, mobile app, and agent runtimes come from the upstream projects above.

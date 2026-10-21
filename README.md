@@ -1,6 +1,6 @@
 # codr
 
-codr connects coding agent sessions in [HERDR](https://github.com/herdrdev/herdr) to [White Noise](https://github.com/marmot-protocol/whitenoise-android), with one encrypted chat per session. It forwards prompts to the mapped agent and returns completed replies to the same chat.
+**codr** connects coding agent sessions in [HERDR](https://github.com/herdrdev/herdr) to [White Noise](https://github.com/marmot-protocol/whitenoise-android), with one encrypted chat per session. It forwards prompts to the mapped agent and returns completed replies to the same chat.
 
 Supported agents: OpenCode, Codex, and Claude Code on Linux.
 
@@ -49,7 +49,7 @@ Use HERDR's **White Noise forwarding: At desk / Away** action to control forward
 White Noise ↔ MDK ↔ codr ↔ HERDR ↔ your agent
 ```
 
-[MDK](https://github.com/marmot-protocol/mdk) handles identity, encrypted messaging, and relays. codr routes prompts through HERDR and reads completed replies from existing agent transcripts.
+[MDK](https://github.com/marmot-protocol/mdk) handles identity, encrypted messaging, and relays. **codr** routes prompts through HERDR and reads completed replies from existing agent transcripts.
 
 Reply collection uses existing transcripts without an additional model call or terminal scraping. [Behaviour and recovery](docs/REFERENCE.md)
 

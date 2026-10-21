@@ -1,6 +1,6 @@
 # Install codr
 
-codr is a Linux HERDR plugin backed by two systemd user services: the Rust bridge and its MDK transport.
+**codr** is a Linux HERDR plugin backed by two systemd user services: the Rust bridge and its MDK transport.
 
 ## One-prompt installation
 
@@ -38,22 +38,22 @@ HERDR previews and runs the manifest's installation hook, then registers the plu
 
 The Setup action opens a HERDR tab. Enter your own White Noise public `npub` there. Setup:
 
-1. Validates the key through codr's configuration parser before changing accounts or services.
+1. Validates the key through **codr**'s configuration parser before changing accounts or services.
 2. Checks the HERDR socket, available supported agents, Git, and systemd user manager. Codex-only and Claude-only installations do not need OpenCode.
-3. Reuses a compatible `wn-agent` 0.13.0 binary or downloads a verified upstream binary into codr's own binary directory.
+3. Reuses a compatible `wn-agent` 0.13.0 binary or downloads a verified upstream binary into **codr**'s own binary directory.
 4. Creates or reuses the dedicated `herdr-bridge` identity under `~/.marmot-agents/herdr`.
 5. Writes owner-only configuration and dedicated user units.
 6. Starts the transport and bridge, then prints the bridge's public `npub` and local result.
 
 The MDK release is pinned independently at `wn-agent-v0.13.0`. Setup never replaces a shared MDK binary with a different version.
 
-The binary installer selects the codr version from the installed plugin checkout. A pinned installation uses that exact version's assets and checksums. A missing release asset or checksum stops installation rather than falling back to unverified code.
+The binary installer selects the **codr** version from the installed plugin checkout. A pinned installation uses that exact version's assets and checksums. A missing release asset or checksum stops installation rather than falling back to unverified code.
 
 ### Select a HERDR server
 
 The setup tab receives `HERDR_SOCKET_PATH` from its HERDR server. For direct setup outside a tab, pass `--herdr-socket /absolute/path/to/herdr.sock` or set `HERDR_SOCKET_PATH` explicitly.
 
-One codr configuration targets one HERDR server. Select the intended server before installation when using named sessions:
+One **codr** configuration targets one HERDR server. Select the intended server before installation when using named sessions:
 
 ```bash
 export HERDR_SOCKET_PATH="/absolute/path/to/the/intended/herdr.sock"
@@ -66,7 +66,7 @@ Setup preserves existing configuration, identities, mappings, and customised uni
 
 For an existing installation, setup validates the configuration and starts its worker if needed. It does not recreate the MDK account or restart a running worker. `--check` performs configuration validation without changing services.
 
-The binary installer replaces codr's executable atomically. A running worker continues with its previous executable until restarted. After an authorised upgrade, wait for work and group creation to settle before restarting only the codr worker:
+The binary installer replaces **codr**'s executable atomically. A running worker continues with its previous executable until restarted. After an authorised upgrade, wait for work and group creation to settle before restarting only the **codr** worker:
 
 ```bash
 systemctl --user restart herdr-white-noise-bridge.service
@@ -113,7 +113,7 @@ Configuration lives under `${XDG_CONFIG_HOME:-~/.config}/herdr-white-noise-bridg
 
 For Codex profiles, `codex_home` selects the directory containing `sessions` and `archived_sessions`. It defaults to `CODEX_HOME` or `~/.codex`. For Claude Code, `claude_home` selects the directory containing `projects`; it defaults to `CLAUDE_CONFIG_DIR` or `~/.claude`. Use absolute paths. Setup saves the installing shell's roots for new configurations, and preserves existing configurations during upgrades.
 
-If a supported agent appears without a native session ID, check its HERDR integration. Enable the matching HERDR integration when needed rather than guessing a transcript from its terminal title or repository. codr does not copy credentials or reconfigure the model provider.
+If a supported agent appears without a native session ID, check its HERDR integration. Enable the matching HERDR integration when needed rather than guessing a transcript from its terminal title or repository. **codr** does not copy credentials or reconfigure the model provider.
 
 Native transcript reads are bounded to 128 MiB per file and 16 MiB per record. Missing, ambiguous, or unsupported transcript data stays unavailable for final-reply extraction. Claude Code must record an explicit `end_turn` stop reason; the bridge retries later if the writer has not persisted it yet.
 
@@ -128,7 +128,7 @@ Get the user's own complete White Noise **public** `npub`. Never use a test fixt
 Before changing the host:
 
 1. Verify Linux architecture, Python 3.11+, Git, the systemd user bus, and executable paths.
-2. Inspect existing codr configuration, services, identities, and plugin registration.
+2. Inspect existing **codr** configuration, services, identities, and plugin registration.
 3. Resolve the intended HERDR socket and verify it with `session.snapshot`. Ask which server to use if several are plausible.
 4. Check that at least one supported agent already works under this user and reports a native HERDR session reference. Do not change model authentication or execution permissions.
 
