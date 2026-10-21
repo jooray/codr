@@ -30,6 +30,23 @@ pub struct Mapping {
     pub blocked_context_seq: Option<u64>,
     #[serde(default)]
     pub completion_pending: bool,
+    #[serde(default)]
+    pub response_id: Option<String>,
+    #[serde(default)]
+    pub task_revision: Option<String>,
+    #[serde(default)]
+    pub forwarding_baseline_pending: bool,
+    #[serde(default)]
+    pub muted_turns: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ResponseDelivery {
+    pub target: Option<String>,
+    pub initial_text: Option<String>,
+    pub sent_text: Option<String>,
+    pub last_attempt_at: u64,
+    pub finished: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -37,6 +54,8 @@ pub struct Outgoing {
     pub id: String,
     pub group: String,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response: Option<ResponseDelivery>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -46,6 +65,16 @@ pub struct BridgeState {
     pub phone: Option<String>,
     pub mappings: BTreeMap<String, Mapping>,
     pub outbox: Vec<Outgoing>,
+    #[serde(default = "forwarding_default")]
+    pub forwarding_enabled: bool,
+    #[serde(default)]
+    pub forwarding_revision: Option<String>,
+    #[serde(default)]
+    pub forwarding_resume_pending: bool,
+}
+
+fn forwarding_default() -> bool {
+    true
 }
 
 impl Default for BridgeState {
@@ -56,6 +85,9 @@ impl Default for BridgeState {
             phone: None,
             mappings: BTreeMap::new(),
             outbox: vec![],
+            forwarding_enabled: true,
+            forwarding_revision: None,
+            forwarding_resume_pending: false,
         }
     }
 }
@@ -86,25 +118,13 @@ impl BridgeState {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        let parent = path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .ok_or_else(|| anyhow::anyhow!("State path needs a parent"))?;
-        if !parent.exists() {
-            fs::create_dir_all(parent)?;
-            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
-        }
-        let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
-        tmp.as_file()
-            .set_permissions(fs::Permissions::from_mode(0o600))?;
-        tmp.write_all(&serde_json::to_vec(self)?)?;
-        tmp.as_file().sync_all()?;
-        tmp.persist(path)?;
-        File::open(parent)?.sync_all()?;
-        Ok(())
+        save_json(path, self)
     }
 
     pub fn enqueue(&mut self, group: &str, text: &str) {
+        if !self.forwarding_enabled {
+            return;
+        }
         // Keep each encrypted message below MDK's message-size ceiling.
         let mut rest = text;
         while !rest.is_empty() {
@@ -116,13 +136,83 @@ impl BridgeState {
                 id: uuid::Uuid::new_v4().to_string(),
                 group: group.into(),
                 text: rest[..end].into(),
+                response: None,
             });
             rest = &rest[end..];
         }
     }
+
+    pub fn begin_response(&mut self, key: &str, group: &str) {
+        if !self.forwarding_enabled {
+            return;
+        }
+        if self.mappings[key]
+            .response_id
+            .as_ref()
+            .is_some_and(|id| self.outbox.iter().any(|item| &item.id == id))
+        {
+            return;
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        self.outbox.push(Outgoing {
+            id: id.clone(),
+            group: group.into(),
+            text: "State: working".into(),
+            response: Some(ResponseDelivery::default()),
+        });
+        self.mappings.get_mut(key).unwrap().response_id = Some(id);
+    }
+
+    pub fn update_response(&mut self, key: &str, group: &str, text: &str, finished: bool) {
+        if !self.forwarding_enabled {
+            return;
+        }
+        self.begin_response(key, group);
+        let id = self.mappings[key].response_id.as_ref().unwrap();
+        let item = self.outbox.iter_mut().find(|item| &item.id == id).unwrap();
+        let mut end = text.len().min(30000);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        item.text = text[..end].into();
+        item.response.as_mut().unwrap().finished = finished;
+        if finished {
+            self.mappings.get_mut(key).unwrap().response_id = None;
+            // Preserve the full text of long terminal notices.
+            self.enqueue(group, &text[end..]);
+        }
+    }
+
+    pub fn complete_progress(&mut self, key: &str) {
+        let Some(id) = self.mappings.get_mut(key).unwrap().response_id.take() else {
+            return;
+        };
+        let Some(item) = self.outbox.iter_mut().find(|item| item.id == id) else {
+            return;
+        };
+        let delivery = item.response.as_mut().unwrap();
+        if delivery.target.is_none() {
+            // Progress is best effort. Do not post a late working notice after the final.
+            self.outbox.retain(|item| item.id != id);
+            return;
+        }
+        item.text = if let Some((_, tasks)) = item.text.split_once("\nTasks\n") {
+            format!("State: done\nTasks\n{tasks}")
+        } else {
+            "State: done".into()
+        };
+        delivery.finished = true;
+    }
 }
 
 pub fn lock(path: &Path) -> Result<File> {
+    let file = lock_file(path)?;
+    file.try_lock_exclusive()
+        .map_err(|_| anyhow::anyhow!("Bridge already runs for this state path"))?;
+    Ok(file)
+}
+
+pub(crate) fn lock_file(path: &Path) -> Result<File> {
     let lock_path = path.with_extension("lock");
     if let Some(parent) = lock_path.parent() {
         std::fs::DirBuilder::new()
@@ -137,7 +227,24 @@ pub fn lock(path: &Path) -> Result<File> {
         .truncate(false)
         .mode(0o600)
         .open(lock_path)?;
-    file.try_lock_exclusive()
-        .map_err(|_| anyhow::anyhow!("Bridge already runs for this state path"))?;
     Ok(file)
+}
+
+pub(crate) fn save_json(path: &Path, value: &impl Serialize) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("State path needs a parent"))?;
+    if !parent.exists() {
+        fs::create_dir_all(parent)?;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+    }
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+    tmp.as_file()
+        .set_permissions(fs::Permissions::from_mode(0o600))?;
+    tmp.write_all(&serde_json::to_vec(value)?)?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path)?;
+    File::open(parent)?.sync_all()?;
+    Ok(())
 }

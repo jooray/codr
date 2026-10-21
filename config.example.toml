@@ -10,3 +10,5 @@ opencode_bin = "/absolute/path/to/opencode"
 # Optional transcript roots. Defaults use CODEX_HOME / CLAUDE_CONFIG_DIR, or these home directories.
 codex_home = "/home/YOUR_USER/.codex"
 claude_home = "/home/YOUR_USER/.claude"
+# Optional editable progress with separate final replies. Requires MDK edit_message support, not its 0.13.0 release binaries.
+# edit_responses = true

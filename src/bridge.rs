@@ -1,6 +1,7 @@
 use crate::{
     BridgeConfig, BridgeState,
     config::phone_hex,
+    forwarding,
     herdr::{self, Agent},
     output,
     state::Mapping,
@@ -38,7 +39,7 @@ impl Bridge {
         state.account = Some(config.account_id_hex.clone());
         state.phone = Some(phone.clone());
         state.save(&config.state_path)?;
-        Ok(Self {
+        let mut bridge = Self {
             herdr: Socket {
                 path: config.herdr_socket.clone(),
             },
@@ -50,17 +51,308 @@ impl Bridge {
             agents: BTreeMap::new(),
             herdr_available: false,
             phone,
-        })
+        };
+        bridge.refresh_forwarding()?;
+        Ok(bridge)
     }
 
     pub fn save(&self) -> Result<()> {
         self.state.save(&self.config.state_path)
     }
 
+    fn refresh_forwarding(&mut self) -> Result<()> {
+        let control = forwarding::load(&self.config.state_path)?;
+        if self.state.forwarding_revision.as_deref() != Some(&control.revision) {
+            // Preserve the old outbox on the first upgrade, unless a mode was already selected.
+            let reset = self.state.forwarding_revision.is_some()
+                || control.revision != "initial"
+                || !control.enabled;
+            if reset {
+                self.state.outbox.clear();
+                for mapping in self.state.mappings.values_mut() {
+                    mapping.response_id = None;
+                    mapping.task_revision = None;
+                    mapping.forwarding_baseline_pending = true;
+                }
+            }
+            self.state.forwarding_enabled = control.enabled && !reset;
+            self.state.forwarding_resume_pending = control.enabled && reset;
+            self.state.forwarding_revision = Some(control.revision);
+            self.save()?;
+        }
+        Ok(())
+    }
+
+    async fn activate_forwarding(&mut self) -> Result<()> {
+        self.refresh_forwarding()?;
+        if !self.state.forwarding_resume_pending || !self.herdr_available {
+            return Ok(());
+        }
+        let revision = self.state.forwarding_revision.clone();
+        let keys: Vec<_> = self
+            .state
+            .mappings
+            .iter()
+            .filter(|(key, mapping)| {
+                mapping.forwarding_baseline_pending
+                    && (mapping.active || self.agents.contains_key(*key))
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        let mut agents = Vec::new();
+        for key in keys {
+            let agent = self.agents.get(&key).cloned().or_else(|| {
+                self.state.mappings[&key]
+                    .agent_record
+                    .clone()
+                    .map(|mut agent| {
+                        agent.agent_status = "done".into();
+                        agent
+                    })
+            });
+            agents.push((
+                key,
+                agent.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Active session identity is unavailable for its forwarding checkpoint"
+                    )
+                })?,
+            ));
+        }
+        let limit = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+        let mut readers = tokio::task::JoinSet::new();
+        for (key, agent) in agents {
+            let config = self.config.clone();
+            let limit = limit.clone();
+            readers.spawn(async move {
+                let _permit = limit.acquire_owned().await?;
+                let history = if let Some(session) = agent
+                    .agent_session
+                    .as_ref()
+                    .filter(|session| output::supported(&session.agent))
+                {
+                    Some(output::read_history(&config, session).await?)
+                } else {
+                    None
+                };
+                Ok::<_, anyhow::Error>((key, agent, history))
+            });
+        }
+        let mut failure = None;
+        let mut cancelled = false;
+        while let Some(result) = readers.join_next().await {
+            // Native spawn_blocking readers cannot be aborted. Drain every reader before
+            // retrying, so an error or mode change cannot start another four on top.
+            if failure.is_some() || cancelled {
+                continue;
+            }
+            let applied = result
+                .map_err(|_| anyhow::anyhow!("Forwarding checkpoint task failed"))
+                .and_then(|result| result)
+                .and_then(|(key, agent, history)| {
+                    self.refresh_forwarding()?;
+                    if self.state.forwarding_revision != revision {
+                        return Ok(false);
+                    }
+                    self.apply_forwarding_baseline(&key, &agent, history)?;
+                    Ok(true)
+                });
+            match applied {
+                Ok(true) => {}
+                Ok(false) => cancelled = true,
+                Err(error) => failure = Some(error),
+            }
+        }
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        if cancelled {
+            return Ok(());
+        }
+        // A newer Desk selection wins over a slow checkpoint or a recovered phone event.
+        self.refresh_forwarding()?;
+        if self.state.forwarding_resume_pending && self.state.forwarding_revision == revision {
+            self.state.forwarding_enabled = true;
+            self.state.forwarding_resume_pending = false;
+            self.save()?;
+        }
+        Ok(())
+    }
+
+    async fn baseline_forwarding(&mut self, key: &str, agent: &Agent) -> Result<bool> {
+        if !self.state.mappings[key].forwarding_baseline_pending {
+            return Ok(false);
+        }
+        let history = if let Some(session) = agent
+            .agent_session
+            .as_ref()
+            .filter(|session| output::supported(&session.agent))
+        {
+            Some(output::read_history(&self.config, session).await?)
+        } else {
+            None
+        };
+        self.apply_forwarding_baseline(key, agent, history)?;
+        Ok(true)
+    }
+
+    fn apply_forwarding_baseline(
+        &mut self,
+        key: &str,
+        agent: &Agent,
+        history: Option<output::SessionHistory>,
+    ) -> Result<()> {
+        if let Some(history) = history {
+            let mapping = self.state.mappings.get_mut(key).unwrap();
+            let known: HashSet<_> = mapping.final_ids.iter().cloned().collect();
+            mapping.final_ids.extend(
+                history
+                    .finals
+                    .into_iter()
+                    .map(|reply| reply.id)
+                    .filter(|id| !known.contains(id)),
+            );
+            let muted: HashSet<_> = mapping.muted_turns.iter().cloned().collect();
+            mapping
+                .muted_turns
+                .extend(history.turns.into_iter().filter(|turn| {
+                    (agent.settled() || Some(turn) != history.latest_turn.as_ref())
+                        && !muted.contains(turn)
+                }));
+            mapping.output_initialised = true;
+            mapping.last_export_at = now();
+        }
+        let mapping = self.state.mappings.get_mut(key).unwrap();
+        mapping.forwarding_baseline_pending = false;
+        if agent.settled() {
+            mapping.pending_prompt = false;
+            mapping.completion_pending = false;
+        }
+        self.save()?;
+        Ok(())
+    }
+
     pub async fn flush(&mut self) -> Result<()> {
+        self.refresh_forwarding()?;
+        if !self.state.forwarding_enabled {
+            return Ok(());
+        }
         let mut failed = HashSet::new();
-        for item in self.state.outbox.clone() {
+        let mut outbox = self.state.outbox.clone();
+        // Durable replies and their continuations precede best-effort progress.
+        outbox.sort_by_key(|item| item.response.is_some());
+        for item in outbox {
+            self.refresh_forwarding()?;
+            if !self.state.forwarding_enabled {
+                return Ok(());
+            }
+            if !self
+                .state
+                .outbox
+                .iter()
+                .any(|pending| pending.id == item.id)
+            {
+                continue;
+            }
             if failed.contains(&item.group) {
+                continue;
+            }
+            if let Some(delivery) = &item.response {
+                if delivery.finished && delivery.target.is_none() {
+                    self.state.outbox.retain(|m| m.id != item.id);
+                    self.save()?;
+                    continue;
+                }
+                if delivery.sent_text.as_deref() == Some(&item.text) {
+                    if delivery.finished {
+                        self.state.outbox.retain(|m| m.id != item.id);
+                        self.save()?;
+                    }
+                    continue;
+                }
+                // Persist the attempt before I/O. Never emit competing edits in one second,
+                // including after restart or a response lost after publication.
+                if now() < delivery.last_attempt_at.saturating_add(2) {
+                    continue;
+                }
+                let pending = self
+                    .state
+                    .outbox
+                    .iter_mut()
+                    .find(|m| m.id == item.id)
+                    .unwrap()
+                    .response
+                    .as_mut()
+                    .unwrap();
+                pending.last_attempt_at = now();
+                let initial = pending
+                    .initial_text
+                    .get_or_insert_with(|| item.text.clone())
+                    .clone();
+                self.save()?;
+                let request = if let Some(target) = &delivery.target {
+                    json!({"type":"edit_message","account_id_hex":self.config.account_id_hex,"group_id_hex":item.group,"target_message_id_hex":target,"text":item.text})
+                } else {
+                    json!({"type":"send_final","account_id_hex":self.config.account_id_hex,"group_id_hex":item.group,"text":initial,"reply_to_message_id_hex":null,"idempotency_key":item.id})
+                };
+                let result =
+                    tokio::time::timeout(Duration::from_secs(3), self.marmot.marmot(request))
+                        .await
+                        .unwrap_or_else(|_| Err(anyhow::anyhow!("Progress update timed out")));
+                self.state
+                    .outbox
+                    .iter_mut()
+                    .find(|m| m.id == item.id)
+                    .unwrap()
+                    .response
+                    .as_mut()
+                    .unwrap()
+                    .last_attempt_at = now();
+                self.save()?;
+                match result {
+                    Ok(response)
+                        if response["type"] == "final_sent"
+                            && response["message_ids_hex"].as_array().is_some_and(|ids| {
+                                !ids.is_empty()
+                                    && ids
+                                        .iter()
+                                        .all(|id| id.as_str().is_some_and(|id| !id.is_empty()))
+                            }) =>
+                    {
+                        let sent_text = if delivery.target.is_some() {
+                            item.text.clone()
+                        } else {
+                            initial
+                        };
+                        let pending = self
+                            .state
+                            .outbox
+                            .iter_mut()
+                            .find(|m| m.id == item.id)
+                            .unwrap()
+                            .response
+                            .as_mut()
+                            .unwrap();
+                        if pending.target.is_none() {
+                            pending.target =
+                                response["message_ids_hex"][0].as_str().map(str::to_owned);
+                        }
+                        pending.sent_text = Some(sent_text.clone());
+                        if delivery.finished && sent_text == item.text {
+                            self.state.outbox.retain(|m| m.id != item.id);
+                        }
+                        self.save()?;
+                    }
+                    _ => {
+                        if delivery.finished {
+                            // A failed terminal progress edit must not hold durable answers.
+                            self.state.outbox.retain(|m| m.id != item.id);
+                            self.save()?;
+                        } else {
+                            failed.insert(item.group);
+                        }
+                    }
+                }
                 continue;
             }
             match self.marmot.marmot(json!({"type":"send_final","account_id_hex":self.config.account_id_hex,"group_id_hex":item.group,"text":item.text,"reply_to_message_id_hex":null,"idempotency_key":item.id})).await {
@@ -75,6 +367,7 @@ impl Bridge {
     }
 
     pub async fn reconcile(&mut self, agents: Vec<Agent>) -> Result<()> {
+        self.refresh_forwarding()?;
         let mut current = BTreeMap::new();
         let mut uncertain_terminals = HashSet::new();
         for mut agent in agents {
@@ -94,6 +387,11 @@ impl Bridge {
         }
         self.agents = current;
         self.herdr_available = true;
+        self.activate_forwarding().await?;
+        ensure!(
+            !self.state.forwarding_resume_pending,
+            "Forwarding resume awaits its current history checkpoint"
+        );
         let keys: Vec<_> = self.agents.keys().cloned().collect();
         for key in keys {
             let agent = self.agents[&key].clone();
@@ -116,6 +414,7 @@ impl Bridge {
             .map(|(key, _)| key.clone())
             .collect();
         for key in ended {
+            let baselining = self.state.mappings[&key].forwarding_baseline_pending;
             if let Some(group) = self.state.mappings[&key].group_id_hex.clone() {
                 if let Some(agent) = self.state.mappings[&key].agent_record.clone()
                     && self.collect_finals(&key, &agent, &group).await.is_err()
@@ -123,11 +422,22 @@ impl Bridge {
                     eprintln!("Final reply for an ended session remains pending.");
                     continue;
                 }
-                self.state.enqueue(&group, "Session ended. This group retains its history. A restored native session will reconnect here.");
+                if self.config.edit_responses && self.state.mappings[&key].response_id.is_some() {
+                    self.state.update_response(
+                        &key,
+                        &group,
+                        "Session ended without a completed reply.",
+                        true,
+                    );
+                }
+                if !baselining {
+                    self.state.enqueue(&group, "Session ended. This group retains its history. A restored native session will reconnect here.");
+                }
             }
             let m = self.state.mappings.get_mut(&key).unwrap();
             m.active = false;
             m.pending_prompt = false;
+            m.completion_pending = false;
         }
         self.save()
     }
@@ -153,6 +463,9 @@ impl Bridge {
     }
 
     async fn collect_finals(&mut self, key: &str, agent: &Agent, group: &str) -> Result<()> {
+        if self.baseline_forwarding(key, agent).await? {
+            return Ok(());
+        }
         // The ended-session path also reaches this method without live reconciliation.
         if self.seed_native_history(key, agent).await? {
             return Ok(());
@@ -162,11 +475,30 @@ impl Bridge {
             .as_ref()
             .filter(|s| output::supported(&s.agent))
         {
-            let finals = output::read_session(&self.config, session).await?;
+            let history = output::read_history(&self.config, session).await?;
+            if !self.state.forwarding_enabled {
+                let mapping = self.state.mappings.get_mut(key).unwrap();
+                let muted: HashSet<_> = mapping.muted_turns.iter().cloned().collect();
+                mapping.muted_turns.extend(
+                    history
+                        .turns
+                        .into_iter()
+                        .filter(|turn| !muted.contains(turn)),
+                );
+            }
             let known: HashSet<_> = self.state.mappings[key].final_ids.iter().cloned().collect();
-            for reply in finals {
+            for reply in history.finals {
                 if !known.contains(&reply.id) {
-                    self.state.enqueue(group, &reply.text);
+                    if reply
+                        .turn
+                        .as_ref()
+                        .is_none_or(|turn| !self.state.mappings[key].muted_turns.contains(turn))
+                    {
+                        if self.config.edit_responses {
+                            self.state.complete_progress(key);
+                        }
+                        self.state.enqueue(group, &reply.text);
+                    }
                     self.state
                         .mappings
                         .get_mut(key)
@@ -197,15 +529,24 @@ impl Bridge {
                 let finals = output::read_session(&self.config, session).await?;
                 m.final_ids = finals.into_iter().map(|f| f.id).collect();
                 m.output_initialised = true;
+                if self.config.edit_responses && agent.settled() {
+                    m.task_revision = output::tasks::read_session(&self.config, session)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|tasks| tasks.revision);
+                }
             }
             self.state.mappings.insert(key.to_owned(), m);
             self.save()?;
         }
+        self.baseline_forwarding(key, agent).await?;
         // Older bridge versions created these groups without a transcript watermark.
         // Seed their existing history once when enabling native reply support.
         self.seed_native_history(key, agent).await?;
+        self.refresh_forwarding()?;
         let m = &self.state.mappings[key];
-        if m.group_id_hex.is_none() && !m.creating {
+        if m.group_id_hex.is_none() && !m.creating && self.state.forwarding_enabled {
             self.state.mappings.get_mut(key).unwrap().creating = true;
             self.save()?;
             // No blind retries: GroupCreate has no idempotency key, even after a timeout.
@@ -231,7 +572,39 @@ impl Bridge {
         let previous = &self.state.mappings[key];
         let changed = previous.last_agent_status != agent.agent_status
             || previous.last_state_change_seq != agent.state_change_seq;
-        if previous.last_agent_status != agent.agent_status && agent.agent_status != "done" {
+        let status_changed = previous.last_agent_status != agent.agent_status;
+        let resumed = previous.last_agent_status == "blocked";
+        let previous_settled = matches!(previous.last_agent_status.as_str(), "idle" | "done");
+        if self.config.edit_responses {
+            if agent.agent_status == "working" {
+                if previous_settled
+                    && !self.state.mappings[key].pending_prompt
+                    && self.state.mappings[key].response_id.is_some()
+                {
+                    self.state.update_response(
+                        key,
+                        &group,
+                        "State: idle. No completed reply was recorded.",
+                        true,
+                    );
+                }
+                self.state.begin_response(key, &group);
+                if resumed {
+                    self.state
+                        .update_response(key, &group, "State: working", false);
+                }
+            } else if status_changed
+                && !agent.settled()
+                && self.state.mappings[key].response_id.is_some()
+            {
+                self.state.update_response(
+                    key,
+                    &group,
+                    &format!("State: {}", agent.agent_status),
+                    false,
+                );
+            }
+        } else if previous.last_agent_status != agent.agent_status && agent.agent_status != "done" {
             self.state
                 .enqueue(&group, &format!("State: {}", agent.agent_status));
         }
@@ -244,6 +617,24 @@ impl Bridge {
             m.completion_pending = true;
         }
         self.save()?;
+        if self.config.edit_responses
+            && self.state.forwarding_enabled
+            && agent.agent_status == "working"
+            && let Some(session) = &agent.agent_session
+        {
+            match output::tasks::read_session(&self.config, session).await {
+                Ok(Some(tasks))
+                    if self.state.mappings[key].task_revision.as_ref() != Some(&tasks.revision)
+                        || resumed =>
+                {
+                    self.state
+                        .update_response(key, &group, &tasks.text(), false);
+                    self.state.mappings.get_mut(key).unwrap().task_revision = Some(tasks.revision);
+                }
+                Ok(_) => {}
+                Err(_) => eprintln!("Task list unavailable; response delivery remains active."),
+            }
+        }
         if agent.agent_status == "blocked"
             && self.state.mappings[key].blocked_context_seq != Some(agent.state_change_seq)
         {
@@ -256,10 +647,12 @@ impl Bridge {
                 .await?;
             herdr::get(&self.herdr, agent).await?;
             if let Some(text) = response["result"]["read"]["text"].as_str() {
-                self.state.enqueue(
-                    &group,
-                    &format!("Agent needs input (terminal context):\n{text}"),
-                );
+                let text = format!("Agent needs input (terminal context):\n{text}");
+                if self.config.edit_responses {
+                    self.state.update_response(key, &group, &text, false);
+                } else {
+                    self.state.enqueue(&group, &text);
+                }
             }
             self.state
                 .mappings
@@ -272,9 +665,33 @@ impl Bridge {
                 || now().saturating_sub(self.state.mappings[key].last_export_at) >= 30)
         {
             self.collect_finals(key, agent, &group).await?;
+            if self.config.edit_responses {
+                if self.state.mappings[key].response_id.is_some() {
+                    self.state.update_response(
+                        key,
+                        &group,
+                        "State: idle. Waiting for the completed reply.",
+                        false,
+                    );
+                }
+                if let Some(session) = &agent.agent_session {
+                    self.state.mappings.get_mut(key).unwrap().task_revision =
+                        output::tasks::read_session(&self.config, session)
+                            .await
+                            .ok()
+                            .flatten()
+                            .map(|tasks| tasks.revision);
+                }
+            }
             if self.state.mappings[key].completion_pending {
-                self.state.mappings.get_mut(key).unwrap().pending_prompt = false;
-                self.state.mappings.get_mut(key).unwrap().completion_pending = false;
+                let awaiting_final = self.config.edit_responses
+                    && self.state.mappings[key].response_id.is_some()
+                    && agent
+                        .agent_session
+                        .as_ref()
+                        .is_some_and(|session| output::supported(&session.agent));
+                self.state.mappings.get_mut(key).unwrap().pending_prompt = awaiting_final;
+                self.state.mappings.get_mut(key).unwrap().completion_pending = awaiting_final;
             }
         }
         let m = self.state.mappings.get_mut(key).unwrap();
@@ -315,19 +732,49 @@ impl Bridge {
         let Some(id) = msg["message_id_hex"].as_str() else {
             return Ok(());
         };
+        if self.state.mappings[&key]
+            .seen_messages
+            .iter()
+            .any(|seen| seen == id)
+        {
+            return Ok(());
+        }
+        self.refresh_forwarding()?;
+        forwarding::wake(&self.config.state_path, group, id)?;
+        self.refresh_forwarding()?;
         ensure!(
             self.herdr_available,
             "HERDR unavailable; inbound message deferred until recovery"
         );
-        let mapping = &self.state.mappings[&key];
-        if mapping.seen_messages.iter().any(|seen| seen == id) {
-            return Ok(());
-        }
+        self.activate_forwarding().await?;
         ensure!(
-            self.agents.contains_key(&key) || !mapping.active,
+            !self.state.forwarding_resume_pending,
+            "Forwarding resume awaits its current history checkpoint"
+        );
+        ensure!(
+            self.agents.contains_key(&key) || !self.state.mappings[&key].active,
             "Session identity is uncertain; phone input deferred"
         );
+        if let Some(agent) = self.agents.get(&key).cloned() {
+            self.baseline_forwarding(&key, &agent).await?;
+        }
         let text = msg["text"].as_str().unwrap_or("");
+        // A final transcript record can lag HERDR's idle state. Resolve it before
+        // opening another response, so it cannot overwrite the next prompt's message.
+        if self.config.edit_responses
+            && text != "/status"
+            && self.state.mappings[&key].pending_prompt
+            && self.state.mappings[&key].response_id.is_some()
+            && let Some(agent) = self.agents.get(&key).cloned().filter(Agent::settled)
+        {
+            self.collect_finals(&key, &agent, group).await?;
+            if self.state.mappings[&key].response_id.is_none() {
+                let mapping = self.state.mappings.get_mut(&key).unwrap();
+                mapping.pending_prompt = false;
+                mapping.completion_pending = false;
+            }
+            self.save()?;
+        }
         if text != "/status"
             && !text.trim().is_empty()
             && msg["text_truncated"] != true
@@ -377,7 +824,20 @@ impl Bridge {
                 self.state.mappings.get_mut(&key).unwrap().pending_prompt = true;
                 self.save()?;
                 match herdr::prompt(&self.herdr, &agent, text).await {
-                    Ok(_) => None,
+                    Ok(_) => {
+                        if self.config.edit_responses {
+                            if self.state.mappings[&key].response_id.is_some() {
+                                self.state.update_response(
+                                    &key,
+                                    group,
+                                    "State: idle. No completed reply was recorded.",
+                                    true,
+                                );
+                            }
+                            self.state.begin_response(&key, group);
+                        }
+                        None
+                    }
                     Err(error) => {
                         if error.downcast_ref::<crate::wire::NotSubmitted>().is_some() {
                             let m = self.state.mappings.get_mut(&key).unwrap();

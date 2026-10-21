@@ -6,6 +6,18 @@ The plugin uses the maintained [Marmot Development Kit (MDK)](https://github.com
 
 The current release runs on Linux, with structured final replies supported for OpenCode, Codex, and Claude Code.
 
+## On the phone
+
+Send a request from White Noise. The bridge posts a working message, edits that message with the task list, and sends the final answer separately.
+
+| Working | Updated checklist | Separate final reply |
+| :---: | :---: | :---: |
+| <img src="docs/screenshots/white-noise-working.png" width="240" alt="White Noise demo chat showing a request and State: working"> | <img src="docs/screenshots/white-noise-tasks.png" width="240" alt="The same progress message updated with completed, in-progress, and pending tasks"> | <img src="docs/screenshots/white-noise-final.png" width="240" alt="Completed progress checklist followed by a separate final answer"> |
+
+Captured from White Noise on Android with a dedicated demo profile. The agent data is synthetic; the app, encrypted transport, and bridge are real. Android status and navigation bars are cropped.
+
+The editable checklist and mute controls are [source-build features](#at-desk--away-forwarding-source-build). The pinned v0.3.2 release binary does not include them.
+
 ## Install with a coding agent
 
 Copy this prompt into your coding agent. Replace `npub1…` with **your own White Noise public key**:
@@ -31,6 +43,57 @@ For manual installation, follow the [human installation guide](docs/INSTALL.md#i
 - Other detected agent backends get groups, prompts, and state notices. Structured final-reply extraction supports **OpenCode, Codex, and Claude Code**.
 
 HERDR snapshots refresh every three seconds. Very short intermediate states can occur between snapshots. Native session references preserve routing across pane moves. Group creation waits for HERDR to report a native session reference. During identity uncertainty, the bridge defers prompts and preserves the existing group.
+
+### At desk / Away forwarding (source build)
+
+Use the HERDR action **White Noise forwarding: At desk / Away** to open the control popup. **Toggle White Noise forwarding** switches modes directly and can be bound to a HERDR shortcut.
+
+HERDR 0.9.1 does not list plugin actions in its main click menu. For quick access, add this to your HERDR configuration:
+
+```toml
+[[keys.command]]
+key = "prefix+f"
+type = "plugin_action"
+command = "local.white-noise.forwarding"
+description = "White Noise: At desk / Away"
+```
+
+With the default prefix, press **Ctrl+B**, release it, then press **f** without Shift. The shortcut also appears in **Keybinds** under **White Noise: At desk / Away**. HERDR reloads configuration changes live.
+
+The plugin opens this popup once when a fresh HERDR server starts after session restore. Reattaching to an existing server does not run the startup hook again; use the shortcut. Starting the bridge manually does not open another popup.
+
+- **At desk:** suppress outgoing messages and new group invitations while the bridge continues to listen for your phone.
+- **Away:** forward progress and final replies from every mapped session.
+- A new message from the configured phone to any mapped group switches **all sessions** to Away. Already processed messages, your bridge's own messages, and other senders do not switch modes.
+
+In the popup, enter **1** for At desk, **2** for Away, **3** to toggle, or **q** to close. Press Enter after your choice. Muting applies to every mapped session; it does not stop the transport or change your groups.
+
+The selected mode survives restarts. Mode changes discard the outgoing backlog. Before Away becomes active, the bridge checkpoints replies for all active sessions. The popup shows **Away requested** while a transcript checkpoint is pending. Completed muted turns remain suppressed even if their transcript records arrive late. An operation already submitted to MDK can still arrive after you select At desk.
+
+The command-line controls work while the worker runs:
+
+```sh
+~/.local/bin/herdr-white-noise-bridge forwarding status
+~/.local/bin/herdr-white-noise-bridge forwarding desk
+~/.local/bin/herdr-white-noise-bridge forwarding away
+~/.local/bin/herdr-white-noise-bridge forwarding toggle
+```
+
+Forwarding defaults to Away on an existing installation. The control file is private and separate from routing state, so changing modes does not stop either service. These actions require the source build; the pinned v0.3.2 release binary does not include them.
+
+### Editable progress and separate final replies (source build)
+
+The source build supports `edit_responses = true` in the bridge configuration. This mode requires an MDK build with the `edit_message` API, such as upstream commit `1d2b40dbd9bea1f7e9beb4ecab04482647a9e5a6`. The published `wn-agent` 0.13.0 binaries do not include that API. With those MDK binaries, leave this mode disabled. With the published codr v0.3.2 binary, omit the configuration key entirely.
+
+Each response starts as one `State: working` progress message. The bridge edits that message with the current task list, when available. It sends the final answer as a separate message through the normal durable send path, with its own retry key. The bridge never edits that final answer. When possible, it marks the progress message `State: done`.
+
+OpenCode to-do writes, Codex plan updates, and Claude Code to-do/task tools supply structured task data. The bridge does not prompt a model to obtain progress. Message IDs and pending updates survive bridge restarts. Updates coalesce between snapshots, and edit attempts are at least two timestamp seconds apart.
+
+Progress is best effort. Final replies take priority over progress updates, and progress requests have a three-second local deadline. A failed progress edit does not block a queued final answer. An MDK response or local readback does not prove phone delivery. Very long final replies use continuation messages to preserve all text. Progress messages are ordinary encrypted chat messages, not Nostr ephemeral events.
+
+If HERDR becomes idle before the agent stores its final reply, the bridge keeps that response pending and retries the transcript read. After inspection, `clear-prompt` can release a cancelled response that has no final record.
+
+This source feature is not included in the pinned codr v0.3.2 release binary. Build codr from the source containing this option before enabling it.
 
 ## Supported reply sources
 

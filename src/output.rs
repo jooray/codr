@@ -12,6 +12,7 @@ use tokio::process::Command;
 pub mod claude;
 pub mod codex;
 mod native;
+pub mod tasks;
 
 pub fn supported(agent: &str) -> bool {
     matches!(agent, "opencode" | "codex" | "claude")
@@ -21,12 +22,28 @@ pub async fn read_session(
     config: &crate::config::BridgeConfig,
     session: &crate::herdr::Session,
 ) -> Result<Vec<FinalMessage>> {
+    Ok(read_history(config, session).await?.finals)
+}
+
+#[derive(Debug, Default)]
+pub struct SessionHistory {
+    pub finals: Vec<FinalMessage>,
+    pub latest_turn: Option<String>,
+    pub turns: Vec<String>,
+}
+
+pub async fn read_history(
+    config: &crate::config::BridgeConfig,
+    session: &crate::herdr::Session,
+) -> Result<SessionHistory> {
     ensure!(
         session.kind == "id",
         "Unsupported native session reference kind"
     );
     match session.agent.as_str() {
-        "opencode" => export(&config.opencode_bin, &session.value).await,
+        "opencode" => Ok(select_history(
+            export_data(&config.opencode_bin, &session.value).await?,
+        )),
         "codex" | "claude" => {
             let provider = session.agent.clone();
             let id = session.value.clone();
@@ -37,15 +54,15 @@ pub async fn read_session(
             };
             tokio::task::spawn_blocking(move || {
                 if provider == "codex" {
-                    codex::read(&home, &id)
+                    codex::snapshot(&home, &id).map(|(history, _)| history)
                 } else {
-                    claude::read(&home, &id)
+                    claude::snapshot(&home, &id).map(|(history, _)| history)
                 }
             })
             .await
             .map_err(|_| anyhow::anyhow!("Native transcript reader failed"))?
         }
-        _ => Ok(Vec::new()),
+        _ => Ok(SessionHistory::default()),
     }
 }
 
@@ -53,6 +70,7 @@ pub async fn read_session(
 pub struct FinalMessage {
     pub id: String,
     pub text: String,
+    pub turn: Option<String>,
 }
 
 // Unknown fields include tool outputs, attachments and token accounting. Serde skips
@@ -76,6 +94,8 @@ struct Info {
     error: Option<Value>,
     #[serde(default)]
     summary: Value,
+    #[serde(default, rename = "parentID")]
+    parent_id: Option<String>,
 }
 #[derive(Default, Deserialize)]
 struct MessageTime {
@@ -90,6 +110,12 @@ struct Part {
     synthetic: bool,
     #[serde(default)]
     ignored: bool,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    tool: Option<String>,
+    #[serde(default)]
+    state: Value,
 }
 
 pub fn final_messages_from_reader(reader: impl Read) -> Result<Vec<FinalMessage>> {
@@ -101,9 +127,33 @@ pub fn final_messages(export: &Value) -> Result<Vec<FinalMessage>> {
 }
 
 fn select_finals(export: Export) -> Result<Vec<FinalMessage>> {
+    Ok(select_history(export).finals)
+}
+
+fn select_history(export: Export) -> SessionHistory {
     let mut out = vec![];
+    let mut latest_turn = None;
+    let mut turns = std::collections::BTreeSet::new();
+    let mut has_user = false;
     for message in export.messages {
         let info = message.info;
+        if info.role == "user" {
+            latest_turn = Some(format!("opencode:{}", info.id));
+            turns.insert(latest_turn.clone().unwrap());
+            has_user = true;
+            continue;
+        }
+        let turn = info
+            .parent_id
+            .as_ref()
+            .map(|id| format!("opencode:{id}"))
+            .or_else(|| latest_turn.clone());
+        if let Some(turn) = &turn {
+            turns.insert(turn.clone());
+        }
+        if !has_user && turn.is_some() {
+            latest_turn = turn.clone();
+        }
         if info.role != "assistant"
             || info.time.completed.is_none()
             || info.finish.as_deref() != Some("stop")
@@ -120,13 +170,25 @@ fn select_finals(export: Export) -> Result<Vec<FinalMessage>> {
             .collect::<Vec<_>>()
             .join("\n");
         if !text.trim().is_empty() {
-            out.push(FinalMessage { id: info.id, text });
+            out.push(FinalMessage {
+                id: info.id,
+                text,
+                turn,
+            });
         }
     }
-    Ok(out)
+    SessionHistory {
+        finals: out,
+        latest_turn,
+        turns: turns.into_iter().collect(),
+    }
 }
 
 pub async fn export(bin: &Path, session: &str) -> Result<Vec<FinalMessage>> {
+    select_finals(export_data(bin, session).await?)
+}
+
+async fn export_data(bin: &Path, session: &str) -> Result<Export> {
     // A regular file avoids OpenCode's observed stdout-pipe truncation. The file is anonymous and owner-only.
     let mut file = tempfile::tempfile()?;
     let mut command = Command::new(bin);
@@ -143,5 +205,5 @@ pub async fn export(bin: &Path, session: &str) -> Result<Vec<FinalMessage>> {
         "OpenCode export exceeds 128 MiB"
     );
     file.seek(SeekFrom::Start(0))?;
-    final_messages_from_reader(BufReader::new(file))
+    Ok(serde_json::from_reader(BufReader::new(file))?)
 }

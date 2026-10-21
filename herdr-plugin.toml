@@ -9,7 +9,7 @@ platforms = ["linux"]
 command = ["python3", "scripts/install.py"]
 
 [[startup]]
-command = ["sh", "plugin-start.sh"]
+command = ["sh", "plugin-start.sh", "--show-menu"]
 
 [[actions]]
 id = "setup"
@@ -34,3 +34,23 @@ id = "status"
 title = "White Noise remote status"
 contexts = ["workspace"]
 command = ["sh", "plugin-status.sh"]
+
+[[actions]]
+id = "forwarding"
+title = "White Noise forwarding: At desk / Away"
+contexts = ["workspace"]
+command = ["sh", "plugin-forwarding.sh"]
+
+[[actions]]
+id = "toggle-forwarding"
+title = "Toggle White Noise forwarding"
+contexts = ["workspace"]
+command = ["sh", "plugin-forwarding.sh", "toggle"]
+
+[[panes]]
+id = "forwarding"
+title = "White Noise forwarding"
+placement = "popup"
+width = "80%"
+height = 18
+command = ["sh", "plugin-forwarding-menu.sh"]

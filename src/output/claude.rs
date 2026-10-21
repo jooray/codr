@@ -17,6 +17,8 @@ struct Row {
     message: Option<String>,
     stop: Option<String>,
     text: Vec<String>,
+    parts: Vec<Value>,
+    tool_result: Value,
 }
 
 fn truthy(value: &Value) -> bool {
@@ -29,6 +31,7 @@ struct Response {
     last_row: String,
     text: Vec<String>,
     complete: bool,
+    turn: Option<String>,
 }
 
 impl Response {
@@ -39,6 +42,7 @@ impl Response {
                 replies.push(FinalMessage {
                     id: format!("claude:{}", self.last_row),
                     text,
+                    turn: self.turn.clone(),
                 });
             }
         }
@@ -47,6 +51,13 @@ impl Response {
 }
 
 pub fn read(home: &Path, session: &str) -> Result<Vec<FinalMessage>> {
+    snapshot(home, session).map(|(history, _)| history.finals)
+}
+
+pub(super) fn snapshot(
+    home: &Path,
+    session: &str,
+) -> Result<(super::SessionHistory, Option<super::tasks::TaskList>)> {
     let session = native::session_id(session)?;
     let name = format!("{session}.jsonl");
     // Only project roots, never nested session/subagent directories. This also handles custom project keys.
@@ -102,6 +113,8 @@ pub fn read(home: &Path, session: &str) -> Result<Vec<FinalMessage>> {
             message: value["message"]["id"].as_str().map(str::to_owned),
             stop: value["message"]["stop_reason"].as_str().map(str::to_owned),
             text,
+            parts: blocks.cloned().unwrap_or_default(),
+            tool_result: value["toolUseResult"].clone(),
         };
         index.insert(row.id.clone(), rows.len());
         rows.push(row);
@@ -142,7 +155,7 @@ pub fn read(home: &Path, session: &str) -> Result<Vec<FinalMessage>> {
     }
     // Prefer the latest main-conversation message by file position, not a sidechain or a timestamp.
     let Some(mut current) = leaves.into_iter().max() else {
-        return Ok(Vec::new());
+        return Ok((super::SessionHistory::default(), None));
     };
     let mut chain = Vec::new();
     let mut seen = HashSet::new();
@@ -160,6 +173,9 @@ pub fn read(home: &Path, session: &str) -> Result<Vec<FinalMessage>> {
     }
     let mut response = Response::default();
     let mut replies = Vec::new();
+    let mut tasks = super::tasks::Tracker::default();
+    let mut latest_turn = None;
+    let mut turns = std::collections::BTreeSet::new();
     for position in chain.into_iter().rev() {
         let row = &rows[position];
         if row.private || !row.same_session {
@@ -167,6 +183,33 @@ pub fn read(home: &Path, session: &str) -> Result<Vec<FinalMessage>> {
         }
         if row.user_prompt {
             response.finish(&mut replies);
+            latest_turn = Some(format!("claude:{}", row.id));
+            turns.insert(latest_turn.clone().unwrap());
+            tasks.new_turn();
+        }
+        if !row.api_error {
+            for part in &row.parts {
+                if part["type"] == "tool_use" && row.kind == "assistant" {
+                    if let (Some(id), Some(name)) = (part["id"].as_str(), part["name"].as_str()) {
+                        tasks.call(id, name, &part["input"]);
+                    }
+                } else if part["type"] == "tool_result"
+                    && row.kind == "user"
+                    && let Some(id) = part["tool_use_id"].as_str()
+                {
+                    let result = if row.parts.len() == 1 && !row.tool_result.is_null() {
+                        &row.tool_result
+                    } else {
+                        &part["content"]
+                    };
+                    tasks.complete(
+                        id,
+                        result,
+                        part["is_error"] == true,
+                        &format!("claude:{}:{id}", row.id),
+                    );
+                }
+            }
         }
         if row.kind != "assistant" {
             continue;
@@ -180,6 +223,7 @@ pub fn read(home: &Path, session: &str) -> Result<Vec<FinalMessage>> {
             // A continuation for the same user turn supersedes the earlier model response.
             response = Response {
                 message: Some(message.into()),
+                turn: latest_turn.clone(),
                 ..Response::default()
             };
         }
@@ -189,5 +233,12 @@ pub fn read(home: &Path, session: &str) -> Result<Vec<FinalMessage>> {
         response.complete = row.stop.as_deref() == Some("end_turn");
     }
     response.finish(&mut replies);
-    Ok(replies)
+    Ok((
+        super::SessionHistory {
+            finals: replies,
+            latest_turn,
+            turns: turns.into_iter().collect(),
+        },
+        tasks.latest,
+    ))
 }

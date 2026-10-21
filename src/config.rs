@@ -17,6 +17,9 @@ pub struct BridgeConfig {
     pub codex_home: PathBuf,
     #[serde(default = "default_claude_home")]
     pub claude_home: PathBuf,
+    /// Requires an MDK connector with edit_message support.
+    #[serde(default)]
+    pub edit_responses: bool,
 }
 
 fn default_opencode() -> PathBuf {

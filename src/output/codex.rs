@@ -3,6 +3,13 @@ use anyhow::{Result, ensure};
 use std::{collections::HashSet, path::Path};
 
 pub fn read(home: &Path, session: &str) -> Result<Vec<FinalMessage>> {
+    snapshot(home, session).map(|(history, _)| history.finals)
+}
+
+pub(super) fn snapshot(
+    home: &Path,
+    session: &str,
+) -> Result<(super::SessionHistory, Option<super::tasks::TaskList>)> {
     let session = native::session_id(session)?;
     let suffix = format!("-{session}.jsonl");
     let path = native::find(
@@ -15,8 +22,35 @@ pub fn read(home: &Path, session: &str) -> Result<Vec<FinalMessage>> {
     let mut verified = false;
     let mut seen = HashSet::new();
     let mut replies = Vec::new();
+    let mut tasks = super::tasks::Tracker::default();
+    let mut latest_turn = None;
+    let mut turns = std::collections::BTreeSet::new();
+    let mut has_started_turn = false;
     native::records(&path, |row| {
+        tasks.codex_record(&row);
         let payload = &row["payload"];
+        if ((row["type"] == "event_msg"
+            && matches!(
+                payload["type"].as_str(),
+                Some("task_started" | "turn_started" | "task_complete" | "turn_complete")
+            ))
+            || row["type"] == "turn_context")
+            && let Some(turn) = payload["turn_id"].as_str()
+        {
+            let turn = format!("codex:{turn}");
+            turns.insert(turn.clone());
+            if row["type"] == "turn_context"
+                || matches!(
+                    payload["type"].as_str(),
+                    Some("task_started" | "turn_started")
+                )
+            {
+                has_started_turn = true;
+                latest_turn = Some(turn);
+            } else if !has_started_turn {
+                latest_turn = Some(turn);
+            }
+        }
         if row["type"] == "session_meta" {
             ensure!(
                 payload["id"]
@@ -50,6 +84,7 @@ pub fn read(home: &Path, session: &str) -> Result<Vec<FinalMessage>> {
         let id = format!("codex:{turn}");
         if seen.insert(id.clone()) {
             replies.push(FinalMessage {
+                turn: Some(id.clone()),
                 id,
                 text: text.into(),
             });
@@ -60,5 +95,12 @@ pub fn read(home: &Path, session: &str) -> Result<Vec<FinalMessage>> {
         verified,
         "Codex transcript has no verified session metadata"
     );
-    Ok(replies)
+    Ok((
+        super::SessionHistory {
+            finals: replies,
+            latest_turn,
+            turns: turns.into_iter().collect(),
+        },
+        tasks.latest,
+    ))
 }

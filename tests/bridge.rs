@@ -30,6 +30,7 @@ fn config(dir: &std::path::Path) -> BridgeConfig {
         opencode_bin: dir.join("opencode"),
         codex_home: dir.join("codex"),
         claude_home: dir.join("claude"),
+        edit_responses: false,
     }
 }
 fn agent() -> Agent {
@@ -68,6 +69,9 @@ async fn peer_for_agent(
                     "send_final" => {
                         json!({"type":"final_sent","message_ids_hex":["cc".repeat(32)]})
                     }
+                    "edit_message" => {
+                        json!({"type":"final_sent","message_ids_hex":["dd".repeat(32)]})
+                    }
                     _ => panic!("unexpected request"),
                 }
             } else {
@@ -95,6 +99,1136 @@ fn export_script(path: &std::path::Path, text: &str, id: &str) {
     let data = json!({"messages":[{"info":{"id":id,"role":"assistant","time":{"completed":1},"finish":"stop"},"parts":[{"type":"text","text":text}]}]});
     std::fs::write(path, format!("#!/bin/sh\nprintf '%s' '{}'\n", data)).unwrap();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+fn editable_config(dir: &std::path::Path) -> BridgeConfig {
+    serde_json::from_value(json!({
+        "phone_npub":phone_npub(), "herdr_socket":dir.join("herdr.sock"),
+        "wn_agent_socket":dir.join("wn.sock"), "account_id_hex":"aa".repeat(32),
+        "state_path":dir.join("state.json"), "opencode_bin":dir.join("opencode"),
+        "codex_home":dir.join("codex"), "claude_home":dir.join("claude"),
+        "edit_responses":true
+    }))
+    .unwrap()
+}
+
+async fn forwarding_command(config: &BridgeConfig, mode: &str) -> std::process::Output {
+    let path = config.state_path.with_file_name("test-config.toml");
+    std::fs::write(&path,format!("phone_npub = {:?}\naccount_id_hex = {:?}\nherdr_socket = {:?}\nwn_agent_socket = {:?}\nstate_path = {:?}\nopencode_bin = {:?}\ncodex_home = {:?}\nclaude_home = {:?}\nedit_responses = {}\n",config.phone_npub,config.account_id_hex,config.herdr_socket,config.wn_agent_socket,config.state_path,config.opencode_bin,config.codex_home,config.claude_home,config.edit_responses)).unwrap();
+    tokio::process::Command::new(env!("CARGO_BIN_EXE_herdr-white-noise-bridge"))
+        .args(["--config", path.to_str().unwrap(), "forwarding", mode])
+        .output()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn desk_mode_discards_updates_and_away_does_not_replay_them() {
+    for edits in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = config(dir.path());
+        config.edit_responses = edits;
+        export_script(&config.opencode_bin, "Old reply", "old");
+        let calls = Arc::new(Mutex::new(vec![]));
+        let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+        let mut bridge = Bridge::open(config.clone()).unwrap();
+        bridge.reconcile(vec![agent()]).await.unwrap();
+        bridge.flush().await.unwrap();
+        calls.lock().unwrap().clear();
+        let result = forwarding_command(&config, "desk").await;
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        export_script(&config.opencode_bin, "Muted reply", "muted");
+        let mut done = agent();
+        done.state_change_seq = 2;
+        bridge.reconcile(vec![done.clone()]).await.unwrap();
+        bridge.flush().await.unwrap();
+        assert!(calls.lock().unwrap().is_empty());
+        assert!(
+            bridge.state.mappings[&agent().key()]
+                .final_ids
+                .contains(&"muted".into())
+        );
+        assert!(bridge.state.outbox.is_empty());
+        assert!(forwarding_command(&config, "away").await.status.success());
+        let mut bridge = Bridge::open(config.clone()).unwrap();
+        bridge.reconcile(vec![done]).await.unwrap();
+        bridge.flush().await.unwrap();
+        assert!(calls.lock().unwrap().is_empty(), "No backlog on resume");
+        let mut working = agent();
+        working.agent_status = "working".into();
+        working.state_change_seq = 3;
+        bridge.reconcile(vec![working]).await.unwrap();
+        bridge.flush().await.unwrap();
+        export_script(&config.opencode_bin, "Future reply", "future");
+        let mut done = agent();
+        done.state_change_seq = 4;
+        bridge.reconcile(vec![done]).await.unwrap();
+        bridge.flush().await.unwrap();
+        assert!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|request| request["text"] == "Future reply")
+        );
+        assert!(
+            !calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|request| request["text"] == "Muted reply")
+        );
+        mdk.abort();
+    }
+}
+
+#[tokio::test]
+async fn only_a_new_authorised_phone_message_wakes_forwarding_for_all_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = editable_config(dir.path());
+    export_script(&config.opencode_bin, "Old reply", "old");
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    let mut other = agent();
+    other.agent_session.as_mut().unwrap().value = "ses_2".into();
+    other.pane_id = "w1:p2".into();
+    other.terminal_id = "term2".into();
+    for (observed, group) in [(agent(), "bb".repeat(16)), (other.clone(), "dd".repeat(16))] {
+        bridge.state.mappings.insert(
+            observed.key(),
+            Mapping {
+                group_id_hex: Some(group),
+                active: true,
+                agent_record: Some(observed),
+                last_agent_status: "idle".into(),
+                last_state_change_seq: 1,
+                final_ids: vec!["old".into()],
+                output_initialised: true,
+                ..Mapping::default()
+            },
+        );
+    }
+    bridge
+        .state
+        .mappings
+        .get_mut(&agent().key())
+        .unwrap()
+        .seen_messages
+        .push("already".into());
+    bridge.save().unwrap();
+    assert!(forwarding_command(&config, "desk").await.status.success());
+    bridge
+        .reconcile(vec![agent(), other.clone()])
+        .await
+        .unwrap();
+    bridge.flush().await.unwrap();
+    bridge
+        .inbound(&inbound(&"ff".repeat(32), "foreign"))
+        .await
+        .unwrap();
+    let mut orphan = inbound(HEX, "orphan");
+    orphan["group_id_hex"] = json!("ee".repeat(16));
+    bridge.inbound(&orphan).await.unwrap();
+    bridge.inbound(&inbound(HEX, "already")).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(&bridge.state).unwrap()["forwarding_enabled"],
+        false
+    );
+    let mut wake = inbound(HEX, "wake");
+    wake["message"]["text"] = json!("/status");
+    bridge.inbound(&wake).await.unwrap();
+    bridge.flush().await.unwrap();
+    assert_eq!(
+        serde_json::to_value(&bridge.state).unwrap()["forwarding_enabled"],
+        true
+    );
+    let mut restarted = Bridge::open(config.clone()).unwrap();
+    assert_eq!(
+        serde_json::to_value(&restarted.state).unwrap()["forwarding_enabled"],
+        true
+    );
+    other.agent_status = "working".into();
+    other.state_change_seq = 2;
+    restarted.reconcile(vec![agent(), other]).await.unwrap();
+    restarted.flush().await.unwrap();
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request["group_id_hex"] == "dd".repeat(16)
+                && request["text"] == "State: working")
+    );
+    assert!(forwarding_command(&config, "desk").await.status.success());
+    restarted.reconcile(vec![agent()]).await.unwrap();
+    restarted.inbound(&wake).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(&restarted.state).unwrap()["forwarding_enabled"],
+        false,
+        "History replay must not undo a later Desk choice"
+    );
+    mdk.abort();
+}
+
+#[tokio::test]
+async fn forwarding_controls_work_while_the_worker_holds_its_state_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path());
+    let bridge = Bridge::open(config.clone()).unwrap();
+    let _worker = herdr_white_noise_bridge::state::lock(&config.state_path).unwrap();
+    let original = std::fs::read(&config.state_path).unwrap();
+    let desk = forwarding_command(&config, "desk").await;
+    assert!(
+        desk.status.success(),
+        "{}",
+        String::from_utf8_lossy(&desk.stderr)
+    );
+    assert!(String::from_utf8_lossy(&desk.stdout).contains("At desk"));
+    assert!(forwarding_command(&config, "status").await.status.success());
+    let away = forwarding_command(&config, "toggle").await;
+    assert!(away.status.success());
+    assert!(String::from_utf8_lossy(&away.stdout).contains("Away"));
+    let control = config.state_path.with_extension("forwarding.json");
+    assert_eq!(
+        std::fs::metadata(&control).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let current = std::fs::read(&control).unwrap();
+    assert!(forwarding_command(&config, "away").await.status.success());
+    assert_eq!(
+        std::fs::read(&control).unwrap(),
+        current,
+        "Setting the current mode must not create another reset"
+    );
+    assert_eq!(
+        std::fs::read(&config.state_path).unwrap(),
+        original,
+        "Only the worker writes routing state"
+    );
+    assert_eq!(bridge.state.mappings.len(), 0);
+}
+
+#[tokio::test]
+async fn a_deferred_phone_wake_does_not_undo_a_later_desk_selection() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path());
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge.state.mappings.insert(
+        agent().key(),
+        Mapping {
+            group_id_hex: Some("bb".repeat(16)),
+            active: true,
+            agent_record: Some(agent()),
+            ..Mapping::default()
+        },
+    );
+    assert!(forwarding_command(&config, "desk").await.status.success());
+    let mut wake = inbound(HEX, "deferred");
+    wake["message"]["text"] = json!("/status");
+    assert!(bridge.inbound(&wake).await.is_err());
+    assert!(
+        String::from_utf8_lossy(&forwarding_command(&config, "status").await.stdout)
+            .contains("Away")
+    );
+    assert!(
+        bridge.state.mappings[&agent().key()]
+            .seen_messages
+            .is_empty(),
+        "The prompt must still be recoverable"
+    );
+    assert!(forwarding_command(&config, "desk").await.status.success());
+    assert!(bridge.inbound(&wake).await.is_err());
+    assert!(
+        String::from_utf8_lossy(&forwarding_command(&config, "status").await.stdout)
+            .contains("At desk"),
+        "Retrying one received message must not apply its wake twice"
+    );
+}
+
+#[tokio::test]
+async fn selecting_desk_during_a_transcript_read_prevents_a_new_invitation() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path());
+    let ready = dir.path().join("ready");
+    let release = dir.path().join("release");
+    std::fs::write(&config.opencode_bin,format!("#!/bin/sh\ntouch '{}'\nwhile [ ! -f '{}' ]; do sleep 0.01; done\nprintf '%s' '{{\"messages\":[]}}'\n",ready.display(),release.display())).unwrap();
+    std::fs::set_permissions(&config.opencode_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    let reconcile = tokio::spawn(async move {
+        bridge.reconcile(vec![agent()]).await.unwrap();
+        bridge
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !ready.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(forwarding_command(&config, "desk").await.status.success());
+    std::fs::write(release, "").unwrap();
+    let bridge = reconcile.await.unwrap();
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "Do not submit group_create after the Desk control was written"
+    );
+    assert!(bridge.state.mappings[&agent().key()].group_id_hex.is_none());
+    mdk.abort();
+}
+
+#[tokio::test]
+async fn a_late_record_from_a_muted_turn_is_not_forwarded_after_resume() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = editable_config(dir.path());
+    let write = |final_reply: Option<(&str, &str)>, turn: &str| {
+        let mut messages = vec![json!({"info":{"id":turn,"role":"user"},"parts":[]})];
+        if let Some((id, text)) = final_reply {
+            messages.push(json!({"info":{"id":id,"parentID":turn,"role":"assistant","time":{"completed":1},"finish":"stop"},"parts":[{"type":"text","text":text}]}));
+        }
+        std::fs::write(
+            &config.opencode_bin,
+            format!(
+                "#!/bin/sh\nprintf '%s' '{}'\n",
+                json!({"messages":messages})
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&config.opencode_bin, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+    };
+    write(None, "muted-user-turn");
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge.state.mappings.insert(
+        agent().key(),
+        Mapping {
+            group_id_hex: Some("bb".repeat(16)),
+            active: true,
+            agent_record: Some(agent()),
+            last_agent_status: "idle".into(),
+            last_state_change_seq: 1,
+            ..Mapping::default()
+        },
+    );
+    assert!(forwarding_command(&config, "desk").await.status.success());
+    bridge.reconcile(vec![agent()]).await.unwrap();
+    assert!(forwarding_command(&config, "away").await.status.success());
+    bridge.reconcile(vec![agent()]).await.unwrap();
+    write(Some(("late", "Late muted reply")), "muted-user-turn");
+    let mut idle = agent();
+    idle.state_change_seq = 2;
+    bridge.reconcile(vec![idle.clone()]).await.unwrap();
+    bridge.flush().await.unwrap();
+    assert!(
+        !calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request["text"] == "Late muted reply")
+    );
+    write(Some(("new", "New away reply")), "new-user-turn");
+    idle.state_change_seq = 3;
+    bridge.reconcile(vec![idle]).await.unwrap();
+    bridge.flush().await.unwrap();
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request["text"] == "New away reply")
+    );
+    mdk.abort();
+}
+
+#[tokio::test]
+async fn global_phone_wake_checkpoints_other_sessions_before_returning() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = editable_config(dir.path());
+    export_script(&config.opencode_bin, "Old reply", "old");
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    let mut other = agent();
+    other.agent_session.as_mut().unwrap().value = "ses_other".into();
+    for (observed, group) in [(agent(), "bb".repeat(16)), (other.clone(), "dd".repeat(16))] {
+        bridge.state.mappings.insert(
+            observed.key(),
+            Mapping {
+                group_id_hex: Some(group),
+                active: true,
+                agent_record: Some(observed),
+                last_agent_status: "idle".into(),
+                last_state_change_seq: 1,
+                final_ids: vec!["old".into()],
+                ..Mapping::default()
+            },
+        );
+    }
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    assert!(forwarding_command(&config, "desk").await.status.success());
+    bridge
+        .reconcile(vec![agent(), other.clone()])
+        .await
+        .unwrap();
+    let mut wake = inbound(HEX, "wake");
+    wake["message"]["text"] = json!("/status");
+    bridge.inbound(&wake).await.unwrap();
+    export_script(
+        &config.opencode_bin,
+        "Reply completed after wake",
+        "after-wake",
+    );
+    other.state_change_seq = 2;
+    bridge.reconcile(vec![agent(), other]).await.unwrap();
+    bridge.flush().await.unwrap();
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request["group_id_hex"] == "dd".repeat(16)
+                && request["text"] == "Reply completed after wake")
+    );
+    mdk.abort();
+}
+
+#[tokio::test]
+async fn a_superseded_muted_turn_stays_muted_while_the_current_turn_can_reply() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = editable_config(dir.path());
+    let user = |id: &str| json!({"info":{"id":id,"role":"user"},"parts":[]});
+    let reply = |id: &str, parent: &str, text: &str| json!({"info":{"id":id,"parentID":parent,"role":"assistant","time":{"completed":1},"finish":"stop"},"parts":[{"type":"text","text":text}]});
+    let write = |messages: Vec<Value>| {
+        std::fs::write(
+            &config.opencode_bin,
+            format!(
+                "#!/bin/sh\nprintf '%s' '{}'\n",
+                json!({"messages":messages})
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&config.opencode_bin, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+    };
+    write(vec![user("turn-a"), user("turn-b")]);
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    let mut working = agent();
+    working.agent_status = "working".into();
+    bridge.state.mappings.insert(
+        agent().key(),
+        Mapping {
+            group_id_hex: Some("bb".repeat(16)),
+            active: true,
+            agent_record: Some(working.clone()),
+            last_agent_status: "working".into(),
+            ..Mapping::default()
+        },
+    );
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    assert!(forwarding_command(&config, "desk").await.status.success());
+    bridge.reconcile(vec![working.clone()]).await.unwrap();
+    assert!(forwarding_command(&config, "away").await.status.success());
+    bridge.reconcile(vec![working]).await.unwrap();
+    bridge.flush().await.unwrap();
+    write(vec![
+        user("turn-a"),
+        reply("late-a", "turn-a", "Late muted A"),
+        user("turn-b"),
+    ]);
+    let mut idle = agent();
+    idle.state_change_seq = 2;
+    bridge.reconcile(vec![idle.clone()]).await.unwrap();
+    bridge.flush().await.unwrap();
+    assert!(
+        !calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request["text"] == "Late muted A")
+    );
+    write(vec![
+        user("turn-a"),
+        reply("late-a", "turn-a", "Late muted A"),
+        user("turn-b"),
+        reply("final-b", "turn-b", "Current away B"),
+    ]);
+    idle.state_change_seq = 3;
+    bridge.reconcile(vec![idle]).await.unwrap();
+    bridge.flush().await.unwrap();
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request["text"] == "Current away B")
+    );
+    mdk.abort();
+}
+
+#[tokio::test]
+async fn legacy_state_reports_away_requested_until_the_worker_checkpoints() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path());
+    let mut legacy = BridgeState::default();
+    legacy.mappings.insert(agent().key(), Mapping::default());
+    legacy.save(&config.state_path).unwrap();
+    assert!(forwarding_command(&config, "desk").await.status.success());
+    assert!(forwarding_command(&config, "away").await.status.success());
+    let status = forwarding_command(&config, "status").await;
+    assert!(String::from_utf8_lossy(&status.stdout).contains("Away requested"));
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_herdr-white-noise-bridge"))
+        .args([
+            "--config",
+            config
+                .state_path
+                .with_file_name("test-config.toml")
+                .to_str()
+                .unwrap(),
+            "status",
+        ])
+        .output()
+        .await
+        .unwrap();
+    assert!(output.status.success());
+    let row: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(row["forwarding_enabled"], false);
+    assert_eq!(row["forwarding_resume_pending"], true);
+}
+
+#[tokio::test]
+async fn global_resume_reads_independent_session_checkpoints_concurrently() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path());
+    let ready1 = dir.path().join("ses_1");
+    let ready2 = dir.path().join("ses_2");
+    let release = dir.path().join("release");
+    std::fs::write(&config.opencode_bin,format!("#!/bin/sh\ntouch '{}/'$3\nwhile [ ! -f '{}' ]; do sleep 0.01; done\nprintf '%s' '{{\"messages\":[]}}'\n",dir.path().display(),release.display())).unwrap();
+    std::fs::set_permissions(&config.opencode_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    let mut other = agent();
+    other.agent_session.as_mut().unwrap().value = "ses_2".into();
+    for observed in [agent(), other.clone()] {
+        bridge.state.mappings.insert(
+            observed.key(),
+            Mapping {
+                group_id_hex: Some("bb".repeat(16)),
+                active: true,
+                output_initialised: true,
+                agent_record: Some(observed),
+                last_agent_status: "idle".into(),
+                last_state_change_seq: 1,
+                ..Mapping::default()
+            },
+        );
+    }
+    assert!(forwarding_command(&config, "desk").await.status.success());
+    assert!(forwarding_command(&config, "away").await.status.success());
+    let reconcile = tokio::spawn(async move {
+        bridge.reconcile(vec![agent(), other]).await.unwrap();
+        bridge
+    });
+    let concurrent = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !ready1.exists() || !ready2.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    std::fs::write(release, "").unwrap();
+    let bridge = reconcile.await.unwrap();
+    assert!(
+        concurrent.is_ok(),
+        "One slow export must not serialize every session checkpoint"
+    );
+    assert!(bridge.state.forwarding_enabled);
+}
+
+#[tokio::test]
+async fn progress_is_edited_but_the_final_is_a_separate_message_across_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = editable_config(dir.path());
+    export_script(&config.opencode_bin, "old answer", "old");
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let herdr = peer(&config.herdr_socket, false, calls.clone()).await;
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge.reconcile(vec![agent()]).await.unwrap();
+    bridge.flush().await.unwrap();
+    calls.lock().unwrap().clear();
+    bridge.inbound(&inbound(HEX, "first-prompt")).await.unwrap();
+    bridge.flush().await.unwrap();
+    let export = json!({"messages":[
+        {"info":{"id":"user","role":"user"},"parts":[]},
+        {"info":{"id":"progress","role":"assistant"},"parts":[
+            {"type":"text","text":"Private reasoning must stay local"},
+            {"type":"tool","id":"todo-1","tool":"todowrite","state":{"status":"completed","input":{"todos":[
+                {"content":"Inspect code","status":"completed","priority":"high"},
+                {"content":"Run checks","status":"in_progress","priority":"high"}
+            ]}}}
+        ]}
+    ]});
+    std::fs::write(
+        &config.opencode_bin,
+        format!("#!/bin/sh\nprintf '%s' '{}'\n", export),
+    )
+    .unwrap();
+    let mut working = agent();
+    working.agent_status = "working".into();
+    working.state_change_seq = 2;
+    bridge.reconcile(vec![working]).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+    bridge.flush().await.unwrap();
+    drop(bridge);
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    export_script(&config.opencode_bin, "The final answer", "final");
+    let mut done = agent();
+    done.agent_status = "done".into();
+    done.state_change_seq = 3;
+    bridge.reconcile(vec![done.clone()]).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+    bridge.flush().await.unwrap();
+    bridge.reconcile(vec![done]).await.unwrap();
+    bridge.flush().await.unwrap();
+    let requests = calls.lock().unwrap();
+    let sends: Vec<_> = requests
+        .iter()
+        .filter(|r| r["type"] == "send_final")
+        .collect();
+    assert_eq!(
+        sends.len(),
+        2,
+        "One progress message and one immutable final reply"
+    );
+    assert_eq!(sends[0]["text"], "State: working");
+    assert_eq!(sends[1]["text"], "The final answer");
+    assert_ne!(sends[0]["idempotency_key"], sends[1]["idempotency_key"]);
+    let edits: Vec<_> = requests
+        .iter()
+        .filter(|r| r["type"] == "edit_message")
+        .collect();
+    assert_eq!(edits.len(), 2);
+    assert!(
+        edits[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("✓ Inspect code")
+    );
+    assert!(edits[0]["text"].as_str().unwrap().contains("▶ Run checks"));
+    assert!(
+        edits[1]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("State: done")
+    );
+    assert!(
+        !edits
+            .iter()
+            .any(|request| request["text"] == "The final answer")
+    );
+    assert!(
+        edits
+            .iter()
+            .all(|r| r["target_message_id_hex"] == "cc".repeat(32))
+    );
+    assert!(!requests.iter().any(|r| {
+        r["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("Private reasoning"))
+    }));
+    assert!(bridge.state.outbox.is_empty());
+    mdk.abort();
+    herdr.abort();
+}
+
+#[tokio::test]
+async fn an_uncertain_progress_send_does_not_delay_or_duplicate_the_final() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = editable_config(dir.path());
+    export_script(&config.opencode_bin, "old", "old");
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge.state.mappings.insert(
+        agent().key(),
+        Mapping {
+            group_id_hex: Some("bb".repeat(16)),
+            active: true,
+            last_agent_status: "idle".into(),
+            final_ids: vec!["old".into()],
+            agent_record: Some(agent()),
+            ..Mapping::default()
+        },
+    );
+    let mut working = agent();
+    working.agent_status = "working".into();
+    working.state_change_seq = 2;
+    bridge.reconcile(vec![working]).await.unwrap();
+    let listener = UnixListener::bind(&config.wn_agent_socket).unwrap();
+    let first = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        read_line(&mut tokio::io::BufReader::new(stream))
+            .await
+            .unwrap()
+    });
+    assert!(bridge.flush().await.is_err());
+    let original = first.await.unwrap();
+    std::fs::remove_file(&config.wn_agent_socket).unwrap();
+    export_script(&config.opencode_bin, "Latest final", "new");
+    bridge.reconcile(vec![agent()]).await.unwrap();
+    let mut restarted = Bridge::open(config.clone()).unwrap();
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    restarted.flush().await.unwrap();
+    restarted.flush().await.unwrap();
+    assert_eq!(
+        calls.lock().unwrap().len(),
+        1,
+        "The final is independent of the uncertain progress send"
+    );
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls[0]["text"], "Latest final");
+    assert_ne!(calls[0]["idempotency_key"], original["idempotency_key"]);
+    assert_eq!(calls[0]["type"], "send_final");
+    assert!(restarted.state.outbox.is_empty());
+    mdk.abort();
+}
+
+#[tokio::test]
+async fn each_new_prompt_gets_a_new_response_and_progress_is_not_repeated() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = editable_config(dir.path());
+    export_script(&config.opencode_bin, "old", "old");
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let herdr = peer(&config.herdr_socket, false, calls.clone()).await;
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge.reconcile(vec![agent()]).await.unwrap();
+    bridge.flush().await.unwrap();
+    calls.lock().unwrap().clear();
+    bridge.inbound(&inbound(HEX, "first")).await.unwrap();
+    bridge.flush().await.unwrap();
+    bridge.flush().await.unwrap();
+    export_script(&config.opencode_bin, "First answer", "first-final");
+    let mut idle = agent();
+    idle.state_change_seq = 2;
+    bridge.reconcile(vec![idle.clone()]).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+    bridge.flush().await.unwrap();
+    bridge.inbound(&inbound(HEX, "second")).await.unwrap();
+    bridge.flush().await.unwrap();
+    let requests = calls.lock().unwrap();
+    let sends: Vec<_> = requests
+        .iter()
+        .filter(|r| r["type"] == "send_final")
+        .collect();
+    assert_eq!(sends.len(), 3);
+    assert_ne!(sends[0]["idempotency_key"], sends[2]["idempotency_key"]);
+    assert_eq!(sends[1]["text"], "First answer");
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|r| r["type"] == "edit_message")
+            .count(),
+        1
+    );
+    mdk.abort();
+    herdr.abort();
+}
+
+#[tokio::test]
+async fn long_final_replies_keep_all_text_without_waiting_for_progress_edits() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = editable_config(dir.path());
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    export_script(&config.opencode_bin, "old", "old");
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    let key = agent().key();
+    let group = "bb".repeat(16);
+    bridge.state.mappings.insert(
+        key.clone(),
+        Mapping {
+            group_id_hex: Some(group.clone()),
+            final_ids: vec!["old".into()],
+            agent_record: Some(agent()),
+            ..Mapping::default()
+        },
+    );
+    bridge.state.begin_response(&key, &group);
+    bridge.flush().await.unwrap();
+    let text = "🙂".repeat(10000);
+    export_script(&config.opencode_bin, &text, "long-final");
+    bridge.reconcile(vec![agent()]).await.unwrap();
+    bridge.flush().await.unwrap();
+    assert_eq!(
+        calls.lock().unwrap().len(),
+        3,
+        "Both final parts precede the throttled terminal progress edit"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+    bridge.flush().await.unwrap();
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls[1]["type"], "send_final");
+    assert_eq!(calls[2]["type"], "send_final");
+    assert_eq!(calls[3]["type"], "edit_message");
+    assert_eq!(calls[3]["text"], "State: done");
+    assert_eq!(
+        format!(
+            "{}{}",
+            calls[1]["text"].as_str().unwrap(),
+            calls[2]["text"].as_str().unwrap()
+        ),
+        text
+    );
+    mdk.abort();
+}
+
+#[tokio::test]
+async fn late_final_is_resolved_before_opening_the_next_response() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = editable_config(dir.path());
+    export_script(&config.opencode_bin, "old", "old");
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let herdr = peer(&config.herdr_socket, false, calls.clone()).await;
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge.reconcile(vec![agent()]).await.unwrap();
+    bridge.flush().await.unwrap();
+    bridge.inbound(&inbound(HEX, "first")).await.unwrap();
+    bridge.flush().await.unwrap();
+    let first = bridge.state.mappings[&agent().key()]
+        .response_id
+        .clone()
+        .unwrap();
+    let mut idle = agent();
+    idle.state_change_seq = 2;
+    bridge.reconcile(vec![idle]).await.unwrap();
+    assert!(
+        bridge.state.mappings[&agent().key()].pending_prompt,
+        "Keep the first response associated with its late final"
+    );
+    export_script(&config.opencode_bin, "First final", "first-final");
+    bridge.inbound(&inbound(HEX, "second")).await.unwrap();
+    let second = bridge.state.mappings[&agent().key()]
+        .response_id
+        .clone()
+        .unwrap();
+    assert_ne!(first, second);
+    assert_eq!(
+        bridge
+            .state
+            .outbox
+            .iter()
+            .find(|m| m.id == first)
+            .unwrap()
+            .text,
+        "State: done"
+    );
+    assert!(
+        bridge
+            .state
+            .outbox
+            .iter()
+            .any(|item| item.response.is_none() && item.text == "First final")
+    );
+    assert_eq!(
+        bridge
+            .state
+            .outbox
+            .iter()
+            .find(|m| m.id == second)
+            .unwrap()
+            .text,
+        "State: working"
+    );
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r["method"] == "agent.prompt")
+            .count(),
+        2
+    );
+    mdk.abort();
+    herdr.abort();
+}
+
+#[tokio::test]
+async fn an_ended_session_closes_an_unfinished_response_before_restoration() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = editable_config(dir.path());
+    export_script(&config.opencode_bin, "old", "old");
+    let mut bridge = Bridge::open(config).unwrap();
+    let key = agent().key();
+    let group = "bb".repeat(16);
+    bridge.state.mappings.insert(
+        key.clone(),
+        Mapping {
+            group_id_hex: Some(group.clone()),
+            active: true,
+            agent_record: Some(agent()),
+            final_ids: vec!["old".into()],
+            ..Mapping::default()
+        },
+    );
+    bridge.state.begin_response(&key, &group);
+    let first = bridge.state.mappings[&key].response_id.clone().unwrap();
+    bridge.reconcile(vec![]).await.unwrap();
+    assert!(bridge.state.mappings[&key].response_id.is_none());
+    let closed = bridge.state.outbox.iter().find(|m| m.id == first).unwrap();
+    assert!(closed.response.as_ref().unwrap().finished);
+    assert!(closed.text.contains("ended"));
+    let mut working = agent();
+    working.agent_status = "working".into();
+    bridge.reconcile(vec![working]).await.unwrap();
+    assert_ne!(
+        bridge.state.mappings[&key].response_id.as_ref(),
+        Some(&first)
+    );
+}
+
+#[tokio::test]
+async fn edit_cooldown_also_starts_when_a_slow_request_completes() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = editable_config(dir.path());
+    let calls = Arc::new(Mutex::new(vec![]));
+    let captured = calls.clone();
+    let listener = UnixListener::bind(&config.wn_agent_socket).unwrap();
+    let server = tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = tokio::io::BufReader::new(stream);
+            let request = read_line(&mut reader).await.unwrap();
+            captured.lock().unwrap().push(request.clone());
+            tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+            let response = json!({"id":request["id"],"marmot_agent_control":"marmot.agent-control.v2","type":"final_sent","message_ids_hex":["dd".repeat(32)]});
+            reader
+                .get_mut()
+                .write_all((response.to_string() + "\n").as_bytes())
+                .await
+                .unwrap();
+        }
+    });
+    let mut bridge = Bridge::open(config).unwrap();
+    let key = agent().key();
+    let group = "bb".repeat(16);
+    bridge.state.mappings.insert(
+        key.clone(),
+        Mapping {
+            group_id_hex: Some(group.clone()),
+            ..Mapping::default()
+        },
+    );
+    bridge.state.begin_response(&key, &group);
+    let item = bridge.state.outbox.last_mut().unwrap();
+    item.response.as_mut().unwrap().target = Some("cc".repeat(32));
+    item.response.as_mut().unwrap().sent_text = Some("Earlier text".into());
+    bridge.flush().await.unwrap();
+    bridge.state.complete_progress(&key);
+    bridge.flush().await.unwrap();
+    assert_eq!(
+        calls.lock().unwrap().len(),
+        1,
+        "Do not race a final edit against the late-created progress edit"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn clear_prompt_releases_an_awaiting_final_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = editable_config(dir.path());
+    export_script(&config.opencode_bin, "old", "old");
+    let key = agent().key();
+    let group = "bb".repeat(16);
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge.state.mappings.insert(
+        key.clone(),
+        Mapping {
+            group_id_hex: Some(group.clone()),
+            agent_record: Some(agent()),
+            active: true,
+            pending_prompt: true,
+            completion_pending: true,
+            last_agent_status: "idle".into(),
+            last_state_change_seq: 1,
+            final_ids: vec!["old".into()],
+            ..Mapping::default()
+        },
+    );
+    bridge.state.begin_response(&key, &group);
+    bridge.save().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path,format!("phone_npub = {:?}\naccount_id_hex = {:?}\nherdr_socket = {:?}\nwn_agent_socket = {:?}\nstate_path = {:?}\nopencode_bin = {:?}\ncodex_home = {:?}\nclaude_home = {:?}\nedit_responses = true\n",config.phone_npub,config.account_id_hex,config.herdr_socket,config.wn_agent_socket,config.state_path,config.opencode_bin,config.codex_home,config.claude_home)).unwrap();
+    drop(bridge);
+    let status = tokio::process::Command::new(env!("CARGO_BIN_EXE_herdr-white-noise-bridge"))
+        .args(["--config", path.to_str().unwrap(), "clear-prompt", &key])
+        .status()
+        .await
+        .unwrap();
+    assert!(status.success());
+    let mut restarted = Bridge::open(config).unwrap();
+    restarted.reconcile(vec![agent()]).await.unwrap();
+    assert!(!restarted.state.mappings[&key].pending_prompt);
+    assert!(!restarted.state.mappings[&key].completion_pending);
+    assert!(restarted.state.mappings[&key].response_id.is_none());
+    assert!(
+        restarted
+            .state
+            .outbox
+            .iter()
+            .any(|item| item.text.contains("cancelled"))
+    );
+}
+
+#[tokio::test]
+async fn a_failed_progress_edit_does_not_block_the_standalone_final() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = editable_config(dir.path());
+    export_script(&config.opencode_bin, "Final reply", "final");
+    let calls = Arc::new(Mutex::new(vec![]));
+    let captured = calls.clone();
+    let listener = UnixListener::bind(&config.wn_agent_socket).unwrap();
+    let server = tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = tokio::io::BufReader::new(stream);
+            let request = read_line(&mut reader).await.unwrap();
+            captured.lock().unwrap().push(request.clone());
+            let mut response = if request["type"] == "edit_message" {
+                json!({"type":"error","code":"app_error"})
+            } else {
+                json!({"type":"final_sent","message_ids_hex":["ee".repeat(32)]})
+            };
+            response["id"] = request["id"].clone();
+            response["marmot_agent_control"] = json!("marmot.agent-control.v2");
+            reader
+                .get_mut()
+                .write_all((response.to_string() + "\n").as_bytes())
+                .await
+                .unwrap();
+        }
+    });
+    let mut bridge = Bridge::open(config).unwrap();
+    let key = agent().key();
+    let group = "bb".repeat(16);
+    bridge.state.mappings.insert(
+        key.clone(),
+        Mapping {
+            group_id_hex: Some(group.clone()),
+            agent_record: Some(agent()),
+            active: true,
+            ..Mapping::default()
+        },
+    );
+    bridge.state.begin_response(&key, &group);
+    let progress = bridge.state.outbox.last_mut().unwrap();
+    progress.response.as_mut().unwrap().target = Some("cc".repeat(32));
+    progress.response.as_mut().unwrap().sent_text = Some("State: working".into());
+    bridge.reconcile(vec![agent()]).await.unwrap();
+    bridge.flush().await.unwrap();
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0]["type"], "send_final");
+    assert_eq!(calls[0]["text"], "Final reply");
+    assert_eq!(calls[1]["type"], "edit_message");
+    assert_eq!(calls[1]["text"], "State: done");
+    assert!(bridge.state.outbox.is_empty());
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_standalone_final_retries_with_its_own_stable_id_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = editable_config(dir.path());
+    export_script(&config.opencode_bin, "Final reply", "final");
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    let key = agent().key();
+    bridge.state.mappings.insert(
+        key,
+        Mapping {
+            group_id_hex: Some("bb".repeat(16)),
+            agent_record: Some(agent()),
+            active: true,
+            ..Mapping::default()
+        },
+    );
+    bridge.reconcile(vec![agent()]).await.unwrap();
+    let listener = UnixListener::bind(&config.wn_agent_socket).unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        read_line(&mut tokio::io::BufReader::new(stream))
+            .await
+            .unwrap()
+    });
+    assert!(bridge.flush().await.is_err());
+    let original = server.await.unwrap();
+    std::fs::remove_file(&config.wn_agent_socket).unwrap();
+    let calls = Arc::new(Mutex::new(vec![]));
+    let server = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let mut restarted = Bridge::open(config).unwrap();
+    restarted.reconcile(vec![agent()]).await.unwrap();
+    restarted.flush().await.unwrap();
+    restarted.flush().await.unwrap();
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["type"], "send_final");
+    assert_eq!(calls[0]["text"], "Final reply");
+    assert_eq!(calls[0]["idempotency_key"], original["idempotency_key"]);
+    assert!(restarted.state.outbox.is_empty());
+    server.abort();
+}
+
+#[tokio::test]
+async fn detached_cancelled_progress_cannot_post_working_after_a_final() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = editable_config(dir.path());
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    let key = agent().key();
+    let group = "bb".repeat(16);
+    bridge.state.mappings.insert(
+        key.clone(),
+        Mapping {
+            group_id_hex: Some(group.clone()),
+            ..Mapping::default()
+        },
+    );
+    bridge.state.begin_response(&key, &group);
+    // Persisted after an initial send whose response was lost.
+    bridge
+        .state
+        .outbox
+        .last_mut()
+        .unwrap()
+        .response
+        .as_mut()
+        .unwrap()
+        .initial_text = Some("State: working".into());
+    bridge
+        .state
+        .update_response(&key, &group, "Response cancelled locally.", true);
+    bridge.state.enqueue(&group, "The next final answer");
+    bridge.save().unwrap();
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let mut restarted = Bridge::open(config).unwrap();
+    restarted.flush().await.unwrap();
+    let calls = calls.lock().unwrap();
+    assert_eq!(
+        calls.len(),
+        1,
+        "Do not retry detached progress after the final"
+    );
+    assert_eq!(calls[0]["type"], "send_final");
+    assert_eq!(calls[0]["text"], "The next final answer");
+    assert!(restarted.state.outbox.is_empty());
+    mdk.abort();
 }
 
 #[tokio::test]

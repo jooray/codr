@@ -1,6 +1,6 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand};
-use herdr_white_noise_bridge::{BridgeConfig, BridgeState, bridge::Bridge, state};
+use clap::{Parser, Subcommand, ValueEnum};
+use herdr_white_noise_bridge::{BridgeConfig, BridgeState, bridge::Bridge, forwarding, state};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -18,6 +18,11 @@ enum Action {
     Run,
     /// Print public routing state without message contents.
     Status,
+    /// Control global White Noise forwarding without stopping the worker.
+    Forwarding {
+        #[arg(value_enum, default_value = "status")]
+        mode: ForwardingMode,
+    },
     /// Resolve an uncertain creation. Inspect MDK groups before using --retry.
     ResolveCreate {
         key: String,
@@ -38,6 +43,14 @@ enum Action {
     RenameGroups,
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+enum ForwardingMode {
+    Status,
+    Desk,
+    Away,
+    Toggle,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -50,12 +63,40 @@ async fn main() -> Result<()> {
         root.join("herdr-white-noise-bridge/config.toml")
     });
     let config = BridgeConfig::load(&config_path)?;
+    if let Some(Action::Forwarding { mode }) = args.command {
+        let control = match mode {
+            ForwardingMode::Status => forwarding::load(&config.state_path)?,
+            ForwardingMode::Desk => forwarding::set(&config.state_path, false)?,
+            ForwardingMode::Away => forwarding::set(&config.state_path, true)?,
+            ForwardingMode::Toggle => forwarding::toggle(&config.state_path)?,
+        };
+        let state = BridgeState::load(&config.state_path)?;
+        let resume_pending = control.enabled
+            && (state.forwarding_resume_pending
+                || state.forwarding_revision.as_deref().unwrap_or("initial") != control.revision);
+        println!(
+            "White Noise forwarding: {}",
+            if resume_pending {
+                "Away requested (waiting for the worker to checkpoint current history)"
+            } else if control.enabled {
+                "Away (on for all sessions)"
+            } else {
+                "At desk (muted; a new phone message wakes all sessions)"
+            }
+        );
+        return Ok(());
+    }
     if matches!(args.command, Some(Action::Status)) {
         let s = BridgeState::load(&config.state_path)?;
+        let control = forwarding::load(&config.state_path)?;
+        let resume_pending = control.enabled
+            && (s.forwarding_resume_pending
+                || s.forwarding_revision.as_deref().unwrap_or("initial") != control.revision);
+        let forwarding_enabled = control.enabled && s.forwarding_enabled && !resume_pending;
         for (key, m) in s.mappings {
             println!(
                 "{}",
-                serde_json::json!({"session":key,"group":m.group_id_hex,"creating_uncertain":m.creating,"active":m.active,"state":m.last_agent_status,"pending_prompt":m.pending_prompt})
+                serde_json::json!({"session":key,"group":m.group_id_hex,"creating_uncertain":m.creating,"active":m.active,"state":m.last_agent_status,"pending_prompt":m.pending_prompt,"forwarding_enabled":forwarding_enabled,"forwarding_resume_pending":resume_pending})
             );
         }
         return Ok(());
@@ -65,6 +106,10 @@ async fn main() -> Result<()> {
     match args.command.unwrap_or(Action::Run) {
         Action::Run => bridge.run().await,
         Action::Notify { text, group } => {
+            anyhow::ensure!(
+                bridge.state.forwarding_enabled,
+                "Forwarding is At desk; switch to Away before sending a notice"
+            );
             let groups: Vec<_> = bridge
                 .state
                 .mappings
@@ -104,15 +149,29 @@ async fn main() -> Result<()> {
             bridge.save()
         }
         Action::ClearPrompt { key } => {
-            bridge
+            let mapping = bridge
                 .state
                 .mappings
                 .get_mut(&key)
-                .ok_or_else(|| anyhow::anyhow!("Unknown session key"))?
-                .pending_prompt = false;
+                .ok_or_else(|| anyhow::anyhow!("Unknown session key"))?;
+            mapping.pending_prompt = false;
+            mapping.completion_pending = false;
+            let group = mapping
+                .group_id_hex
+                .clone()
+                .filter(|_| mapping.response_id.is_some());
+            if let Some(group) = group {
+                bridge.state.update_response(
+                    &key,
+                    &group,
+                    "Response cancelled locally. No prompt was resubmitted.",
+                    true,
+                );
+            }
             bridge.save()
         }
         Action::RenameGroups => bridge.rename_groups().await,
         Action::Status => unreachable!(),
+        Action::Forwarding { .. } => unreachable!(),
     }
 }
