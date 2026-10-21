@@ -34,7 +34,7 @@ enum Action {
     },
     /// Clear an uncertain prompt after inspecting the live agent. Does not resubmit it.
     ClearPrompt { key: String },
-    /// Rename mapped groups to HDR | repository using the current HERDR working directories.
+    /// Rename mapped groups to HDR | tab name using current HERDR tab labels.
     RenameGroups,
 }
 

@@ -33,7 +33,7 @@ fn config(dir: &std::path::Path) -> BridgeConfig {
     }
 }
 fn agent() -> Agent {
-    serde_json::from_value(json!({"pane_id":"w1:p1","terminal_id":"term1","agent":"opencode","agent_status":"idle","state_change_seq":1,"agent_session":{"agent":"opencode","source":"herdr:opencode","kind":"id","value":"ses_1"}})).unwrap()
+    serde_json::from_value(json!({"pane_id":"w1:p1","terminal_id":"term1","tab_id":"w1:t1","agent":"opencode","agent_status":"idle","state_change_seq":1,"agent_session":{"agent":"opencode","source":"herdr:opencode","kind":"id","value":"ses_1"}})).unwrap()
 }
 fn inbound(sender: &str, id: &str) -> Value {
     json!({"marmot_agent_control":"marmot.agent-control.v2","type":"inbound_message","account_id_hex":"aa".repeat(32),"group_id_hex":"bb".repeat(16),"message":{"message_id_hex":id,"sender":{"account_id_hex":sender},"text":"test prompt","recorded_at":u64::MAX}})
@@ -72,7 +72,9 @@ async fn peer_for_agent(
                 }
             } else {
                 match req["method"].as_str().unwrap() {
-                    "session.snapshot" => json!({"result":{"snapshot":{"agents":[observed]}}}),
+                    "session.snapshot" => {
+                        json!({"result":{"snapshot":{"agents":[observed],"tabs":[{"tab_id":observed.tab_id,"label":"Review","number":1}]}}})
+                    }
                     "agent.get" => json!({"result":{"agent":observed}}),
                     "agent.prompt" => json!({"result":{"type":"agent_prompted","agent":observed}}),
                     _ => panic!("unexpected method"),
@@ -904,7 +906,39 @@ async fn renaming_existing_groups_keeps_their_mapping_and_skips_matching_names()
         .filter(|r| r["type"] == "group_profile_update")
         .collect();
     assert_eq!(updates.len(), 1);
-    assert_eq!(updates[0]["name"], "HDR | session");
+    assert_eq!(updates[0]["name"], "HDR | Review");
     mdk.abort();
     herdr.abort();
+}
+
+#[tokio::test]
+async fn renaming_preserves_ended_groups_without_a_known_historical_tab_label() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = config(directory.path());
+    let calls = Arc::new(Mutex::new(vec![]));
+    let herdr = peer(&config.herdr_socket, false, calls.clone()).await;
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let mut old = agent();
+    old.tab_id.clear();
+    old.tab_label = None;
+    old.agent_session.as_mut().unwrap().value = "ses_ended".into();
+    let mut bridge = Bridge::open(config).unwrap();
+    bridge.state.mappings.insert(
+        old.key(),
+        Mapping {
+            group_id_hex: Some("bb".repeat(16)),
+            agent_record: Some(old),
+            ..Mapping::default()
+        },
+    );
+    bridge.rename_groups().await.unwrap();
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.get("type").is_none())
+    );
+    herdr.abort();
+    mdk.abort();
 }

@@ -470,6 +470,10 @@ impl Bridge {
             let Some(agent) = live.get(key).or(mapping.agent_record.as_ref()) else {
                 continue;
             };
+            // Older ended-session records did not retain tab labels. Preserve their titles rather than inventing one.
+            if !live.contains_key(key) && agent.tab_label.is_none() {
+                continue;
+            }
             let name = agent.group_name();
             let info = self.marmot.marmot(json!({"type":"group_info","account_id_hex":self.config.account_id_hex,"group_id_hex":group})).await?;
             ensure!(

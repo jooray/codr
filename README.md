@@ -21,7 +21,7 @@ For manual installation, follow the [human installation guide](docs/INSTALL.md#i
 ## Behaviour
 
 - New sessions create groups and invite the configured phone `npub`.
-- Group names use `HDR | <repository>`, for example `HDR | codr`. The bridge resolves the agent's foreground working directory to its Git repository root. It falls back to the working-directory name outside Git.
+- Group names use the HERDR tab label: `HDR | <tab name>`, for example `HDR | review`. Repository names and agent-generated conversation topics do not determine the chat name.
 - A phone message prompts only the agent mapped to that group.
 - Replies come from completed stored agent messages. The bridge does not send reasoning or tool output.
 - Working, idle, blocked, and ended notices appear in the group. A blocked notice includes a labelled terminal excerpt. Separate `done` notices are suppressed; the final reply signals completion.
@@ -54,6 +54,7 @@ Existing history is baselined when a group is first attached or reply support is
 - [x] Add structured final replies for existing Claude Code sessions.
 - [ ] Add structured final replies for further HERDR-supported agents.
 - [ ] Create new agent conversations from White Noise by messaging the main worker, which starts a HERDR session and creates its mapped group.
+  - Select the HERDR workspace, directory, agent, and model.
 - [ ] Allow multiple people to collaborate with the same agent and repository in a White Noise group.
   - Add owner-managed prompt permissions per group, including revocation.
   - Distinguish agent-directed requests from discussion between participants.
@@ -92,7 +93,7 @@ Use the [installation guide](docs/INSTALL.md) for complete commands, including t
 Install a pinned release through HERDR, then open its guided setup tab:
 
 ```sh
-herdr plugin install tidley/codr --ref v0.3.1
+herdr plugin install tidley/codr --ref v0.3.2
 herdr plugin action invoke local.white-noise.setup
 ```
 
@@ -167,7 +168,9 @@ To update existing group names without changing their session mappings, stop the
 ~/.local/bin/herdr-white-noise-bridge rename-groups
 ```
 
-Then start the worker again. Multiple sessions in one repository intentionally share the same short group name.
+Then start the worker again. This refreshes existing titles from current HERDR tab labels. Ended sessions without a stored tab label retain their existing title.
+
+Tab renames do not automatically rewrite White Noise titles; run `rename-groups` to apply them. Sessions in tabs with identical labels can share a display name, while their routing remains separate.
 
 Stop the worker before using its state-changing CLI. To send a notice to one mapped group:
 

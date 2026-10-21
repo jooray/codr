@@ -2,10 +2,7 @@ use crate::wire::Socket;
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{
-    path::Path,
-    process::{Command, Stdio},
-};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Session {
@@ -19,6 +16,10 @@ pub struct Session {
 pub struct Agent {
     pub pane_id: String,
     pub terminal_id: String,
+    #[serde(default)]
+    pub tab_id: String,
+    #[serde(default)]
+    pub tab_label: Option<String>,
     #[serde(default)]
     pub agent: String,
     pub agent_status: String,
@@ -54,41 +55,32 @@ impl Agent {
     }
 
     pub fn group_name(&self) -> String {
-        let cwd = self
-            .foreground_cwd
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .unwrap_or(&self.cwd);
-        let root = if cwd.is_empty() {
-            None
+        let fallback = if self.tab_id.is_empty() {
+            "session"
         } else {
-            Command::new("git")
-                .arg("-C")
-                .arg(cwd)
-                .args(["rev-parse", "--show-toplevel"])
-                .env_remove("GIT_DIR")
-                .env_remove("GIT_WORK_TREE")
-                .stdin(Stdio::null())
-                .stderr(Stdio::null())
-                .output()
-                .ok()
-                .filter(|output| output.status.success())
-                .and_then(|output| String::from_utf8(output.stdout).ok())
+            self.tab_id.as_str()
         };
-        let path = Path::new(root.as_deref().map(str::trim_end).unwrap_or(cwd));
-        let name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("session");
-        let name: String = name.chars().filter(|c| !c.is_control()).take(60).collect();
-        format!(
+        let raw = self
+            .tab_label
+            .as_deref()
+            .filter(|label| !label.trim().is_empty())
+            .unwrap_or(fallback);
+        let label: String = raw
+            .chars()
+            .filter(|character| !character.is_control())
+            .collect();
+        let mut name = format!(
             "HDR | {}",
-            if name.trim().is_empty() {
+            if label.trim().is_empty() {
                 "session"
             } else {
-                name.trim()
+                label.trim()
             }
-        )
+        );
+        while name.len() > 256 {
+            name.pop();
+        }
+        name
     }
 }
 
@@ -96,7 +88,27 @@ pub async fn snapshot(socket: &Socket) -> Result<Vec<Agent>> {
     let response = socket.herdr("session.snapshot", json!({})).await?;
     let agents = &response["result"]["snapshot"]["agents"];
     ensure!(agents.is_array(), "HERDR did not return a session snapshot");
-    Ok(serde_json::from_value(agents.clone())?)
+    let mut agents: Vec<Agent> = serde_json::from_value(agents.clone())?;
+    let labels: HashMap<&str, String> = response["result"]["snapshot"]["tabs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|tab| {
+            let id = tab["tab_id"].as_str()?;
+            let label = tab["label"]
+                .as_str()
+                .filter(|label| !label.trim().is_empty())
+                .map(str::to_owned)
+                .or_else(|| tab["number"].as_u64().map(|number| number.to_string()))?;
+            Some((id, label))
+        })
+        .collect();
+    for agent in &mut agents {
+        if let Some(label) = labels.get(agent.tab_id.as_str()) {
+            agent.tab_label = Some(label.clone());
+        }
+    }
+    Ok(agents)
 }
 
 pub async fn get(socket: &Socket, agent: &Agent) -> Result<Agent> {
