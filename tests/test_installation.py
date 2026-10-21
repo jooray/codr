@@ -176,6 +176,41 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(result["bridge_npub"], "npub1bridge")
         self.assertEqual(self.bootstrap_count, 1)
 
+    def test_codex_only_install_does_not_require_opencode(self):
+        def find(name, candidates=()):
+            if name in ("opencode", "claude"):
+                raise setup.SetupError("Not installed")
+            return "/usr/bin/" + name
+        with self.mocks(), patch.object(setup, "find_executable", side_effect=find):
+            setup.configure("npub1fixture", self.socket, self.runner)
+        config = setup.tomllib.loads(self.config.read_text())
+        self.assertEqual(config["opencode_bin"], "opencode")
+        self.assertEqual(config["codex_home"], str(self.home / ".codex"))
+
+    def test_claude_only_install_does_not_require_opencode_or_codex(self):
+        def find(name, candidates=()):
+            if name in ("opencode", "codex"):
+                raise setup.SetupError("Not installed")
+            return "/usr/bin/" + name
+        with self.mocks(), patch.object(setup, "find_executable", side_effect=find):
+            result = setup.configure("npub1fixture", self.socket, self.runner)
+        config = setup.tomllib.loads(self.config.read_text())
+        self.assertEqual(config["claude_home"], str(self.home / ".claude"))
+        self.assertEqual(result["supported_agents"], ["claude"])
+
+    def test_broken_unrelated_cli_does_not_block_an_observed_native_agent(self):
+        def find(name, candidates=()):
+            if name in ("codex", "claude"):
+                raise setup.SetupError("Not on PATH")
+            return "/usr/bin/" + name
+        def runner(argv):
+            if argv == ["/usr/bin/opencode", "--version"]:
+                raise setup.SetupError("Broken unrelated installation")
+            return self.runner(argv)
+        with self.mocks(), patch.object(setup, "find_executable", side_effect=find), patch.object(setup,"read_snapshot", return_value={"agents":[{"agent":"claude","agent_session":{"agent":"claude"}}]}):
+            result=setup.configure("npub1fixture", self.socket, runner)
+        self.assertEqual(result["supported_agents"],["claude"])
+
 
 if __name__ == "__main__":
     unittest.main()

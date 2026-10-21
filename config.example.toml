@@ -7,3 +7,6 @@ wn_agent_socket = "/home/YOUR_USER/.marmot-agents/herdr/dev/wn-agent.sock"
 account_id_hex = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 state_path = "/home/YOUR_USER/.local/state/herdr-white-noise-bridge/state.json"
 opencode_bin = "/absolute/path/to/opencode"
+# Optional transcript roots. Defaults use CODEX_HOME / CLAUDE_CONFIG_DIR, or these home directories.
+codex_home = "/home/YOUR_USER/.codex"
+claude_home = "/home/YOUR_USER/.claude"

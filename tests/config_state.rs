@@ -1,3 +1,4 @@
+use bech32::ToBase32;
 use herdr_white_noise_bridge::{BridgeConfig, BridgeState};
 
 #[test]
@@ -24,4 +25,17 @@ fn state_round_trip_keeps_the_session_group_mapping() {
     state.save(&path).unwrap();
     assert_eq!(BridgeState::load(&path).unwrap(), state);
     std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn native_transcript_roots_default_for_old_configs_and_reject_relative_overrides() {
+    let owner = bech32::encode("npub", [0x11u8; 32].to_base32(), bech32::Variant::Bech32).unwrap();
+    let base = format!(
+        "phone_npub = {owner:?}\nherdr_socket = '/run/herdr.sock'\nwn_agent_socket = '/run/wn.sock'\naccount_id_hex = '{}'\nstate_path = '/tmp/state.json'\n",
+        "aa".repeat(32)
+    );
+    let config = BridgeConfig::from_toml(&base).unwrap();
+    assert!(config.codex_home.is_absolute());
+    assert!(config.claude_home.is_absolute());
+    assert!(BridgeConfig::from_toml(&(base + "codex_home = 'relative'\n")).is_err());
 }

@@ -4,7 +4,7 @@ A Linux [HERDR](https://github.com/herdrdev/herdr) plugin with one encrypted Whi
 
 The plugin uses the maintained [Marmot Development Kit (MDK)](https://github.com/marmot-protocol/mdk) `wn-agent` transport. One dedicated bridge identity joins every group. Your phone uses White Noise for [iOS](https://github.com/marmot-protocol/whitenoise-ios) or [Android](https://github.com/marmot-protocol/whitenoise-android).
 
-The current release runs on Linux, with structured final replies supported for OpenCode.
+The current release runs on Linux, with structured final replies supported for OpenCode, Codex, and Claude Code.
 
 ## Install with a coding agent
 
@@ -23,18 +23,36 @@ For manual installation, follow the [human installation guide](docs/INSTALL.md#i
 - New sessions create groups and invite the configured phone `npub`.
 - Group names use `HDR | <repository>`, for example `HDR | codr`. The bridge resolves the agent's foreground working directory to its Git repository root. It falls back to the working-directory name outside Git.
 - A phone message prompts only the agent mapped to that group.
-- OpenCode replies come from completed stored assistant messages. The bridge does not send reasoning or tool output.
+- Replies come from completed stored agent messages. The bridge does not send reasoning or tool output.
 - Working, idle, blocked, and ended notices appear in the group. A blocked notice includes a labelled terminal excerpt. Separate `done` notices are suppressed; the final reply signals completion.
 - `/status` reports the mapped session state.
 - Ended sessions retain their group. A restored native session reuses its group.
 - Attachments and terminal key commands are not supported.
-- Other detected agent backends get groups, prompts, and state notices. Structured final-reply extraction currently supports **OpenCode only**.
+- Other detected agent backends get groups, prompts, and state notices. Structured final-reply extraction supports **OpenCode, Codex, and Claude Code**.
 
 HERDR snapshots refresh every three seconds. Very short intermediate states can occur between snapshots. Native session references preserve routing across pane moves. Group creation waits for HERDR to report a native session reference. During identity uncertainty, the bridge defers prompts and preserves the existing group.
 
+## Supported reply sources
+
+| Agent | Final-reply source | Default transcript location |
+| --- | --- | --- |
+| OpenCode | Completed text from `opencode --pure export SESSION_ID` | Managed by OpenCode |
+| Codex | Successful `task_complete` / `turn_complete` events with a turn ID and final message | `~/.codex/sessions` and `~/.codex/archived_sessions` |
+| Claude Code | Completed main-conversation assistant responses with `message.stop_reason = "end_turn"` | `~/.claude/projects/<project>/<session-id>.jsonl` |
+
+The bridge reads the existing session. It does not start another model invocation, change authentication, or use terminal snapshots as final replies. HERDR must report the native session ID.
+
+Codex and Claude Code readers verify session identity, ignore partial records, and reject ambiguous transcript files. Claude's null stop reasons and duration markers alone are not treated as successful replies. Transcript formats are internal to the agent tools; unsupported or incomplete records are not guessed into final answers.
+
+For custom profiles, set absolute `codex_home` and `claude_home` paths in the bridge configuration. Defaults use `CODEX_HOME` / `CLAUDE_CONFIG_DIR` when available, otherwise the locations above. Fresh setup records these paths explicitly.
+
+Existing history is baselined when a group is first attached or reply support is first enabled for an older group. It is not reposted. Later completed replies use persistent message IDs to avoid duplicates after restart.
+
 ## To-do
 
-- [ ] Support additional agents directly, including structured final replies for Codex, Claude Code, and other HERDR-supported agents.
+- [x] Add structured final replies for existing Codex sessions.
+- [x] Add structured final replies for existing Claude Code sessions.
+- [ ] Add structured final replies for further HERDR-supported agents.
 - [ ] Create new agent conversations from White Noise by messaging the main worker, which starts a HERDR session and creates its mapped group.
 - [ ] Allow multiple people to collaborate with the same agent and repository in a White Noise group.
   - Add owner-managed prompt permissions per group, including revocation.
@@ -49,7 +67,8 @@ HERDR snapshots refresh every three seconds. Very short intermediate states can 
 - Python 3.11 or newer and Git. Rust is only needed when building from source.
 - HERDR 0.9.1 or newer, with a running local server.
 - MDK `wn-agent` 0.13.0, including `group_create` and `timeline_list` in `marmot.agent-control.v2`.
-- OpenCode with `--pure export SESSION_ID` support for structured replies.
+- A supported agent: OpenCode, Codex, or Claude Code. OpenCode needs `--pure export SESSION_ID`; Codex and Claude Code need readable native transcripts.
+- HERDR native session references for the agents you want to control.
 - Your phone must publish a compatible Marmot KeyPackage. The phone and bridge need reachable relays.
 
 The repository does not implement MLS or Nostr cryptography. MDK owns keys, encrypted group state, relay connections, invitations, and delivery.
@@ -73,7 +92,7 @@ Use the [installation guide](docs/INSTALL.md) for complete commands, including t
 Install a pinned release through HERDR, then open its guided setup tab:
 
 ```sh
-herdr plugin install tidley/codr --ref v0.2.1
+herdr plugin install tidley/codr --ref v0.3.0
 herdr plugin action invoke local.white-noise.setup
 ```
 
@@ -167,5 +186,7 @@ codr builds on the work of these projects and their maintainers and contributors
 - [Marmot protocol](https://github.com/marmot-protocol/marmot): the end-to-end encrypted group messaging protocol built on MLS with Nostr identity.
 - [HERDR](https://github.com/herdrdev/herdr): the agent runtime, plugin system, and local API that codr uses to discover and control sessions.
 - [OpenCode](https://github.com/anomalyco/opencode): the coding-agent runtime whose stored final replies codr currently reads.
+- [Codex](https://github.com/openai/codex): the coding-agent runtime and native rollout records used by codr's Codex reply reader.
+- [Claude Code](https://github.com/anthropics/claude-code): the coding-agent runtime whose native session transcripts codr reads for completed main-conversation replies.
 
 codr provides the routing bridge between these systems. The messaging protocol, encryption, transport, mobile app, and agent runtimes come from the upstream projects above.

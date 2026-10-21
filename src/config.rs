@@ -13,10 +13,28 @@ pub struct BridgeConfig {
     pub state_path: PathBuf,
     #[serde(default = "default_opencode")]
     pub opencode_bin: PathBuf,
+    #[serde(default = "default_codex_home")]
+    pub codex_home: PathBuf,
+    #[serde(default = "default_claude_home")]
+    pub claude_home: PathBuf,
 }
 
 fn default_opencode() -> PathBuf {
     "opencode".into()
+}
+
+fn native_home(variable: &str, directory: &str) -> PathBuf {
+    std::env::var_os(variable)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(directory)
+        })
+}
+fn default_codex_home() -> PathBuf {
+    native_home("CODEX_HOME", ".codex")
+}
+fn default_claude_home() -> PathBuf {
+    native_home("CLAUDE_CONFIG_DIR", ".claude")
 }
 
 pub fn phone_hex(npub: &str) -> Result<String> {
@@ -49,6 +67,8 @@ impl BridgeConfig {
             &config.herdr_socket,
             &config.wn_agent_socket,
             &config.state_path,
+            &config.codex_home,
+            &config.claude_home,
         ] {
             ensure!(path.is_absolute(), "Configuration paths must be absolute");
         }

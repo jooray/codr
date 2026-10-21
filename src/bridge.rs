@@ -132,13 +132,37 @@ impl Bridge {
         self.save()
     }
 
+    async fn seed_native_history(&mut self, key: &str, agent: &Agent) -> Result<bool> {
+        if !self.state.mappings[key].output_initialised
+            && let Some(session) = agent
+                .agent_session
+                .as_ref()
+                .filter(|session| matches!(session.agent.as_str(), "codex" | "claude"))
+        {
+            let finals = output::read_session(&self.config, session).await?;
+            let mapping = self.state.mappings.get_mut(key).unwrap();
+            mapping
+                .final_ids
+                .extend(finals.into_iter().map(|reply| reply.id));
+            mapping.output_initialised = true;
+            mapping.last_export_at = now();
+            self.save()?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     async fn collect_finals(&mut self, key: &str, agent: &Agent, group: &str) -> Result<()> {
+        // The ended-session path also reaches this method without live reconciliation.
+        if self.seed_native_history(key, agent).await? {
+            return Ok(());
+        }
         if let Some(session) = agent
             .agent_session
             .as_ref()
-            .filter(|s| s.agent == "opencode")
+            .filter(|s| output::supported(&s.agent))
         {
-            let finals = output::export(&self.config.opencode_bin, &session.value).await?;
+            let finals = output::read_session(&self.config, session).await?;
             let known: HashSet<_> = self.state.mappings[key].final_ids.iter().cloned().collect();
             for reply in finals {
                 if !known.contains(&reply.id) {
@@ -168,15 +192,18 @@ impl Bridge {
             if let Some(session) = agent
                 .agent_session
                 .as_ref()
-                .filter(|s| s.agent == "opencode")
+                .filter(|s| output::supported(&s.agent))
             {
-                let finals = output::export(&self.config.opencode_bin, &session.value).await?;
+                let finals = output::read_session(&self.config, session).await?;
                 m.final_ids = finals.into_iter().map(|f| f.id).collect();
                 m.output_initialised = true;
             }
             self.state.mappings.insert(key.to_owned(), m);
             self.save()?;
         }
+        // Older bridge versions created these groups without a transcript watermark.
+        // Seed their existing history once when enabling native reply support.
+        self.seed_native_history(key, agent).await?;
         let m = &self.state.mappings[key];
         if m.group_id_hex.is_none() && !m.creating {
             self.state.mappings.get_mut(key).unwrap().creating = true;

@@ -16,11 +16,12 @@ The [agent section](#instructions-for-coding-agents) provides the non-interactiv
 - Python 3.11 or newer and Git.
 - A working systemd user manager under the account that runs HERDR.
 - HERDR 0.9.1 or newer, with a running local server.
-- A working, authenticated OpenCode installation with `--pure export SESSION_ID` support.
+- A working, authenticated OpenCode, Codex, or Claude Code installation.
+- HERDR native session IDs and access to the selected agent's local transcripts.
 - White Noise on your phone and your own public `npub`.
 - Access to GitHub release assets and the configured White Noise relays.
 
-OpenCode model authentication stays in its existing location. Setup does not request a provider API key, `nsec`, seed phrase, or private key.
+Agent authentication stays in its existing location. Setup does not request a provider API key, `nsec`, seed phrase, or private key.
 
 The phone account must publish a compatible Marmot KeyPackage before the bridge can invite it. Open White Noise and let it connect to its relays.
 
@@ -29,7 +30,7 @@ The phone account must publish a compatible Marmot KeyPackage before the bridge 
 Run these commands as your normal user, not root:
 
 ```bash
-herdr plugin install tidley/codr --ref v0.2.1
+herdr plugin install tidley/codr --ref v0.3.0
 herdr plugin action invoke local.white-noise.setup
 ```
 
@@ -38,7 +39,7 @@ HERDR previews and runs the manifest's installation hook, then registers the plu
 The Setup action opens a HERDR tab. Enter your own White Noise public `npub` there. Setup:
 
 1. Validates the key through codr's configuration parser before changing accounts or services.
-2. Checks the HERDR socket, OpenCode executable, Git, and systemd user manager.
+2. Checks the HERDR socket, available supported agents, Git, and systemd user manager. Codex-only and Claude-only installations do not need OpenCode.
 3. Reuses a compatible `wn-agent` 0.13.0 binary or downloads a verified upstream binary into codr's own binary directory.
 4. Creates or reuses the dedicated `herdr-bridge` identity under `~/.marmot-agents/herdr`.
 5. Writes owner-only configuration and dedicated user units.
@@ -76,7 +77,7 @@ HERDR refuses a GitHub install over a locally linked copy of the same plugin. To
 ```bash
 herdr plugin list
 herdr plugin unlink local.white-noise
-herdr plugin install tidley/codr --ref v0.2.1
+herdr plugin install tidley/codr --ref v0.3.0
 ```
 
 Unlinking leaves the local checkout and account state in place. Do not delete the MDK home or reset the bridge to perform an upgrade.
@@ -110,6 +111,12 @@ journalctl --user -u wn-agent-herdr.service -u herdr-white-noise-bridge.service 
 
 Configuration lives under `${XDG_CONFIG_HOME:-~/.config}/herdr-white-noise-bridge/config.toml`. The worker unit specifies that path explicitly. State uses `${XDG_STATE_HOME:-~/.local/state}/herdr-white-noise-bridge/state.json`.
 
+For Codex profiles, `codex_home` selects the directory containing `sessions` and `archived_sessions`. It defaults to `CODEX_HOME` or `~/.codex`. For Claude Code, `claude_home` selects the directory containing `projects`; it defaults to `CLAUDE_CONFIG_DIR` or `~/.claude`. Use absolute paths. Setup saves the installing shell's roots for new configurations, and preserves existing configurations during upgrades.
+
+If a supported agent appears without a native session ID, check its HERDR integration. Enable the matching HERDR integration when needed rather than guessing a transcript from its terminal title or repository. codr does not copy credentials or reconfigure the model provider.
+
+Native transcript reads are bounded to 128 MiB per file and 16 MiB per record. Missing, ambiguous, or unsupported transcript data stays unavailable for final-reply extraction. Claude Code must record an explicit `end_turn` stop reason; the bridge retries later if the writer has not persisted it yet.
+
 See [Recovery and diagnostics](../README.md#recovery-and-diagnostics) for uncertain group creation or prompt submissions. Do not blindly repeat those operations.
 
 ## Instructions for coding agents
@@ -123,14 +130,14 @@ Before changing the host:
 1. Verify Linux architecture, Python 3.11+, Git, the systemd user bus, and executable paths.
 2. Inspect existing codr configuration, services, identities, and plugin registration.
 3. Resolve the intended HERDR socket and verify it with `session.snapshot`. Ask which server to use if several are plausible.
-4. Check that OpenCode already works under this user. Do not change its model authentication or execution permissions.
+4. Check that at least one supported agent already works under this user and reports a native HERDR session reference. Do not change model authentication or execution permissions.
 
 ### Non-interactive installation
 
 Set `OWNER_NPUB` to the public key supplied by the user. Export the selected `HERDR_SOCKET_PATH` before running HERDR commands.
 
 ```bash
-herdr plugin install tidley/codr --ref v0.2.1 --yes
+herdr plugin install tidley/codr --ref v0.3.0 --yes
 PLUGIN_ROOT="$(herdr plugin list --plugin local.white-noise --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["plugins"][0]["plugin_root"])')"
 python3 "$PLUGIN_ROOT/scripts/setup.py" --npub "$OWNER_NPUB" --herdr-socket "$HERDR_SOCKET_PATH"
 ```
@@ -160,7 +167,7 @@ This path requires Rust and Cargo. Use the target host's build/storage policy.
 ```bash
 git clone https://github.com/tidley/codr.git
 cd codr
-git checkout v0.2.1
+git checkout v0.3.0
 cargo test --locked --tests
 cargo install --locked --path . --root "$HOME/.local"
 herdr plugin link "$PWD"

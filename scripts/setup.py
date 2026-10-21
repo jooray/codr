@@ -199,10 +199,24 @@ def _configure(owner, herdr_socket, runner, check):
     find_executable("systemctl")
     find_executable("git")
     runner(["systemctl", "--user", "show-environment"])
-    opencode = find_executable("opencode", [home / ".opencode/bin/opencode", home / ".local/bin/opencode"])
-    runner([opencode, "--version"])
     herdr_socket = Path(herdr_socket or os.environ.get("HERDR_SOCKET_PATH", home / ".config/herdr/herdr.sock")).resolve()
     snapshot = read_snapshot(herdr_socket)
+    executables = {}
+    for name in ("opencode", "codex", "claude"):
+        candidates = [home / ".local/bin" / name]
+        if name == "opencode":
+            candidates.append(home / ".opencode/bin/opencode")
+        try:
+            executable = find_executable(name, candidates)
+            runner([executable, "--version"])
+        except SetupError:
+            continue
+        executables[name] = executable
+    observed = {agent.get("agent_session", {}).get("agent", agent.get("agent")) for agent in snapshot["agents"] if isinstance(agent.get("agent_session", {}), dict)}
+    available = set(executables) | observed.intersection({"codex", "claude"})
+    if not available:
+        raise SetupError("Install or start a supported agent: OpenCode, Codex, or Claude Code")
+    opencode = executables.get("opencode", "opencode")
     mdk = ensure_mdk(runner)
     mdk_home = home / ".marmot-agents/herdr"
     mdk_socket = mdk_home / "dev/wn-agent.sock"
@@ -238,7 +252,9 @@ def _configure(owner, herdr_socket, runner, check):
     if candidates and result["account_id_hex"] != candidates[0]["account_id_hex"]:
         raise SetupError("MDK selected an unexpected account")
     values = {"phone_npub": owner, "herdr_socket": herdr_socket, "wn_agent_socket": mdk_socket,
-        "account_id_hex": result["account_id_hex"], "state_path": state_path, "opencode_bin": opencode}
+        "account_id_hex": result["account_id_hex"], "state_path": state_path, "opencode_bin": opencode,
+        "codex_home": Path(os.environ.get("CODEX_HOME", home / ".codex")).resolve(),
+        "claude_home": Path(os.environ.get("CLAUDE_CONFIG_DIR", home / ".claude")).resolve()}
     with tempfile.TemporaryDirectory(prefix="codr-config-check-") as temporary:
         candidate = Path(temporary) / "config.toml"
         candidate.write_text(toml_text(values))
@@ -248,7 +264,8 @@ def _configure(owner, herdr_socket, runner, check):
     runner(["systemctl", "--user", "start", "herdr-white-noise-bridge.service"])
     runner(["systemctl", "--user", "is-active", "wn-agent-herdr.service", "herdr-white-noise-bridge.service"])
     return {"configuration": str(config_path), "bridge_npub": result["npub"], "herdr_socket": str(herdr_socket),
-            "detected_sessions": len(snapshot["agents"]), "phone_round_trip": "requires user confirmation"}
+            "detected_sessions": len(snapshot["agents"]), "supported_agents": sorted(available),
+            "phone_round_trip": "requires user confirmation"}
 
 
 def main():

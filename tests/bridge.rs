@@ -28,6 +28,8 @@ fn config(dir: &std::path::Path) -> BridgeConfig {
         account_id_hex: "aa".repeat(32),
         state_path: dir.join("state.json"),
         opencode_bin: dir.join("opencode"),
+        codex_home: dir.join("codex"),
+        claude_home: dir.join("claude"),
     }
 }
 fn agent() -> Agent {
@@ -41,6 +43,15 @@ async fn peer(
     path: &std::path::Path,
     marmot: bool,
     calls: Arc<Mutex<Vec<Value>>>,
+) -> tokio::task::JoinHandle<()> {
+    peer_for_agent(path, marmot, calls, agent()).await
+}
+
+async fn peer_for_agent(
+    path: &std::path::Path,
+    marmot: bool,
+    calls: Arc<Mutex<Vec<Value>>>,
+    observed: Agent,
 ) -> tokio::task::JoinHandle<()> {
     let listener = UnixListener::bind(path).unwrap();
     tokio::spawn(async move {
@@ -61,9 +72,9 @@ async fn peer(
                 }
             } else {
                 match req["method"].as_str().unwrap() {
-                    "session.snapshot" => json!({"result":{"snapshot":{"agents":[agent()]}}}),
-                    "agent.get" => json!({"result":{"agent":agent()}}),
-                    "agent.prompt" => json!({"result":{"type":"agent_prompted","agent":agent()}}),
+                    "session.snapshot" => json!({"result":{"snapshot":{"agents":[observed]}}}),
+                    "agent.get" => json!({"result":{"agent":observed}}),
+                    "agent.prompt" => json!({"result":{"type":"agent_prompted","agent":observed}}),
                     _ => panic!("unexpected method"),
                 }
             };
@@ -217,6 +228,195 @@ async fn working_notice_remains_but_done_only_forwards_the_final_reply() {
     );
     assert!(!bridge.state.mappings[&agent().key()].pending_prompt);
     assert!(!bridge.state.mappings[&agent().key()].completion_pending);
+}
+
+#[tokio::test]
+async fn codex_session_round_trip_forwards_only_new_native_final_replies() {
+    native_round_trip("codex", false).await;
+}
+
+#[tokio::test]
+async fn claude_session_round_trip_forwards_only_new_native_final_replies() {
+    native_round_trip("claude", false).await;
+}
+
+#[tokio::test]
+async fn existing_native_groups_seed_history_once_without_recreating_the_group() {
+    native_round_trip("codex", true).await;
+    native_round_trip("claude", true).await;
+}
+
+async fn native_round_trip(provider: &str, legacy_mapping: bool) {
+    const ID: &str = "11111111-1111-4111-8111-111111111111";
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path());
+    let mut observed = agent();
+    observed.agent = provider.into();
+    observed.agent_session = Some(herdr_white_noise_bridge::herdr::Session {
+        source: format!("herdr:{provider}"),
+        agent: provider.into(),
+        kind: "id".into(),
+        value: ID.into(),
+    });
+    let path = if provider == "codex" {
+        config
+            .codex_home
+            .join("sessions/2026/01/01")
+            .join(format!("rollout-test-{ID}.jsonl"))
+    } else {
+        config
+            .claude_home
+            .join("projects/project")
+            .join(format!("{ID}.jsonl"))
+    };
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let write = |new_reply: bool| {
+        let mut rows = if provider == "codex" {
+            vec![
+                json!({"type":"session_meta","payload":{"id":ID}}),
+                json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"old","last_agent_message":"Native old final"}}),
+            ]
+        } else {
+            vec![
+                json!({"type":"user","uuid":"u0","sessionId":ID,"message":{"role":"user","content":"Old prompt"}}),
+                json!({"type":"assistant","uuid":"old","parentUuid":"u0","sessionId":ID,"message":{"role":"assistant","id":"api-old","stop_reason":"end_turn","content":[{"type":"text","text":"Native old final"}]}}),
+            ]
+        };
+        if new_reply {
+            if provider == "codex" {
+                rows.push(json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"new","last_agent_message":"Native new final"}}));
+            } else {
+                rows.extend([
+                json!({"type":"user","uuid":"u1","parentUuid":"old","sessionId":ID,"message":{"role":"user","content":"New prompt"}}),
+                json!({"type":"assistant","uuid":"new","parentUuid":"u1","sessionId":ID,"message":{"role":"assistant","id":"api-new","stop_reason":"end_turn","content":[{"type":"text","text":"Native new final"}]}}),
+            ]);
+            }
+        }
+        std::fs::write(
+            &path,
+            rows.into_iter()
+                .map(|row| row.to_string() + "\n")
+                .collect::<String>(),
+        )
+        .unwrap();
+    };
+    write(false);
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let herdr = peer_for_agent(&config.herdr_socket, false, calls.clone(), observed.clone()).await;
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    if legacy_mapping {
+        bridge.state.mappings.insert(
+            observed.key(),
+            Mapping {
+                group_id_hex: Some("bb".repeat(16)),
+                active: true,
+                agent_record: Some(observed.clone()),
+                ..Mapping::default()
+            },
+        );
+    }
+    bridge.reconcile(vec![observed.clone()]).await.unwrap();
+    bridge.flush().await.unwrap();
+    bridge.inbound(&inbound(HEX, "new-prompt")).await.unwrap();
+    assert!(bridge.state.mappings[&observed.key()].pending_prompt);
+    write(true);
+    observed.agent_status = "done".into();
+    observed.state_change_seq += 1;
+    bridge.reconcile(vec![observed.clone()]).await.unwrap();
+    bridge.flush().await.unwrap();
+    assert!(!bridge.state.mappings[&observed.key()].pending_prompt);
+    let mut restarted = Bridge::open(config).unwrap();
+    restarted.reconcile(vec![observed]).await.unwrap();
+    restarted.flush().await.unwrap();
+    let calls = calls.lock().unwrap();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call["method"] == "agent.prompt")
+            .count(),
+        1
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call["text"] == "Native new final")
+            .count(),
+        1
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call["text"] == "Native old final" || call["text"] == "State: done")
+    );
+    if legacy_mapping {
+        assert!(!calls.iter().any(|call| call["type"] == "group_create"));
+    }
+    mdk.abort();
+    herdr.abort();
+}
+
+#[tokio::test]
+async fn legacy_native_session_that_exited_before_upgrade_does_not_replay_history() {
+    const ID: &str = "11111111-1111-4111-8111-111111111111";
+    for provider in ["codex", "claude"] {
+        let directory = tempfile::tempdir().unwrap();
+        let config = config(directory.path());
+        let mut observed = agent();
+        observed.agent = provider.into();
+        observed.agent_session = Some(herdr_white_noise_bridge::herdr::Session {
+            source: format!("herdr:{provider}"),
+            agent: provider.into(),
+            kind: "id".into(),
+            value: ID.into(),
+        });
+        let (path, rows) = if provider == "codex" {
+            (
+                config
+                    .codex_home
+                    .join("sessions/2026/01/01")
+                    .join(format!("rollout-test-{ID}.jsonl")),
+                vec![
+                    json!({"type":"session_meta","payload":{"id":ID}}),
+                    json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"old","last_agent_message":"Historical answer"}}),
+                ],
+            )
+        } else {
+            (
+                config
+                    .claude_home
+                    .join("projects/project")
+                    .join(format!("{ID}.jsonl")),
+                vec![
+                    json!({"type":"assistant","uuid":"old","sessionId":ID,"message":{"id":"api-old","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"Historical answer"}]}}),
+                ],
+            )
+        };
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            rows.into_iter()
+                .map(|row| row.to_string() + "\n")
+                .collect::<String>(),
+        )
+        .unwrap();
+        let key = observed.key();
+        let mut bridge = Bridge::open(config).unwrap();
+        bridge.state.mappings.insert(
+            key.clone(),
+            Mapping {
+                group_id_hex: Some("bb".repeat(16)),
+                active: true,
+                agent_record: Some(observed),
+                ..Mapping::default()
+            },
+        );
+        bridge.reconcile(vec![]).await.unwrap();
+        assert_eq!(bridge.state.outbox.len(), 1);
+        assert!(bridge.state.outbox[0].text.starts_with("Session ended"));
+        assert!(bridge.state.mappings[&key].output_initialised);
+        assert!(!bridge.state.mappings[&key].active);
+    }
 }
 
 #[tokio::test]

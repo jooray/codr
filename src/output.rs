@@ -9,6 +9,46 @@ use std::{
 };
 use tokio::process::Command;
 
+pub mod claude;
+pub mod codex;
+mod native;
+
+pub fn supported(agent: &str) -> bool {
+    matches!(agent, "opencode" | "codex" | "claude")
+}
+
+pub async fn read_session(
+    config: &crate::config::BridgeConfig,
+    session: &crate::herdr::Session,
+) -> Result<Vec<FinalMessage>> {
+    ensure!(
+        session.kind == "id",
+        "Unsupported native session reference kind"
+    );
+    match session.agent.as_str() {
+        "opencode" => export(&config.opencode_bin, &session.value).await,
+        "codex" | "claude" => {
+            let provider = session.agent.clone();
+            let id = session.value.clone();
+            let home = if provider == "codex" {
+                config.codex_home.clone()
+            } else {
+                config.claude_home.clone()
+            };
+            tokio::task::spawn_blocking(move || {
+                if provider == "codex" {
+                    codex::read(&home, &id)
+                } else {
+                    claude::read(&home, &id)
+                }
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("Native transcript reader failed"))?
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+
 #[derive(Debug)]
 pub struct FinalMessage {
     pub id: String,
