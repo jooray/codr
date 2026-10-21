@@ -6,6 +6,33 @@ The plugin uses the maintained [Marmot Development Kit (MDK)](https://github.com
 
 The current release runs on Linux, with structured final replies supported for OpenCode, Codex, and Claude Code.
 
+## Desktop and phone
+
+Keep the conversation in HERDR and follow it from White Noise. Each session has its own phone chat, named after its HERDR tab.
+
+These side-by-side composites show real HERDR, OpenCode 1.19.3, and Android interfaces. The desktop replays matching synthetic history imported into an isolated OpenCode installation. The phone messages came through the real codr bridge and MDK transport using a synthetic HERDR/OpenCode fixture and a dedicated demo profile. These are documentation examples, not live model runs or end-to-end tests of a live decision dialog.
+
+**Task progress and a separate final reply**
+
+<img src="docs/screenshots/herdr-phone-progress.png" width="1280" alt="HERDR with an OpenCode task checklist beside the matching White Noise conversation and separate final reply">
+
+<details>
+<summary>More conversations: decisions, review, and the chat list</summary>
+
+**A decision and its phone reply**
+
+<img src="docs/screenshots/herdr-phone-decisions.png" width="1280" alt="HERDR showing an example question, the reply 1, and its result beside the matching White Noise decision conversation">
+
+**A separate review conversation**
+
+<img src="docs/screenshots/herdr-phone-review.png" width="1280" alt="The HERDR review tab beside its White Noise chat, both showing the same example release review">
+
+**Three sessions, three phone chats**
+
+<img src="docs/screenshots/herdr-phone-conversations.png" width="1280" alt="HERDR with demo, decisions, and review tabs and agents beside the three matching White Noise chats">
+
+</details>
+
 ## On the phone
 
 Send a request from White Noise. The bridge posts a working message, edits that message with the task list, and sends the final answer separately.
