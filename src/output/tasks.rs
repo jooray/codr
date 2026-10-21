@@ -20,7 +20,7 @@ impl TaskList {
     pub fn text(&self) -> String {
         let mut text = "> working".to_string();
         if !self.items.is_empty() {
-            text.push_str("\n\nTasks\n");
+            text.push('\n');
         }
         for task in &self.items {
             let mark = match task.status.as_str() {

@@ -208,8 +208,8 @@ impl BridgeState {
             self.outbox.retain(|item| item.id != id);
             return;
         }
-        item.text = if let Some((_, tasks)) = item.text.split_once("\nTasks\n") {
-            format!("> done\nTasks\n{tasks}")
+        item.text = if let Some(tasks) = item.text.strip_prefix("> working\n") {
+            format!("> done\n{tasks}")
         } else {
             "> done".into()
         };

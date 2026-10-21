@@ -1124,7 +1124,24 @@ async fn progress_is_edited_but_the_final_is_a_separate_message_across_restart()
             .contains("✓ Inspect code")
     );
     assert!(edits[0]["text"].as_str().unwrap().contains("▶ Run checks"));
+    assert!(
+        edits[0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("> working\n\n✓ Inspect code")
+    );
     assert!(edits[1]["text"].as_str().unwrap().starts_with("> done"));
+    assert!(
+        edits[1]["text"]
+            .as_str()
+            .unwrap()
+            .contains("✓ Inspect code")
+    );
+    assert!(
+        edits
+            .iter()
+            .all(|edit| !edit["text"].as_str().unwrap().contains("\nTasks\n"))
+    );
     assert!(
         !edits
             .iter()

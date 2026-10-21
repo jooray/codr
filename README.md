@@ -53,7 +53,7 @@ White Noise ↔ MDK ↔ codr ↔ HERDR ↔ your agent
 
 Reply collection uses existing transcripts without an additional model call or terminal scraping. [Behaviour and recovery](docs/REFERENCE.md)
 
-**Limits:** Decisions target OpenCode 1.18.35 single-choice questions with 1–9 options. Other dialogs need the terminal. Avoid simultaneous terminal/phone answers. [Media and audio →](docs/REFERENCE.md#images-and-voice-messages)
+**Limits:** Decision replies support OpenCode single-choice questions with 1–9 options. Other dialogs need the terminal. Avoid simultaneous terminal/phone answers. [Decision compatibility](docs/REFERENCE.md#answer-decisions-from-the-phone) · [Media and audio](docs/REFERENCE.md#images-and-voice-messages)
 
 ## Screenshots
 
