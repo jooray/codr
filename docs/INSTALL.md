@@ -98,7 +98,7 @@ Ambiguous accounts or service files that differ from the proposed fresh configur
 
 Group creation can take time. Group names and initial connection/status messages provide the normal visible installation signal. They do not prove the phone-to-agent round trip.
 
-An extra completion notice is optional. If requested, follow the [completion-notice instructions](../README.md#completion-notice), select a verified group ID, and distinguish an MDK-confirmed send from phone-confirmed receipt.
+An extra completion notice is optional. If requested, follow the [completion-notice instructions](REFERENCE.md#completion-notice), select a verified group ID, and distinguish an MDK-confirmed send from phone-confirmed receipt.
 
 ## Diagnostics
 
@@ -117,7 +117,7 @@ If a supported agent appears without a native session ID, check its HERDR integr
 
 Native transcript reads are bounded to 128 MiB per file and 16 MiB per record. Missing, ambiguous, or unsupported transcript data stays unavailable for final-reply extraction. Claude Code must record an explicit `end_turn` stop reason; the bridge retries later if the writer has not persisted it yet.
 
-See [Recovery and diagnostics](../README.md#recovery-and-diagnostics) for uncertain group creation or prompt submissions. Do not blindly repeat those operations.
+See [Recovery and diagnostics](REFERENCE.md#recovery-and-diagnostics) for uncertain group creation or prompt submissions. Do not blindly repeat those operations.
 
 ## Instructions for coding agents
 
