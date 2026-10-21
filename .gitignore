@@ -4,3 +4,4 @@
 /.env
 *.lock.tmp
 /state.json
+__pycache__/

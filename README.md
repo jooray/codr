@@ -16,7 +16,7 @@ The [agent installation guide](docs/INSTALL.md#instructions-for-coding-agents) c
 
 The session groups and their connection/status messages show installation progress in White Noise. A separate completion message is optional.
 
-For manual installation, follow the [human installation guide](docs/INSTALL.md#manual-installation).
+For manual installation, follow the [human installation guide](docs/INSTALL.md#install-through-herdr).
 
 ## Behaviour
 
@@ -45,7 +45,8 @@ HERDR snapshots refresh every three seconds. Very short intermediate states can 
 
 ## Requirements
 
-- Linux with a systemd user manager.
+- Linux x86_64 or aarch64 with a systemd user manager.
+- Python 3.11 or newer and Git. Rust is only needed when building from source.
 - HERDR 0.9.1 or newer, with a running local server.
 - MDK `wn-agent` 0.13.0, including `group_create` and `timeline_list` in `marmot.agent-control.v2`.
 - OpenCode with `--pure export SESSION_ID` support for structured replies.
@@ -69,11 +70,26 @@ cargo build --locked --release
 
 Use the [installation guide](docs/INSTALL.md) for complete commands, including the pinned MDK download and checksum verification.
 
-`herdr plugin install tidley/codr` alone does **not** install the Rust binary, MDK, configuration, or services. The current supported path builds the binary, prepares the services, then links the checkout as a plugin.
+Install a pinned release through HERDR, then open its guided setup tab:
+
+```sh
+herdr plugin install tidley/codr --ref v0.2.0
+herdr plugin action invoke local.white-noise.setup
+```
+
+The installation hook downloads and verifies the matching codr binary from GitHub Releases. Setup asks for your public `npub`, installs or reuses the pinned MDK transport, and configures dedicated user services. No Rust toolchain is required for this path.
+
+For a non-interactive installation by a coding agent, see the [agent instructions](docs/INSTALL.md#instructions-for-coding-agents).
 
 HERDR starts the plugin worker through its startup hook after restore. The worker's user service keeps it alive across client disconnects. Use `systemctl --user enable herdr-white-noise-bridge.service` if it must start independently at login.
 
 Do not share the existing `wn-opencode` connector home. That adapter can also answer messages sent to its identity.
+
+## GitHub builds
+
+GitHub Actions runs Rust formatting, tests, Clippy, and isolated installer/setup tests on pushes and pull requests. A version tag builds native Linux x86_64 and aarch64 binaries with musl, then publishes archives and SHA-256 checksums to [GitHub Releases](https://github.com/tidley/codr/releases).
+
+The installer selects the release version from the plugin checkout. It never silently substitutes a newer release. MDK uses its own pinned upstream release rather than a rebuilt or copied transport implementation.
 
 ## Verify on the phone
 

@@ -1,12 +1,27 @@
 id = "local.white-noise"
 name = "White Noise Remote"
-version = "0.1.0"
+version = "0.2.0"
 min_herdr_version = "0.9.1"
 description = "One encrypted White Noise group per HERDR agent session"
 platforms = ["linux"]
 
+[[build]]
+command = ["python3", "scripts/install.py"]
+
 [[startup]]
 command = ["sh", "plugin-start.sh"]
+
+[[actions]]
+id = "setup"
+title = "Set up White Noise remote"
+contexts = ["workspace"]
+command = ["sh", "plugin-setup.sh"]
+
+[[panes]]
+id = "setup"
+title = "White Noise remote setup"
+placement = "tab"
+command = ["python3", "scripts/setup.py"]
 
 [[actions]]
 id = "start"
