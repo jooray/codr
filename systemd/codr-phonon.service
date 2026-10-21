@@ -1,0 +1,22 @@
+[Unit]
+Description=codr local Phonon-2 speech worker
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/codr/phonon/venv/bin/fermion serve phonon-2 --unix-socket %t/codr-phonon/phonon.sock --threads 4
+Environment=FERMION_CACHE_DIR=%h/.local/share/codr/phonon/models
+Environment=HF_HOME=%h/.local/share/codr/phonon/huggingface
+RuntimeDirectory=codr-phonon
+RuntimeDirectoryMode=0700
+UMask=0077
+MemoryHigh=950M
+MemoryMax=1G
+MemorySwapMax=0
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target

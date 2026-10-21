@@ -16,7 +16,7 @@ fn group_name_uses_the_herdr_tab_label_instead_of_repository_or_topic() {
         "foreground_cwd":"/repos/other-project", "terminal_title_stripped":"OC | A chat topic"
     }))
     .unwrap();
-    assert_eq!(agent.group_name(), "HDR | review");
+    assert_eq!(agent.group_name(), "[cd] review");
 }
 
 #[test]
@@ -26,7 +26,7 @@ fn old_agent_records_without_labels_fall_back_to_the_tab_id() {
         "tab_id":"w1:t2", "cwd":"/repos/weather"
     }))
     .unwrap();
-    assert_eq!(agent.group_name(), "HDR | w1:t2");
+    assert_eq!(agent.group_name(), "[cd] w1:t2");
 }
 
 #[test]
@@ -37,7 +37,7 @@ fn tab_names_are_control_free_and_fit_the_mdk_utf8_byte_limit() {
     }))
     .unwrap();
     let name = agent.group_name();
-    assert!(name.starts_with("HDR | 🐇"));
+    assert!(name.starts_with("[cd] 🐇"));
     assert!(name.len() <= 256);
     assert!(!name.chars().any(char::is_control));
 }
@@ -52,14 +52,21 @@ async fn snapshot_joins_each_agent_with_its_own_tab_label() {
         let mut reader = BufReader::new(stream);
         let request = read_line(&mut reader).await.unwrap();
         let response = json!({"id":request["id"],"result":{"snapshot":{
-            "agents":[{"pane_id":"w1:p2","terminal_id":"term2","agent":"opencode","agent_status":"idle","tab_id":"w1:t2","cwd":"/repos/ignored"}],
-            "tabs":[{"tab_id":"w1:t1","label":"Other tab","number":1},{"tab_id":"w1:t2","label":"Build","number":2}]
+            "agents":[{"pane_id":"w1:p2","terminal_id":"term2","agent":"opencode","agent_status":"idle","tab_id":"w1:t2","workspace_id":"w1","cwd":"/repos/ignored"}],
+            "tabs":[{"tab_id":"w1:t1","label":"Other tab","number":1},{"tab_id":"w1:t2","label":"Build","number":2}],
+            "workspaces":[{"workspace_id":"w1","label":"Workbench"}]
         }}});
         let mut bytes = serde_json::to_vec(&response).unwrap();
         bytes.push(b'\n');
         reader.get_mut().write_all(&bytes).await.unwrap();
     });
     let agents = herdr::snapshot(&Socket { path }).await.unwrap();
-    assert_eq!(agents[0].group_name(), "HDR | Build");
+    assert_eq!(agents[0].group_name(), "[cd] Build");
+    assert!(
+        agents[0]
+            .group_description()
+            .contains("Workspace: Workbench")
+    );
+    assert!(agents[0].group_description().contains("Agent: opencode"));
     server.await.unwrap();
 }

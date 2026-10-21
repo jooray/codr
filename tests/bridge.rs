@@ -1,7 +1,7 @@
 use bech32::ToBase32;
 use herdr_white_noise_bridge::{
     BridgeConfig, BridgeState,
-    bridge::Bridge,
+    bridge::{Bridge, now},
     herdr::Agent,
     state::Mapping,
     wire::{Socket, read_line},
@@ -31,6 +31,7 @@ fn config(dir: &std::path::Path) -> BridgeConfig {
         codex_home: dir.join("codex"),
         claude_home: dir.join("claude"),
         edit_responses: false,
+        transcribe_command: vec![],
     }
 }
 fn agent() -> Agent {
@@ -56,6 +57,8 @@ async fn peer_for_agent(
 ) -> tokio::task::JoinHandle<()> {
     let listener = UnixListener::bind(path).unwrap();
     tokio::spawn(async move {
+        let mut profile_name = "HDR | historical".to_owned();
+        let mut profile_description = String::new();
         loop {
             let (stream, _) = listener.accept().await.unwrap();
             let mut reader = tokio::io::BufReader::new(stream);
@@ -71,6 +74,25 @@ async fn peer_for_agent(
                     }
                     "edit_message" => {
                         json!({"type":"final_sent","message_ids_hex":["dd".repeat(32)]})
+                    }
+                    "group_info" => {
+                        json!({"type":"group_info","subject":profile_name,"description":profile_description})
+                    }
+                    "group_profile_update" => {
+                        profile_name = req["name"].as_str().unwrap().into();
+                        profile_description = req["description"].as_str().unwrap().into();
+                        json!({"type":"group_profile_updated","message_ids_hex":["ee".repeat(32)]})
+                    }
+                    "download_media" => {
+                        let path = req["media"]["test_path"].as_str().unwrap();
+                        json!({"type":"media_downloaded","path":path,"media_type":req["media"]["media_type"],
+                            "size_bytes":std::fs::metadata(path).unwrap().len()})
+                    }
+                    "timeline_message_get" => {
+                        json!({"type":"timeline_message", "account_id_hex":"aa".repeat(32),
+                        "group_id_hex":req["group_id_hex"],"message_id_hex":req["message_id_hex"],
+                        "message":{"message_id_hex":req["message_id_hex"],"availability":"available","kind":9,
+                            "sender":{"account_id_hex":HEX},"text":"", "attachments":[{"media_type":"audio/ogg","file_name":"voice.ogg"}]}})
                     }
                     _ => panic!("unexpected request"),
                 }
@@ -223,6 +245,13 @@ async fn a_phone_choice_answers_the_blocked_question_instead_of_becoming_a_promp
     );
     bridge.reconcile(vec![blocked]).await.unwrap();
     bridge.flush().await.unwrap();
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| { call["text"] == "> blocked Waiting for your decision." })
+    );
     let mut answer = inbound(HEX, "choice-1");
     answer["message"]["text"] = json!("1");
     bridge.inbound(&answer).await.unwrap();
@@ -385,6 +414,13 @@ async fn only_a_new_authorised_phone_message_wakes_forwarding_for_all_sessions()
     wake["message"]["text"] = json!("/status");
     bridge.inbound(&wake).await.unwrap();
     bridge.flush().await.unwrap();
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| { call["text"] == "> idle HERDR session: connected." })
+    );
     assert_eq!(
         serde_json::to_value(&bridge.state).unwrap()["forwarding_enabled"],
         true
@@ -398,14 +434,9 @@ async fn only_a_new_authorised_phone_message_wakes_forwarding_for_all_sessions()
     other.state_change_seq = 2;
     restarted.reconcile(vec![agent(), other]).await.unwrap();
     restarted.flush().await.unwrap();
-    assert!(
-        calls
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|request| request["group_id_hex"] == "dd".repeat(16)
-                && request["text"] == "State: working")
-    );
+    assert!(calls.lock().unwrap().iter().any(
+        |request| request["group_id_hex"] == "dd".repeat(16) && request["text"] == "> working"
+    ));
     assert!(forwarding_command(&config, "desk").await.status.success());
     restarted.reconcile(vec![agent()]).await.unwrap();
     restarted.inbound(&wake).await.unwrap();
@@ -1078,7 +1109,7 @@ async fn progress_is_edited_but_the_final_is_a_separate_message_across_restart()
         2,
         "One progress message and one immutable final reply"
     );
-    assert_eq!(sends[0]["text"], "State: working");
+    assert_eq!(sends[0]["text"], "> working");
     assert_eq!(sends[1]["text"], "The final answer");
     assert_ne!(sends[0]["idempotency_key"], sends[1]["idempotency_key"]);
     let edits: Vec<_> = requests
@@ -1093,12 +1124,7 @@ async fn progress_is_edited_but_the_final_is_a_separate_message_across_restart()
             .contains("✓ Inspect code")
     );
     assert!(edits[0]["text"].as_str().unwrap().contains("▶ Run checks"));
-    assert!(
-        edits[1]["text"]
-            .as_str()
-            .unwrap()
-            .starts_with("State: done")
-    );
+    assert!(edits[1]["text"].as_str().unwrap().starts_with("> done"));
     assert!(
         !edits
             .iter()
@@ -1248,7 +1274,7 @@ async fn long_final_replies_keep_all_text_without_waiting_for_progress_edits() {
     assert_eq!(calls[1]["type"], "send_final");
     assert_eq!(calls[2]["type"], "send_final");
     assert_eq!(calls[3]["type"], "edit_message");
-    assert_eq!(calls[3]["text"], "State: done");
+    assert_eq!(calls[3]["text"], "> done");
     assert_eq!(
         format!(
             "{}{}",
@@ -1299,7 +1325,7 @@ async fn late_final_is_resolved_before_opening_the_next_response() {
             .find(|m| m.id == first)
             .unwrap()
             .text,
-        "State: done"
+        "> done"
     );
     assert!(
         bridge
@@ -1316,7 +1342,7 @@ async fn late_final_is_resolved_before_opening_the_next_response() {
             .find(|m| m.id == second)
             .unwrap()
             .text,
-        "State: working"
+        "> working"
     );
     assert_eq!(
         calls
@@ -1510,7 +1536,7 @@ async fn a_failed_progress_edit_does_not_block_the_standalone_final() {
     assert_eq!(calls[0]["type"], "send_final");
     assert_eq!(calls[0]["text"], "Final reply");
     assert_eq!(calls[1]["type"], "edit_message");
-    assert_eq!(calls[1]["text"], "State: done");
+    assert_eq!(calls[1]["text"], "> done");
     assert!(bridge.state.outbox.is_empty());
     server.abort();
 }
@@ -1715,14 +1741,8 @@ async fn working_notice_remains_but_done_only_forwards_the_final_reply() {
         .iter()
         .map(|m| m.text.as_str())
         .collect();
-    assert_eq!(
-        texts
-            .iter()
-            .filter(|text| **text == "State: working")
-            .count(),
-        1
-    );
-    assert!(!texts.contains(&"State: done"));
+    assert_eq!(texts.iter().filter(|text| **text == "> working").count(), 1);
+    assert!(!texts.contains(&"> done"));
     assert_eq!(
         texts
             .iter()
@@ -1855,7 +1875,7 @@ async fn native_round_trip(provider: &str, legacy_mapping: bool) {
     assert!(
         !calls
             .iter()
-            .any(|call| call["text"] == "Native old final" || call["text"] == "State: done")
+            .any(|call| call["text"] == "Native old final" || call["text"] == "> done")
     );
     if legacy_mapping {
         assert!(!calls.iter().any(|call| call["type"] == "group_create"));
@@ -1921,7 +1941,7 @@ async fn legacy_native_session_that_exited_before_upgrade_does_not_replay_histor
         );
         bridge.reconcile(vec![]).await.unwrap();
         assert_eq!(bridge.state.outbox.len(), 1);
-        assert!(bridge.state.outbox[0].text.starts_with("Session ended"));
+        assert!(bridge.state.outbox[0].text.starts_with("> ended"));
         assert!(bridge.state.mappings[&key].output_initialised);
         assert!(!bridge.state.mappings[&key].active);
     }
@@ -2121,7 +2141,7 @@ async fn final_output_is_collected_even_if_the_agent_exits_between_snapshots() {
     );
     bridge.reconcile(vec![]).await.unwrap();
     assert_eq!(bridge.state.outbox[0].text, "last answer");
-    assert!(bridge.state.outbox[1].text.starts_with("Session ended"));
+    assert!(bridge.state.outbox[1].text.starts_with("> ended"));
     bridge.reconcile(vec![]).await.unwrap();
     assert_eq!(bridge.state.outbox.len(), 2);
 }
@@ -2266,7 +2286,7 @@ async fn failed_export_does_not_repeat_a_lifecycle_notice() {
             .state
             .outbox
             .iter()
-            .filter(|m| m.text == "State: idle")
+            .filter(|m| m.text == "> idle")
             .count(),
         1
     );
@@ -2294,7 +2314,7 @@ async fn temporarily_missing_backend_keeps_an_existing_session_present() {
             .state
             .outbox
             .iter()
-            .any(|m| m.text.starts_with("Session ended"))
+            .any(|m| m.text.starts_with("> ended"))
     );
 }
 
@@ -2376,10 +2396,14 @@ async fn renaming_existing_groups_keeps_their_mapping_and_skips_matching_names()
             let req = read_line(&mut reader).await.unwrap();
             captured.lock().unwrap().push(req.clone());
             let mut response = match req["type"].as_str().unwrap() {
-                "group_info" => json!({"type":"group_info","subject":subject}),
+                "group_info" => {
+                    json!({"type":"group_info","subject":subject})
+                }
                 "group_profile_update" => {
                     assert_eq!(req["group_id_hex"], "bb".repeat(16));
-                    assert!(req.get("description").is_none());
+                    let description = req["description"].as_str().unwrap();
+                    assert!(description.contains("Agent: opencode"));
+                    assert!(description.contains("Workspace:"));
                     subject = req["name"].as_str().unwrap().to_owned();
                     json!({"type":"group_profile_updated","message_ids_hex":["cc".repeat(32)]})
                 }
@@ -2405,20 +2429,31 @@ async fn renaming_existing_groups_keeps_their_mapping_and_skips_matching_names()
     let original = bridge.state.clone();
     bridge.rename_groups().await.unwrap();
     bridge.rename_groups().await.unwrap();
-    assert_eq!(bridge.state, original);
+    assert!(
+        bridge.state.mappings[&agent().key()]
+            .group_description
+            .is_some()
+    );
+    let mut after = bridge.state.clone();
+    after
+        .mappings
+        .get_mut(&agent().key())
+        .unwrap()
+        .group_description = None;
+    assert_eq!(after, original);
     let requests = requests.lock().unwrap();
     let updates: Vec<_> = requests
         .iter()
         .filter(|r| r["type"] == "group_profile_update")
         .collect();
     assert_eq!(updates.len(), 1);
-    assert_eq!(updates[0]["name"], "HDR | Review");
+    assert_eq!(updates[0]["name"], "[cd] Review");
     mdk.abort();
     herdr.abort();
 }
 
 #[tokio::test]
-async fn renaming_preserves_ended_groups_without_a_known_historical_tab_label() {
+async fn renaming_uses_the_existing_title_when_an_ended_group_has_no_stored_tab_label() {
     let directory = tempfile::tempdir().unwrap();
     let config = config(directory.path());
     let calls = Arc::new(Mutex::new(vec![]));
@@ -2443,8 +2478,271 @@ async fn renaming_preserves_ended_groups_without_a_known_historical_tab_label() 
             .lock()
             .unwrap()
             .iter()
-            .all(|request| request.get("type").is_none())
+            .any(|request| request["type"] == "group_profile_update"
+                && request["name"] == "[cd] historical")
+    );
+    bridge.rename_groups().await.unwrap();
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request["type"] == "group_profile_update")
+            .count(),
+        1,
+        "Repeating migration must not add another [cd] prefix"
     );
     herdr.abort();
     mdk.abort();
+}
+
+#[tokio::test]
+async fn deferred_prepared_media_does_not_block_another_session() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    export_script(&config.opencode_bin, "Historical answer", "old");
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let herdr = peer(&config.herdr_socket, false, calls.clone()).await;
+    let mut bridge = Bridge::open(config).unwrap();
+    bridge.reconcile(vec![agent()]).await.unwrap();
+    let mut uncertain = bridge.state.mappings[&agent().key()].clone();
+    uncertain.group_id_hex = Some("dd".repeat(16));
+    bridge
+        .state
+        .mappings
+        .insert("uncertain-session".into(), uncertain);
+    let mut deferred = inbound(HEX, "deferred-media");
+    deferred["group_id_hex"] = json!("dd".repeat(16));
+    deferred["_codr_prepared_text"] = json!("Deferred prompt");
+    let mut ready = inbound(HEX, "ready-media");
+    let image = root.path().join("layout.png");
+    std::fs::write(&image, b"\x89PNG\r\n\x1a\nexample").unwrap();
+    ready["message"]["text"] = json!("Ready prompt");
+    ready["message"]["media"] = json!([{"media_type":"image/png","test_path":image,"file_name":"layout.png","source_epoch":1,
+        "ciphertext_sha256":"aa".repeat(32),"plaintext_sha256":"bb".repeat(32),"nonce_hex":"00".repeat(12),
+        "version":"encrypted-media-v1","source_epoch":1,"locators":[{"kind":"blossom-v1","value":"https://example.com/fixture"}]}]);
+    bridge.state.media_pending = vec![deferred, ready];
+    assert!(bridge.process_media().await.is_err());
+    for _ in 0..100 {
+        // Each worker tick can arrive after the deferred session's retry deadline.
+        bridge.state.media_pending[0]["_codr_retry_at"] = json!(0);
+        let _ = bridge.process_media().await;
+        if bridge.state.media_pending.len() == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(bridge.state.media_pending.len(), 1);
+    assert_eq!(
+        bridge.state.media_pending[0]["message"]["message_id_hex"],
+        "deferred-media"
+    );
+    let requests = calls.lock().unwrap();
+    let prompts: Vec<_> = requests
+        .iter()
+        .filter(|call| call["method"] == "agent.prompt")
+        .collect();
+    assert_eq!(prompts.len(), 1);
+    assert!(
+        prompts[0]["params"]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("Ready prompt\n\nAttached image: ")
+    );
+    mdk.abort();
+    herdr.abort();
+}
+
+#[tokio::test]
+async fn prepared_audio_survives_a_herdr_outage_and_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let mut config = config(root.path());
+    export_script(&config.opencode_bin, "Historical answer", "old");
+    let command = root.path().join("transcribe");
+    std::fs::write(
+        &command,
+        "#!/bin/sh\nprintf 'Inspect the blue button.\\n'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o700)).unwrap();
+    config.transcribe_command = vec![command.to_string_lossy().into_owned()];
+    let recording = root.path().join("voice.ogg");
+    std::fs::write(&recording, "audio fixture").unwrap();
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let herdr = peer(&config.herdr_socket, false, calls.clone()).await;
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge.reconcile(vec![agent()]).await.unwrap();
+    let mut event = inbound(HEX, "audio-outage");
+    event["message"]["text"] = json!("");
+    event["message"]["media"] = json!([{"media_type":"audio/ogg","test_path":recording,"file_name":"voice.ogg",
+        "ciphertext_sha256":"aa".repeat(32),"plaintext_sha256":"bb".repeat(32),"nonce_hex":"00".repeat(12),
+        "version":"encrypted-media-v1","source_epoch":1,"locators":[{"kind":"blossom-v1","value":"https://example.com/fixture"}]}]);
+    bridge.inbound(&event).await.unwrap();
+    bridge.process_media().await.unwrap();
+    bridge.herdr_available = false;
+    for _ in 0..100 {
+        if bridge.process_media().await.is_err() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        BridgeState::load(&config.state_path)
+            .unwrap()
+            .media_pending
+            .len(),
+        1
+    );
+    assert!(
+        !bridge.state.mappings[&agent().key()]
+            .seen_messages
+            .contains(&"audio-outage".into())
+    );
+    drop(bridge);
+    let mut bridge = Bridge::open(config).unwrap();
+    bridge.reconcile(vec![agent()]).await.unwrap();
+    for _ in 0..100 {
+        bridge.process_media().await.unwrap();
+        if bridge.state.media_pending.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(bridge.state.media_pending.is_empty());
+    bridge.inbound(&event).await.unwrap();
+    let requests = calls.lock().unwrap();
+    let prompts: Vec<_> = requests
+        .iter()
+        .filter(|call| call["method"] == "agent.prompt")
+        .collect();
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(prompts[0]["params"]["text"], "Inspect the blue button.");
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|call| call["type"] == "download_media")
+            .count(),
+        1
+    );
+    mdk.abort();
+    herdr.abort();
+}
+
+#[tokio::test]
+async fn audio_queue_survives_restart_and_submits_the_transcript_once_without_confirmation() {
+    let root = tempfile::tempdir().unwrap();
+    let mut config = config(root.path());
+    export_script(&config.opencode_bin, "Historical answer", "old");
+    let command = root.path().join("transcribe");
+    std::fs::write(
+        &command,
+        "#!/bin/sh\nprintf 'Inspect the blue button.\\n'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o700)).unwrap();
+    config.transcribe_command = vec![command.to_string_lossy().into_owned()];
+    let recording = root.path().join("voice.ogg");
+    std::fs::write(&recording, "audio fixture").unwrap();
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let herdr = peer(&config.herdr_socket, false, calls.clone()).await;
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge.reconcile(vec![agent()]).await.unwrap();
+    let mut event = inbound(HEX, "audio-one");
+    event["message"]["text"] = json!("");
+    event["message"]["media"] = json!([{"media_type":"audio/ogg","test_path":recording,"file_name":"voice.ogg",
+        "ciphertext_sha256":"aa".repeat(32),"plaintext_sha256":"bb".repeat(32),"nonce_hex":"00".repeat(12),
+        "version":"encrypted-media-v1","source_epoch":1,"locators":[{"kind":"blossom-v1","value":"https://example.com/fixture"}]}]);
+    let mut foreign = event.clone();
+    foreign["message"]["sender"]["account_id_hex"] = json!("ff".repeat(32));
+    bridge.inbound(&foreign).await.unwrap();
+    assert!(bridge.state.media_pending.is_empty());
+    let mut summary = event.clone();
+    summary["message"]["media"] = json!([{"media_type":"audio/ogg","file_name":"voice.ogg"}]);
+    bridge.inbound(&summary).await.unwrap();
+    bridge.inbound(&summary).await.unwrap();
+    assert_eq!(bridge.state.media_pending.len(), 1);
+    assert!(
+        !bridge.state.mappings[&agent().key()]
+            .seen_messages
+            .contains(&"audio-one".into())
+    );
+    drop(bridge);
+    let mut bridge = Bridge::open(config).unwrap();
+    bridge.reconcile(vec![agent()]).await.unwrap();
+    for _ in 0..2 {
+        for _ in 0..100 {
+            bridge.process_media().await.unwrap();
+            if bridge.state.media_pending[0]["_codr_retry_at"]
+                .as_u64()
+                .unwrap_or(0)
+                > now()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            bridge.state.media_pending[0]["_codr_retry_at"]
+                .as_u64()
+                .unwrap_or(0)
+                > now()
+        );
+        assert!(
+            !bridge.state.mappings[&agent().key()]
+                .seen_messages
+                .contains(&"audio-one".into())
+        );
+        for _ in 0..3 {
+            bridge.inbound(&summary).await.unwrap();
+            bridge.process_media().await.unwrap();
+        }
+        assert_eq!(
+            bridge
+                .state
+                .outbox
+                .iter()
+                .filter(|m| m.text == "> transcribing")
+                .count(),
+            1,
+            "Unavailable history references must not repeat the preparation notice"
+        );
+        bridge.state.media_pending[0]["_codr_retry_at"] = json!(0);
+    }
+    bridge.process_media().await.unwrap();
+    // An old MDK returns summaries during recovery. A complete live event must
+    // hydrate that queued row, not be discarded as a duplicate.
+    bridge.inbound(&event).await.unwrap();
+    for _ in 0..100 {
+        bridge.process_media().await.unwrap();
+        if bridge.state.media_pending.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(bridge.state.media_pending.is_empty());
+    assert!(
+        bridge.state.mappings[&agent().key()]
+            .seen_messages
+            .contains(&"audio-one".into())
+    );
+    bridge.inbound(&event).await.unwrap();
+    let requests = calls.lock().unwrap();
+    let prompts: Vec<_> = requests
+        .iter()
+        .filter(|call| call["method"] == "agent.prompt")
+        .collect();
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(prompts[0]["params"]["text"], "Inspect the blue button.");
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|call| call["type"] == "download_media")
+            .count(),
+        1
+    );
+    mdk.abort();
+    herdr.abort();
 }

@@ -21,6 +21,10 @@ pub struct Agent {
     #[serde(default)]
     pub tab_label: Option<String>,
     #[serde(default)]
+    pub workspace_id: String,
+    #[serde(default)]
+    pub workspace_label: Option<String>,
+    #[serde(default)]
     pub agent: String,
     pub agent_status: String,
     pub agent_session: Option<Session>,
@@ -65,23 +69,49 @@ impl Agent {
             .as_deref()
             .filter(|label| !label.trim().is_empty())
             .unwrap_or(fallback);
-        let label: String = raw
-            .chars()
-            .filter(|character| !character.is_control())
-            .collect();
-        let mut name = format!(
-            "HDR | {}",
-            if label.trim().is_empty() {
-                "session"
-            } else {
-                label.trim()
-            }
-        );
-        while name.len() > 256 {
-            name.pop();
-        }
-        name
+        group_name(raw)
     }
+
+    pub fn group_description(&self) -> String {
+        let workspace = self
+            .workspace_label
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(if self.workspace_id.is_empty() {
+                "unknown"
+            } else {
+                &self.workspace_id
+            });
+        let agent = self
+            .agent_session
+            .as_ref()
+            .map(|s| s.agent.as_str())
+            .unwrap_or(&self.agent);
+        let clean = |text: &str| {
+            text.chars()
+                .filter(|c| !c.is_control())
+                .take(500)
+                .collect::<String>()
+        };
+        format!(
+            "Workspace: {}\nAgent: {}\nManaged by codr via HERDR.",
+            clean(workspace),
+            clean(agent)
+        )
+    }
+}
+
+pub fn group_name(label: &str) -> String {
+    const PREFIX: &str = "[cd] ";
+    let mut label: String = label.chars().filter(|c| !c.is_control()).collect();
+    label = label.trim().to_owned();
+    if label.is_empty() {
+        label = "session".into();
+    }
+    while label.len() + PREFIX.len() > 256 {
+        label.pop();
+    }
+    format!("{PREFIX}{}", label.trim_end())
 }
 
 pub async fn snapshot(socket: &Socket) -> Result<Vec<Agent>> {
@@ -107,6 +137,14 @@ pub async fn snapshot(socket: &Socket) -> Result<Vec<Agent>> {
         if let Some(label) = labels.get(agent.tab_id.as_str()) {
             agent.tab_label = Some(label.clone());
         }
+        agent.workspace_label = response["result"]["snapshot"]["workspaces"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|w| w["workspace_id"].as_str() == Some(&agent.workspace_id))
+            .and_then(|w| w["label"].as_str())
+            .map(str::to_owned)
+            .or_else(|| agent.workspace_label.clone());
     }
     Ok(agents)
 }

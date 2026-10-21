@@ -6,6 +6,7 @@ from contextlib import contextmanager
 import fcntl
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import socket
@@ -17,6 +18,7 @@ import tomllib
 import uuid
 
 from install import InstallError, install_bundle, platform_name
+from phonon import configure_phonon
 
 ROOT = Path(__file__).resolve().parents[1]
 MDK_VERSION = "0.13.0"
@@ -111,7 +113,7 @@ def ensure_mdk(runner):
 
 
 def toml_text(values):
-    return "".join(f"{key} = {json.dumps(str(value), ensure_ascii=False)}\n" for key, value in values.items())
+    return "".join(f"{key} = {json.dumps(value if isinstance(value, (list, bool, int)) else str(value), ensure_ascii=False)}\n" for key, value in values.items())
 
 
 def private_write(path, text):
@@ -150,15 +152,15 @@ def setup_lock(directory):
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
-def configure(owner, herdr_socket=None, runner=run, check=False):
+def configure(owner, herdr_socket=None, runner=run, check=False, enable_audio=None):
     if check:
-        return _configure(owner, herdr_socket, runner, check)
+        return _configure(owner, herdr_socket, runner, check, enable_audio)
     directory = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "herdr-white-noise-bridge"
     with setup_lock(directory):
-        return _configure(owner, herdr_socket, runner, check)
+        return _configure(owner, herdr_socket, runner, check, enable_audio)
 
 
-def _configure(owner, herdr_socket, runner, check):
+def _configure(owner, herdr_socket, runner, check, enable_audio):
     platform_name()
     home = Path.home()
     config_root = Path(os.environ.get("XDG_CONFIG_HOME", home / ".config")).resolve()
@@ -182,6 +184,25 @@ def _configure(owner, herdr_socket, runner, check):
         if selected and Path(selected).resolve() != Path(existing["herdr_socket"]).resolve():
             raise SetupError("Existing configuration targets another HERDR server; nothing was replaced")
         runner([str(bridge), "--config", str(config_path), "status"])
+        if not check and enable_audio:
+            command = configure_phonon(runner, private_write, unit_argument)
+            if existing.get("transcribe_command") and existing["transcribe_command"] != command:
+                raise SetupError("An existing transcription command is configured; inspect it before selecting Phonon")
+            if existing.get("transcribe_command") != command:
+                text = config_path.read_text()
+                setting = toml_text({"transcribe_command": command}).rstrip()
+                if "transcribe_command" in existing:
+                    text, changed = re.subn(r"(?m)^transcribe_command\s*=\s*\[\s*\][ \t]*(?:#[^\n]*)?$", lambda _: setting, text, count=1)
+                    if changed != 1:
+                        raise SetupError("Could not replace the empty transcription setting; inspect the configuration")
+                else:
+                    text = text.rstrip() + "\n" + setting + "\n"
+                with tempfile.TemporaryDirectory(prefix="codr-audio-check-") as temporary:
+                    candidate = Path(temporary) / "config.toml"
+                    candidate.write_text(text)
+                    runner([str(bridge), "--config", str(candidate), "status"])
+                private_write(config_path, text)
+                runner(["systemctl", "--user", "restart", "herdr-white-noise-bridge.service"])
         if not check:
             runner(["systemctl", "--user", "start", "herdr-white-noise-bridge.service"])
         report = {"configuration": str(config_path), "existing_configuration_preserved": True,
@@ -217,6 +238,7 @@ def _configure(owner, herdr_socket, runner, check):
     if not available:
         raise SetupError("Install or start a supported agent: OpenCode, Codex, or Claude Code")
     opencode = executables.get("opencode", "opencode")
+    transcribe_command = configure_phonon(runner, private_write, unit_argument) if enable_audio is not False else []
     mdk = ensure_mdk(runner)
     mdk_home = home / ".marmot-agents/herdr"
     mdk_socket = mdk_home / "dev/wn-agent.sock"
@@ -254,7 +276,8 @@ def _configure(owner, herdr_socket, runner, check):
     values = {"phone_npub": owner, "herdr_socket": herdr_socket, "wn_agent_socket": mdk_socket,
         "account_id_hex": result["account_id_hex"], "state_path": state_path, "opencode_bin": opencode,
         "codex_home": Path(os.environ.get("CODEX_HOME", home / ".codex")).resolve(),
-        "claude_home": Path(os.environ.get("CLAUDE_CONFIG_DIR", home / ".claude")).resolve()}
+        "claude_home": Path(os.environ.get("CLAUDE_CONFIG_DIR", home / ".claude")).resolve(),
+        "transcribe_command": transcribe_command}
     with tempfile.TemporaryDirectory(prefix="codr-config-check-") as temporary:
         candidate = Path(temporary) / "config.toml"
         candidate.write_text(toml_text(values))
@@ -273,12 +296,15 @@ def main():
     parser.add_argument("--npub", default=os.environ.get("CODR_OWNER_NPUB") or None)
     parser.add_argument("--herdr-socket", type=Path)
     parser.add_argument("--check", action="store_true", help="Validate an existing configuration without changing services")
+    audio = parser.add_mutually_exclusive_group()
+    audio.add_argument("--phonon", dest="enable_audio", action="store_true", default=None, help="Install or reuse the local Phonon-2 worker, including on an existing installation")
+    audio.add_argument("--no-audio", dest="enable_audio", action="store_false", help="Skip audio setup on a fresh installation")
     args = parser.parse_args()
     config = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "herdr-white-noise-bridge/config.toml"
     if not args.npub and not config.exists() and sys.stdin.isatty():
         args.npub = input("Your White Noise public npub: ").strip()
     try:
-        print(json.dumps(configure(args.npub, args.herdr_socket, check=args.check), indent=2))
+        print(json.dumps(configure(args.npub, args.herdr_socket, check=args.check, enable_audio=args.enable_audio), indent=2))
         print("Accept a verified bridge invitation in White Noise, then send /status and a harmless test prompt.")
     except (SetupError, InstallError, OSError, ValueError, KeyError) as error:
         print(f"codr setup: {error}", file=sys.stderr)

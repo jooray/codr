@@ -20,6 +20,9 @@ pub struct BridgeConfig {
     /// Requires an MDK connector with edit_message support.
     #[serde(default)]
     pub edit_responses: bool,
+    /// Executable and fixed arguments. The downloaded audio path is appended.
+    #[serde(default)]
+    pub transcribe_command: Vec<String>,
 }
 
 fn default_opencode() -> PathBuf {

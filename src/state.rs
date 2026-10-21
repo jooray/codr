@@ -12,6 +12,8 @@ use std::{
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Mapping {
     pub group_id_hex: Option<String>,
+    #[serde(default)]
+    pub group_description: Option<String>,
     pub creating: bool,
     pub last_agent_status: String,
     pub last_state_change_seq: u64,
@@ -77,6 +79,9 @@ pub struct BridgeState {
     pub forwarding_revision: Option<String>,
     #[serde(default)]
     pub forwarding_resume_pending: bool,
+    /// Authorised inbound media awaiting download/transcription. No terminal input yet.
+    #[serde(default)]
+    pub media_pending: Vec<serde_json::Value>,
 }
 
 fn forwarding_default() -> bool {
@@ -94,6 +99,7 @@ impl Default for BridgeState {
             forwarding_enabled: true,
             forwarding_revision: None,
             forwarding_resume_pending: false,
+            media_pending: vec![],
         }
     }
 }
@@ -163,7 +169,7 @@ impl BridgeState {
         self.outbox.push(Outgoing {
             id: id.clone(),
             group: group.into(),
-            text: "State: working".into(),
+            text: "> working".into(),
             response: Some(ResponseDelivery::default()),
         });
         self.mappings.get_mut(key).unwrap().response_id = Some(id);
@@ -203,9 +209,9 @@ impl BridgeState {
             return;
         }
         item.text = if let Some((_, tasks)) = item.text.split_once("\nTasks\n") {
-            format!("State: done\nTasks\n{tasks}")
+            format!("> done\nTasks\n{tasks}")
         } else {
-            "State: done".into()
+            "> done".into()
         };
         delivery.finished = true;
     }

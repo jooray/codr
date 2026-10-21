@@ -22,6 +22,15 @@ pub struct Bridge {
     pub marmot: Socket,
     pub herdr_available: bool,
     phone: String,
+    media_job: Option<tokio::task::JoinHandle<Result<String>>>,
+}
+
+impl Drop for Bridge {
+    fn drop(&mut self) {
+        if let Some(job) = self.media_job.take() {
+            job.abort();
+        }
+    }
 }
 
 impl Bridge {
@@ -51,6 +60,7 @@ impl Bridge {
             agents: BTreeMap::new(),
             herdr_available: false,
             phone,
+            media_job: None,
         };
         bridge.refresh_forwarding()?;
         Ok(bridge)
@@ -432,12 +442,12 @@ impl Bridge {
                     self.state.update_response(
                         &key,
                         &group,
-                        "Session ended without a completed reply.",
+                        "> ended No completed reply was recorded.",
                         true,
                     );
                 }
                 if !baselining {
-                    self.state.enqueue(&group, "Session ended. This group retains its history. A restored native session will reconnect here.");
+                    self.state.enqueue(&group, "> ended This group retains its history. A restored native session will reconnect here.");
                 }
             }
             let m = self.state.mappings.get_mut(&key).unwrap();
@@ -556,7 +566,7 @@ impl Bridge {
             self.state.mappings.get_mut(key).unwrap().creating = true;
             self.save()?;
             // No blind retries: GroupCreate has no idempotency key, even after a timeout.
-            match self.marmot.marmot(json!({"type":"group_create", "account_id_hex":self.config.account_id_hex,"name":agent.group_name(),"members":[self.config.phone_npub],"description":"Remote for one HERDR agent session."})).await {
+            match self.marmot.marmot(json!({"type":"group_create", "account_id_hex":self.config.account_id_hex,"name":agent.group_name(),"members":[self.config.phone_npub],"description":agent.group_description()})).await {
                     Ok(response) => {
                         ensure!(response["type"] == "group_created", "Unexpected group creation response");
                         let group = response["group_id_hex"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| anyhow::anyhow!("Missing group ID"))?.to_owned();
@@ -590,14 +600,13 @@ impl Bridge {
                     self.state.update_response(
                         key,
                         &group,
-                        "State: idle. No completed reply was recorded.",
+                        "> idle No completed reply was recorded.",
                         true,
                     );
                 }
                 self.state.begin_response(key, &group);
                 if resumed {
-                    self.state
-                        .update_response(key, &group, "State: working", false);
+                    self.state.update_response(key, &group, "> working", false);
                 }
             } else if status_changed
                 && !agent.settled()
@@ -606,13 +615,13 @@ impl Bridge {
                 self.state.update_response(
                     key,
                     &group,
-                    &format!("State: {}", agent.agent_status),
+                    &format!("> {}", agent.agent_status),
                     false,
                 );
             }
         } else if previous.last_agent_status != agent.agent_status && agent.agent_status != "done" {
             self.state
-                .enqueue(&group, &format!("State: {}", agent.agent_status));
+                .enqueue(&group, &format!("> {}", agent.agent_status));
         }
         let m = self.state.mappings.get_mut(key).unwrap();
         m.last_agent_status = agent.agent_status.clone();
@@ -675,7 +684,7 @@ impl Bridge {
                     _ if self.state.mappings[key].blocked_context_seq
                         != Some(agent.state_change_seq) =>
                     {
-                        let notice = "Agent needs input in the terminal. No supported decision is available yet.";
+                        let notice = "> blocked Agent needs input in the terminal. No supported decision is available yet.";
                         if self.config.edit_responses {
                             self.state.update_response(key, &group, notice, false);
                         } else {
@@ -702,7 +711,7 @@ impl Bridge {
                 .await?;
             herdr::get(&self.herdr, agent).await?;
             if let Some(text) = response["result"]["read"]["text"].as_str() {
-                let text = format!("Agent needs input (terminal context):\n{text}");
+                let text = format!("> blocked Agent needs input (terminal context):\n{text}");
                 if self.config.edit_responses {
                     self.state.update_response(key, &group, &text, false);
                 } else {
@@ -725,7 +734,7 @@ impl Bridge {
                     self.state.update_response(
                         key,
                         &group,
-                        "State: idle. Waiting for the completed reply.",
+                        "> idle Waiting for the completed reply.",
                         false,
                     );
                 }
@@ -759,6 +768,10 @@ impl Bridge {
     }
 
     pub async fn inbound(&mut self, event: &Value) -> Result<()> {
+        self.route_inbound(event, false).await
+    }
+
+    async fn route_inbound(&mut self, event: &Value, prepared: bool) -> Result<()> {
         ensure!(
             event["marmot_agent_control"] == PROTOCOL,
             "MDK event protocol mismatch"
@@ -792,6 +805,19 @@ impl Bridge {
             .iter()
             .any(|seen| seen == id)
         {
+            return Ok(());
+        }
+        if let Some(pending) = self.state.media_pending.iter_mut().find(|pending| {
+            !prepared
+                && pending["group_id_hex"] == group
+                && pending["message"]["message_id_hex"] == id
+        }) {
+            if !crate::media::complete_refs(&pending["message"]) && crate::media::complete_refs(msg)
+            {
+                pending["message"] = msg.clone();
+                pending["_codr_retry_at"] = json!(0);
+                self.save()?;
+            }
             return Ok(());
         }
         self.refresh_forwarding()?;
@@ -862,26 +888,54 @@ impl Bridge {
                 }
             }
         }
+        let media_busy = self.state.media_pending.iter().any(|pending| {
+            pending["group_id_hex"] == group
+                && !(prepared && pending["message"]["message_id_hex"] == id)
+        });
+        if text != "/status"
+            && msg["text_truncated"] != true
+            && msg["attachments_truncated"] != true
+            && msg["media"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty())
+            && !media_busy
+            && self.state.media_pending.len() < 16
+            && self.agents.get(&key).is_some_and(|agent| {
+                (agent.settled() && !self.state.mappings[&key].pending_prompt)
+                    || (agent.agent_status == "blocked" && crate::media::audio(msg))
+            })
+        {
+            self.state.media_pending.push(event.clone());
+            self.state.enqueue(
+                group,
+                if crate::media::audio(msg) {
+                    "> transcribing"
+                } else {
+                    "> downloading"
+                },
+            );
+            return self.save();
+        }
         // Persist consumption before terminal input: uncertain prompts must not run twice.
         let m = self.state.mappings.get_mut(&key).unwrap();
         m.seen_messages.push(id.into());
         self.save()?;
         let response = if text == "/status" {
             Some(format!(
-                "HERDR session: {}. State: {}.",
+                "> {} HERDR session: {}.",
+                self.state.mappings[&key].last_agent_status,
                 if self.agents.contains_key(&key) {
                     "connected"
                 } else {
                     "ended"
-                },
-                self.state.mappings[&key].last_agent_status
+                }
             ))
         } else if msg["text_truncated"] == true || msg["attachments_truncated"] == true {
             Some("This offline message was truncated by MDK. No prompt was sent. Send a shorter text message.".into())
         } else if !msg["media"].as_array().is_none_or(|a| a.is_empty()) {
-            Some("Attachments are not supported. Send a text message.".into())
+            Some("Media could not be queued. The session may be busy or ended. Wait for it to become idle and try again.".into())
         } else if let Some(agent) = self.agents.get(&key).cloned() {
-            if self.state.mappings[&key].pending_prompt || !agent.settled() {
+            if media_busy || self.state.mappings[&key].pending_prompt || !agent.settled() {
                 Some("The agent is busy or blocked. Wait for it to become idle before sending another prompt.".into())
             } else if text.trim().is_empty() {
                 Some("Send a non-empty text message.".into())
@@ -895,7 +949,7 @@ impl Bridge {
                                 self.state.update_response(
                                     &key,
                                     group,
-                                    "State: idle. No completed reply was recorded.",
+                                    "> idle No completed reply was recorded.",
                                     true,
                                 );
                             }
@@ -925,6 +979,99 @@ impl Bridge {
         self.save()
     }
 
+    /// Process one download/transcription at a time without blocking other sessions.
+    pub async fn process_media(&mut self) -> Result<()> {
+        let mut routing_result = Ok(());
+        if self.media_job.as_ref().is_some_and(|job| job.is_finished()) {
+            let result = self.media_job.take().unwrap().await;
+            if matches!(&result, Ok(Err(error)) if error.downcast_ref::<crate::media::MediaUnavailable>().is_some())
+            {
+                // A live event may have hydrated a summary-only history row while
+                // lookup was in flight. Never consume an incomplete recovery row.
+                if !crate::media::complete_refs(&self.state.media_pending[0]["message"]) {
+                    self.state.media_pending[0]["_codr_retry_at"] = json!(now() + 60);
+                    self.save()?;
+                    return Ok(());
+                }
+            } else {
+                match result {
+                    Ok(Ok(text)) => {
+                        // Retain references and prepared text until inbound consumption.
+                        self.state.media_pending[0]["_codr_prepared_text"] = json!(text);
+                        self.save()?;
+                    }
+                    _ => {
+                        let event = self.state.media_pending.remove(0);
+                        let group = event["group_id_hex"].as_str().unwrap_or("");
+                        if let Some(mapping) = self
+                            .state
+                            .mappings
+                            .values_mut()
+                            .find(|m| m.group_id_hex.as_deref() == Some(group))
+                        {
+                            if let Some(id) = event["message"]["message_id_hex"].as_str() {
+                                mapping.seen_messages.push(id.into());
+                            }
+                            self.state.enqueue(group, "Media processing failed. No prompt was sent. Check the local media/transcription service and send the message again.");
+                        }
+                        self.save()?;
+                    }
+                }
+            }
+        }
+        if self.media_job.is_none()
+            && let Some(index) = self.state.media_pending.iter().position(|event| {
+                event["_codr_prepared_text"].is_string()
+                    && event["_codr_retry_at"].as_u64().unwrap_or(0) <= now()
+            })
+        {
+            let mut event = self.state.media_pending[index].clone();
+            event["message"]["text"] = event["_codr_prepared_text"].clone();
+            event["message"]["media"] = json!([]);
+            let result = self.route_inbound(&event, true).await;
+            if self.state.mappings.values().any(|mapping| {
+                mapping.group_id_hex.as_deref() == event["group_id_hex"].as_str()
+                    && mapping
+                        .seen_messages
+                        .iter()
+                        .any(|id| Some(id.as_str()) == event["message"]["message_id_hex"].as_str())
+            }) {
+                self.state.media_pending.remove(index);
+                self.save()?;
+            } else if result.is_err() {
+                // Defer this session without starving prepared input for other chats.
+                let mut pending = self.state.media_pending.remove(index);
+                pending["_codr_retry_at"] = json!(now() + 1);
+                self.state.media_pending.push(pending);
+                self.save()?;
+            }
+            routing_result = result;
+        }
+        if self.media_job.is_none()
+            && let Some(index) = self.state.media_pending.iter().position(|event| {
+                !event["_codr_prepared_text"].is_string()
+                    && event["_codr_retry_at"].as_u64().unwrap_or(0) <= now()
+            })
+        {
+            // A deferred message must not block preparation for other chats.
+            self.state.media_pending.rotate_left(index);
+            let event = &self.state.media_pending[0];
+            let config = self.config.clone();
+            let socket = self.marmot.clone();
+            let event = event.clone();
+            self.media_job = Some(tokio::spawn(async move {
+                crate::media::prepare(
+                    &config,
+                    &socket,
+                    event["group_id_hex"].as_str().unwrap_or(""),
+                    &event["message"],
+                )
+                .await
+            }));
+        }
+        routing_result
+    }
+
     fn announce_decision(
         &mut self,
         key: &str,
@@ -945,7 +1092,7 @@ impl Bridge {
                 self.state.update_response(
                     key,
                     group,
-                    "State: blocked. Waiting for your decision.",
+                    "> blocked Waiting for your decision.",
                     false,
                 );
             }
@@ -1114,34 +1261,56 @@ impl Bridge {
         Ok(())
     }
 
-    pub async fn rename_groups(&self) -> Result<()> {
+    pub async fn rename_groups(&mut self) -> Result<()> {
         let live: BTreeMap<_, _> = herdr::snapshot(&self.herdr)
             .await?
             .into_iter()
             .map(|a| (a.key(), a))
             .collect();
-        for (key, mapping) in &self.state.mappings {
-            let Some(group) = &mapping.group_id_hex else {
+        let keys: Vec<_> = self.state.mappings.keys().cloned().collect();
+        for key in keys {
+            let mapping = &self.state.mappings[&key];
+            let Some(group) = mapping.group_id_hex.clone() else {
                 continue;
             };
-            let Some(agent) = live.get(key).or(mapping.agent_record.as_ref()) else {
-                continue;
-            };
-            // Older ended-session records did not retain tab labels. Preserve their titles rather than inventing one.
-            if !live.contains_key(key) && agent.tab_label.is_none() {
-                continue;
-            }
-            let name = agent.group_name();
+            let agent = live.get(&key).or(mapping.agent_record.as_ref()).cloned();
             let info = self.marmot.marmot(json!({"type":"group_info","account_id_hex":self.config.account_id_hex,"group_id_hex":group})).await?;
             ensure!(
                 info["type"] == "group_info",
                 "Unexpected MDK group response"
             );
-            if info["subject"] == name {
+            let old = info["subject"].as_str().unwrap_or("session");
+            let name = if let Some(agent) = agent
+                .as_ref()
+                .filter(|a| a.tab_label.is_some() || live.contains_key(&key))
+            {
+                agent.group_name()
+            } else {
+                let label = old
+                    .strip_prefix("[cd] ")
+                    .or_else(|| old.strip_prefix("[codr] "))
+                    .or_else(|| old.strip_prefix("HDR | "))
+                    .unwrap_or(old);
+                herdr::group_name(label.strip_suffix(" · codr").unwrap_or(label))
+            };
+            let description = agent
+                .as_ref()
+                .map(Agent::group_description)
+                .unwrap_or_else(|| {
+                    "Workspace: unknown\nAgent: unknown\nManaged by codr via HERDR.".into()
+                });
+            // MDK 0.13 exposes the subject but not the description. Remember only
+            // confirmed metadata writes, so matching titles can still gain details.
+            if info["subject"] == name
+                && info["description"]
+                    .as_str()
+                    .or(mapping.group_description.as_deref())
+                    == Some(description.as_str())
+            {
                 continue;
             }
             // Profile updates have no idempotency key. Never retry an uncertain mutation.
-            let result = self.marmot.marmot(json!({"type":"group_profile_update","account_id_hex":self.config.account_id_hex,"group_id_hex":group,"name":name})).await?;
+            let result = self.marmot.marmot(json!({"type":"group_profile_update","account_id_hex":self.config.account_id_hex,"group_id_hex":group,"name":name,"description":description})).await?;
             ensure!(
                 result["type"] == "group_profile_updated"
                     && result["message_ids_hex"]
@@ -1151,9 +1320,15 @@ impl Bridge {
             );
             let info = self.marmot.marmot(json!({"type":"group_info","account_id_hex":self.config.account_id_hex,"group_id_hex":group})).await?;
             ensure!(
-                info["type"] == "group_info" && info["subject"] == name,
+                info["type"] == "group_info"
+                    && info["subject"] == name
+                    && info["description"]
+                        .as_str()
+                        .is_none_or(|actual| actual == description),
                 "Renamed group title could not be verified"
             );
+            self.state.mappings.get_mut(&key).unwrap().group_description = Some(description);
+            self.save()?;
             println!("Renamed: {name}");
         }
         Ok(())
@@ -1183,7 +1358,11 @@ impl Bridge {
         recovery_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
-                _ = tokio::signal::ctrl_c() => { subscriber.abort(); return Ok(()); },
+                _ = tokio::signal::ctrl_c() => {
+                    subscriber.abort();
+                    if let Some(job) = self.media_job.take() { job.abort(); }
+                    return Ok(());
+                },
                 _ = tick.tick() => {
                     match herdr::snapshot(&self.herdr).await {
                         Ok(agents) => if self.reconcile(agents).await.is_err() { eprintln!("Session reconciliation failed; will retry."); },
@@ -1200,6 +1379,10 @@ impl Bridge {
             }
             if recovery_due && self.herdr_available {
                 recovery_due = self.recover_inbound().await.is_err();
+            }
+            if self.process_media().await.is_err() {
+                recovery_due = true;
+                eprintln!("Prepared media input deferred; will reconcile history.");
             }
             if self.flush().await.is_err() {
                 eprintln!("MDK send unavailable; private outbox retained for retry.");

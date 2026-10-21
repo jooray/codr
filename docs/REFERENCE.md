@@ -9,13 +9,13 @@ The bridge uses one dedicated MDK identity across all mapped groups. Setup keeps
 ## Behaviour
 
 - New sessions create groups and invite the configured phone `npub`.
-- Group names use the HERDR tab label: `HDR | <tab name>`, for example `HDR | review`. Repository names and agent-generated conversation topics do not determine the chat name.
+- Group names use the HERDR tab label: `[cd] <tab name>`, for example `[cd] review`. Workspace and agent details appear in the group description. Repository names and agent-generated conversation topics do not determine the chat name.
 - A phone message prompts only the agent mapped to that group.
 - Final replies come from completed stored agent messages. They exclude reasoning and tool output.
 - Working, idle, blocked, and ended notices appear in the group. Blocked notices can include a labelled terminal excerpt. Unsupported OpenCode blockers use a short notice. Separate `done` notices are suppressed; the final reply signals completion.
 - `/status` reports the mapped session state.
 - Ended sessions retain their group. A restored native session reuses its group.
-- Attachments and terminal key commands are not supported.
+- Images and audio use the media route below. Other attachment types and arbitrary terminal key commands are not supported.
 - Other detected agent backends get groups, prompts, and state notices. Structured final-reply extraction supports **OpenCode, Codex, and Claude Code**.
 
 HERDR snapshots refresh every three seconds. Very short intermediate states can occur between snapshots. Native session references preserve routing across pane moves. Group creation waits for HERDR to report a native session reference. During identity uncertainty, the bridge defers prompts and preserves the existing group.
@@ -61,7 +61,7 @@ Forwarding defaults to Away on an existing installation. The control file is pri
 
 Set `edit_responses = true` in the bridge configuration to enable editable progress. This requires an MDK build with the `edit_message` API, such as upstream commit `1d2b40dbd9bea1f7e9beb4ecab04482647a9e5a6`. The published `wn-agent` 0.13.0 binaries do not include that API. With those binaries, leave this mode disabled.
 
-Each response starts as one `State: working` progress message. The bridge edits that message with the current task list, when available. It sends the final answer as a separate message through the normal durable send path, with its own retry key. The bridge never edits that final answer. When possible, it marks the progress message `State: done`.
+Each response starts as one `> working` progress message. The bridge edits that message with the current task list, when available. It sends the final answer as a separate message through the normal durable send path, with its own retry key. The bridge never edits that final answer. When possible, it marks the progress message `> done`.
 
 OpenCode to-do writes, Codex plan updates, and Claude Code to-do/task tools supply structured task data. The bridge does not prompt a model to obtain progress. Message IDs and pending updates survive bridge restarts. Updates coalesce between snapshots, and edit attempts are at least two timestamp seconds apart.
 
@@ -82,6 +82,49 @@ The bridge checks the session, pending tool request, and visible question before
 This targets OpenCode 1.18.35's single-choice question UI with 1–9 listed options. Custom text entry, multi-select/multi-question dialogs, permission approvals, and decisions in other backends require the terminal. Unsupported OpenCode blockers show a short notice instead of forwarding unrelated tool output.
 
 HERDR 0.9.1 cannot make the final identity check and terminal input atomic. Avoid answering the same question simultaneously from the terminal and phone. After an uncertain answer, inspect the terminal before using `clear-prompt` and sending a new reply.
+
+## Shared chats and owner-only control
+
+Group members can discuss a project and read the agent's replies. Only messages from the phone public key in codr's configuration become agent prompts. Other participants' messages are not added to the agent's context. The owner can relay a suggestion in a new prompt.
+
+Invitations require group admin authority in White Noise. Group membership and codr prompt permission are separate. Automatic codr groups make the bridge identity their admin. The phone owner needs separate admin authority to invite from the app.
+
+The gallery uses an owner-created group, bound to an isolated demo session. Alex creates the group and invites Sam through White Noise. Sam is a scripted second demo identity. Its message appears in the chat but produces no agent prompt. Alex's next message produces one prompt and a separate reply. This does not grant additional people agent control.
+
+## Images and voice messages
+
+These features require the current source build. The published v0.4.0 binary predates them.
+
+codr asks MDK's `download_media` API to fetch and decrypt each attachment. Keys stay in MDK. PNG, JPEG, WebP, and GIF images are copied into a private `media` directory beside bridge state. The prompt includes the local file paths and the original caption. The agent needs its normal local-file access to inspect them. Files remain there for later conversation access until you remove them.
+
+Audio goes through FFmpeg to 16 kHz mono WAV, then to a local Phonon-2 worker. Its transcript enters the same prompt route as typed text. There is no confirmation step or transcript echo. Supported question answers also use that route. The phone sees `> downloading` or `> transcribing` while preparation runs.
+
+Downloads and transcription run separately from session updates, one media message at a time. Pending messages survive bridge restarts. Sender checks and session checks still apply. A preparation failure sends no agent prompt. An uncertain terminal submission is not repeated automatically.
+
+Offline media recovery also needs `timeline_message_get` with opt-in `include_media` download references. The local MDK source extension provides this. Older connectors return only attachment summaries. codr defers these without consuming the message and can accept a complete live event later. This extension is not in the published MDK 0.13.0 binaries.
+
+Limits are four attachments per message, 25 MiB per file, and five minutes per audio file. Combined captions, transcripts, and image paths must fit within 30,000 UTF-8 bytes. Unsupported files, truncated messages, and empty transcripts do not reach the agent.
+
+### Local speech worker
+
+Source setup installs `fermion-research` 0.2.12 with CPU-only PyTorch and downloads Phonon-2, approximately 164 MB plus runtime dependencies. FFmpeg is required. The worker uses an owner-only Unix socket under `$XDG_RUNTIME_DIR/codr-phonon` and processes recordings locally.
+
+`codr-phonon.service` has a 1 GiB memory limit and no swap allowance. The bridge starts it as a dependency. A healthy existing codr worker is reused. If the worker cannot start within the limit, setup reports failure rather than raising the limit.
+
+Fresh source setup includes audio by default. Use `--no-audio` for a text/image-only installation. To add Phonon to an existing source installation:
+
+```sh
+python3 scripts/setup.py --phonon
+```
+
+This preserves the identity and mappings, adds the transcription command, and restarts only the bridge when its configuration changes. Existing custom transcription commands are not overwritten. A plain setup rerun preserves the existing selection.
+
+```sh
+systemctl --user status codr-phonon.service
+journalctl --user -u codr-phonon.service
+```
+
+Normalised audio files are temporary and removed after each attempt. MDK manages its downloaded temporary files. Image copies stay in codr's private media directory. Do not commit media, transcripts, or model files to Git.
 
 ## Supported reply sources
 
@@ -106,10 +149,12 @@ Existing history is baselined when a group is first attached or reply support is
 - [ ] Add structured final replies for further HERDR-supported agents.
 - [ ] Create new agent conversations from White Noise by messaging the main worker, which starts a HERDR session and creates its mapped group.
   - Select the HERDR workspace, directory, agent, and model.
-- [ ] Allow multiple people to collaborate with the same agent and repository in a White Noise group.
+- [ ] Let the owner authorise additional people to prompt the same agent in a White Noise group.
   - Add owner-managed prompt permissions per group, including revocation.
   - Distinguish agent-directed requests from discussion between participants.
-- [ ] Support White Noise voice messages and audio attachments, transcribing them locally into text prompts before forwarding them to an agent.
+- [x] Download inbound images through MDK and pass their local paths and captions to the mapped agent.
+- [x] Convert White Noise voice messages and audio attachments directly into text prompts with a local Phonon-2 worker.
+  - [ ] Add guided selection of other existing transcription services or local whisper.cpp.
   - Review the existing Rust audio preprocessing and configurable transcription pipeline in [Nostr Codex Phone](https://github.com/tidley/nostr-codex-phone/blob/main/rust/src/transcribe.rs), which already supports whisper.cpp.
   - Evaluate [whisper.cpp](https://github.com/ggml-org/whisper.cpp) and Phonon-2, as used in [Phonon Wayland Dictation](https://github.com/tidley/phonon-wayland-dictation).
 
@@ -219,7 +264,7 @@ To update existing group names without changing their session mappings, stop the
 ~/.local/bin/herdr-white-noise-bridge rename-groups
 ```
 
-Then start the worker again. This refreshes existing titles from current HERDR tab labels. Ended sessions without a stored tab label retain their existing title.
+Then start the worker again. This refreshes names and descriptions without changing group IDs. Ended sessions without a stored tab label use their existing title, replacing earlier codr prefixes or suffixes. Unavailable historical workspace details appear as `unknown`.
 
 Tab renames do not automatically rewrite White Noise titles; run `rename-groups` to apply them. Sessions in tabs with identical labels can share a display name, while their routing remains separate.
 
@@ -237,9 +282,13 @@ Without `--group`, the command sends the notice to every mapped group. The comma
 
 The [README gallery](../README.md#screenshots) contains side-by-side composites of real HERDR 0.9.1, OpenCode 1.19.3, and White Noise Android interfaces.
 
-The desktop replays matching synthetic history imported into an isolated OpenCode installation. The phone uses a dedicated demo profile. A synthetic HERDR/OpenCode fixture supplies its agent data through the real codr bridge and MDK transport. The phone's `1` reply continued the fixture workflow, not a live OpenCode question dialog.
+All seven images use the same fictional Garden planner project. The desktop replays matching history imported into an isolated OpenCode installation. The phone uses a dedicated Alex demo profile. A synthetic HERDR/OpenCode fixture supplies agent state and scripted replies through the real codr bridge and an isolated MDK transport.
 
-These examples do not verify a live model run or a live decision dialog end to end. Editable checklist captures use an MDK build with edit support. Android status and navigation bars are cropped. The images contain no private conversations or text/EXIF metadata.
+The captures show current `[cd]` names, blockquote status labels, editable tasks, decisions, separate replies, images, local voice transcription, a three-member chat, and a White Noise project folder. The folder is configured manually, not created by codr.
+
+The reminder design is a generated demo image. The voice clip uses synthetic speech and passes through the real Phonon-2 worker. Its actual transcript reaches the fixture as the prompt, without confirmation. Sam uses a separate MDK identity. Alex's invitation and both participants' chat messages use real encrypted group messaging. Verification checks that Sam's message causes zero agent prompts and Alex's message causes exactly one.
+
+The phone's `1` reply continues the question fixture, not a live OpenCode dialog. The captures do not verify a live coding-model run, a real project change, or a live decision dialog end to end. Editable task captures use an MDK build with edit support. Android status and navigation bars are cropped. The images contain no private conversations or text/EXIF metadata.
 
 ## Acknowledgements
 
@@ -252,5 +301,6 @@ codr builds on the work of these projects and their maintainers and contributors
 - [OpenCode](https://github.com/anomalyco/opencode): the coding-agent runtime whose stored final replies codr currently reads.
 - [Codex](https://github.com/openai/codex): the coding-agent runtime and native rollout records used by codr's Codex reply reader.
 - [Claude Code](https://github.com/anthropics/claude-code): the coding-agent runtime whose native session transcripts codr reads for completed main-conversation replies.
+- [Phonon-2](https://github.com/fermionresearch/phonon): the local speech model and Fermion runtime used for audio transcription. Its model weights and runtime remain upstream software.
 
 codr provides the routing bridge between these systems. The messaging protocol, encryption, transport, mobile app, and agent runtimes come from the upstream projects above.

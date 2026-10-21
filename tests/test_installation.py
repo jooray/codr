@@ -102,7 +102,8 @@ class SetupTests(unittest.TestCase):
             find_executable=lambda name, candidates=(): "/usr/bin/" + name,
             ensure_mdk=lambda runner: Path("/usr/bin/wn-agent"),
             read_snapshot=lambda path: {"agents": []},
-            local_accounts=lambda path: [])
+            local_accounts=lambda path: [],
+            configure_phonon=lambda *args: ["/usr/bin/python3", "/example/transcribe.py", "--socket", "/example/phonon.sock"])
 
     def test_fresh_setup_generates_private_portable_config_and_preserves_on_repeat(self):
         with self.mocks():
@@ -129,6 +130,15 @@ class SetupTests(unittest.TestCase):
             with self.assertRaises(setup.SetupError):
                 setup.configure("npub1different", self.socket, self.runner)
             self.assertEqual(self.config.read_bytes(), original)
+
+    def test_enabling_phonon_on_an_existing_text_only_install_keeps_one_valid_command(self):
+        with self.mocks():
+            setup.configure("npub1fixture", self.socket, self.runner, enable_audio=False)
+            setup.configure("npub1fixture", self.socket, self.runner, enable_audio=True)
+        config = setup.tomllib.loads(self.config.read_text())
+        self.assertEqual(config["phone_npub"], "npub1fixture")
+        self.assertEqual(config["transcribe_command"][0], "/usr/bin/python3")
+        self.assertEqual(self.bootstrap_count, 1)
 
     def test_invalid_owner_stops_before_services_or_identity_creation(self):
         def runner(argv):

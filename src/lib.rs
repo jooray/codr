@@ -1,6 +1,7 @@
 pub mod bridge;
 pub mod config;
 pub mod herdr;
+pub mod media;
 pub mod output;
 pub mod state;
 pub mod wire;

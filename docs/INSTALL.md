@@ -162,12 +162,12 @@ If a prerequisite or release asset is unavailable, report that blocker precisely
 
 ## Build from source
 
-This path requires Rust and Cargo. Use the target host's build/storage policy.
+This path requires Rust and Cargo. Use the target host's build/storage policy. Current source adds `[cd] session` chat names, image downloads, and local Phonon-2 transcription. Audio setup needs FFmpeg and downloads the CPU runtime plus the approximately 164 MB model. Its service is capped at 1 GiB RAM.
 
 ```bash
 git clone https://github.com/tidley/codr.git
 cd codr
-git checkout v0.4.0
+git checkout master
 cargo test --locked --tests
 cargo install --locked --path . --root "$HOME/.local"
 herdr plugin link "$PWD"
@@ -175,3 +175,5 @@ python3 scripts/setup.py --npub "$OWNER_NPUB"
 ```
 
 `plugin link` does not run the download hook. Keep the linked checkout at its permanent location. The startup hook starts the configured worker after HERDR restores its session; a client disconnect does not stop it.
+
+Use `python3 scripts/setup.py --npub "$OWNER_NPUB" --no-audio` to skip speech setup. Existing installations can add it with `python3 scripts/setup.py --phonon`. See [media and speech details](REFERENCE.md#images-and-voice-messages).

@@ -1,22 +1,22 @@
 # codr
 
-**Your coding agents, on your phone.**
+codr connects coding agent sessions in [HERDR](https://github.com/herdrdev/herdr) to [White Noise](https://github.com/marmot-protocol/whitenoise-android), with one encrypted chat per session. It forwards prompts to the mapped agent and returns completed replies to the same chat.
 
-Leave your agents running in [HERDR](https://github.com/herdrdev/herdr). Send prompts and read replies from White Noise—one encrypted chat per session.
+Supported agents: OpenCode, Codex, and Claude Code on Linux.
 
-Supports **OpenCode, Codex, and Claude Code** on Linux.
+*Source-build update: `[cd] session` names, `> status` notices, images, and direct Phonon-2 voice prompts. The v0.4.0 release predates these changes.*
 
-<img src="docs/screenshots/herdr-phone-progress.png" width="1280" alt="HERDR with an OpenCode task checklist beside the matching White Noise conversation and separate final reply">
+<img src="docs/screenshots/herdr-phone-progress.png" width="1280" alt="HERDR with the Garden planner task checklist beside matching working status and editable tasks in White Noise">
 
-*Real interfaces, synthetic demo history—not a live agent run. Editable checklists require an edit-capable MDK build. [Capture details](docs/REFERENCE.md#screenshot-provenance).*
+*Real interfaces, encrypted messages, and local speech-to-text. Fictional participants and scripted agent replies. Editable checklists need an edit-capable MDK build. [Capture details](docs/REFERENCE.md#screenshot-provenance).*
 
-## What it does
+## Behaviour
 
-- **One session, one chat.** Chat names follow HERDR tab labels: `HDR | review`.
-- **Prompt from anywhere.** Messages reach the agent mapped to that chat. Completed replies come back to the same place.
-- **Follow the work.** Receive status updates, optional editable checklists, and separate final replies.
-- **Answer decisions.** Reply with a number or option label to supported OpenCode questions.
-- **Choose when to listen.** At desk mutes all sessions. Away forwards them. A new phone message switches all sessions to Away.
+- Chat names follow HERDR tab labels: `[cd] review`. Descriptions contain workspace and agent details.
+- Status notices, optional editable checklists, and final replies appear as separate messages.
+- Supported OpenCode questions accept a number or option label as a reply.
+- A group admin can invite other participants. Only the configured owner account can prompt the agent. [Group setup](docs/REFERENCE.md#shared-chats-and-owner-only-control)
+- At desk mutes forwarding for all sessions. Away enables it. A new owner message switches all sessions to Away.
 
 ## Install
 
@@ -35,7 +35,7 @@ Or give your coding agent this prompt, with your own public key:
 
 [Full installation and upgrade guide →](docs/INSTALL.md)
 
-## Use it
+## Usage
 
 1. Check the inviter against the bridge public key printed by setup, then accept the session's chat invitation.
 2. Send `/status` to check the connection. Send a prompt to continue that session.
@@ -51,26 +51,40 @@ White Noise ↔ MDK ↔ codr ↔ HERDR ↔ your agent
 
 [MDK](https://github.com/marmot-protocol/mdk) handles identity, encrypted messaging, and relays. codr routes prompts through HERDR and reads completed replies from existing agent transcripts.
 
-No extra model call to collect replies. No terminal scraping for final answers. [Behaviour and recovery →](docs/REFERENCE.md)
+Reply collection uses existing transcripts without an additional model call or terminal scraping. [Behaviour and recovery](docs/REFERENCE.md)
 
-**Limits:** Decisions target OpenCode 1.18.35 single-choice questions with 1–9 options. Other dialogs need the terminal. Avoid simultaneous terminal/phone answers. Attachments are not supported. [Details →](docs/REFERENCE.md#answer-decisions-from-the-phone)
+**Limits:** Decisions target OpenCode 1.18.35 single-choice questions with 1–9 options. Other dialogs need the terminal. Avoid simultaneous terminal/phone answers. [Media and audio →](docs/REFERENCE.md#images-and-voice-messages)
 
 ## Screenshots
 
 <details>
-<summary>Decisions, a review, and multiple chats</summary>
+<summary>A shared project, images, voice, decisions, and multiple chats</summary>
 
-**Answer a decision**
+**Shared chat with owner-only agent control**
 
-<img src="docs/screenshots/herdr-phone-decisions.png" width="1280" alt="HERDR showing an example question, the reply 1, and its result beside the matching White Noise decision conversation">
+Alex invited Sam to the Garden planner chat. Sam can discuss the project, but only Alex's messages reach the agent.
 
-**Follow a review**
+<img src="docs/screenshots/herdr-phone-shared.png" width="1280" alt="Alex, Sam, and codr in a three-member White Noise chat, with only Alex's request shown in HERDR">
 
-<img src="docs/screenshots/herdr-phone-review.png" width="1280" alt="The HERDR review tab beside its White Noise chat, both showing the same example release review">
+**Image attachment**
 
-**Keep conversations separate**
+<img src="docs/screenshots/herdr-phone-image.png" width="1280" alt="A watering-reminder design uploaded in White Noise beside its downloaded local image path and scripted review in OpenCode">
 
-<img src="docs/screenshots/herdr-phone-conversations.png" width="1280" alt="HERDR with demo, decisions, and review tabs beside the three matching White Noise chats">
+**Voice transcription**
+
+<img src="docs/screenshots/herdr-phone-voice.png" width="1280" alt="A White Noise audio message and transcribing status beside the actual Phonon-2 transcript sent to the demo agent">
+
+**Decision response**
+
+<img src="docs/screenshots/herdr-phone-decisions.png" width="1280" alt="A ten-minute snooze decision in OpenCode beside the White Noise question card, phone reply 1, and choice confirmation">
+
+**Review output**
+
+<img src="docs/screenshots/herdr-phone-review.png" width="1280" alt="The HERDR review tab beside its White Noise chat, both showing checks for the Garden planner watering reminder">
+
+**Session chats in a project folder**
+
+<img src="docs/screenshots/herdr-phone-conversations.png" width="1280" alt="Six Garden planner session tabs in HERDR beside their six matching chats in a White Noise Garden folder">
 
 </details>
 
