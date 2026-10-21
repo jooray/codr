@@ -92,7 +92,7 @@ Use the [installation guide](docs/INSTALL.md) for complete commands, including t
 Install a pinned release through HERDR, then open its guided setup tab:
 
 ```sh
-herdr plugin install tidley/codr --ref v0.3.0
+herdr plugin install tidley/codr --ref v0.3.1
 herdr plugin action invoke local.white-noise.setup
 ```
 

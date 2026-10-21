@@ -42,7 +42,7 @@ fn scan(
     for entry in entries {
         let entry = entry?;
         let kind = entry.file_type()?;
-        if kind.is_file() && entry.file_name().to_str().is_some_and(&matches) {
+        if kind.is_file() && entry.file_name().to_str().is_some_and(matches) {
             found.push(entry.path());
             ensure!(found.len() <= 1, "Native transcript is ambiguous");
         } else if kind.is_dir() && depth > 0 {
