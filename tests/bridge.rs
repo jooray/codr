@@ -162,6 +162,64 @@ async fn real_socket_round_trip_routes_one_group_and_only_new_final_answers() {
 }
 
 #[tokio::test]
+async fn working_notice_remains_but_done_only_forwards_the_final_reply() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path());
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge.state.mappings.insert(
+        agent().key(),
+        Mapping {
+            group_id_hex: Some("bb".repeat(16)),
+            active: true,
+            last_agent_status: "idle".into(),
+            last_state_change_seq: 1,
+            final_ids: vec!["old".into()],
+            pending_prompt: true,
+            agent_record: Some(agent()),
+            ..Mapping::default()
+        },
+    );
+    let mut working = agent();
+    working.agent_status = "working".into();
+    working.state_change_seq = 2;
+    bridge.reconcile(vec![working.clone()]).await.unwrap();
+    bridge.reconcile(vec![working]).await.unwrap();
+    export_script(&config.opencode_bin, "Completed answer", "new");
+    let mut done = agent();
+    done.agent_status = "done".into();
+    done.state_change_seq = 3;
+    bridge.reconcile(vec![done.clone()]).await.unwrap();
+    bridge.reconcile(vec![done]).await.unwrap();
+    let texts: Vec<_> = bridge
+        .state
+        .outbox
+        .iter()
+        .map(|m| m.text.as_str())
+        .collect();
+    assert_eq!(
+        texts
+            .iter()
+            .filter(|text| **text == "State: working")
+            .count(),
+        1
+    );
+    assert!(!texts.contains(&"State: done"));
+    assert_eq!(
+        texts
+            .iter()
+            .filter(|text| **text == "Completed answer")
+            .count(),
+        1
+    );
+    assert_eq!(
+        bridge.state.mappings[&agent().key()].last_agent_status,
+        "done"
+    );
+    assert!(!bridge.state.mappings[&agent().key()].pending_prompt);
+    assert!(!bridge.state.mappings[&agent().key()].completion_pending);
+}
+
+#[tokio::test]
 async fn uncertain_group_creation_is_journalled_and_never_retried_on_restart() {
     let dir = tempfile::tempdir().unwrap();
     let config = config(dir.path());

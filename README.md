@@ -24,7 +24,7 @@ For manual installation, follow the [human installation guide](docs/INSTALL.md#i
 - Group names use `HDR | <repository>`, for example `HDR | codr`. The bridge resolves the agent's foreground working directory to its Git repository root. It falls back to the working-directory name outside Git.
 - A phone message prompts only the agent mapped to that group.
 - OpenCode replies come from completed stored assistant messages. The bridge does not send reasoning or tool output.
-- Working, idle, blocked, done, and ended notices appear in the group. A blocked notice includes a labelled terminal excerpt.
+- Working, idle, blocked, and ended notices appear in the group. A blocked notice includes a labelled terminal excerpt. Separate `done` notices are suppressed; the final reply signals completion.
 - `/status` reports the mapped session state.
 - Ended sessions retain their group. A restored native session reuses its group.
 - Attachments and terminal key commands are not supported.
@@ -73,7 +73,7 @@ Use the [installation guide](docs/INSTALL.md) for complete commands, including t
 Install a pinned release through HERDR, then open its guided setup tab:
 
 ```sh
-herdr plugin install tidley/codr --ref v0.2.0
+herdr plugin install tidley/codr --ref v0.2.1
 herdr plugin action invoke local.white-noise.setup
 ```
 

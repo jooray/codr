@@ -204,7 +204,7 @@ impl Bridge {
         let previous = &self.state.mappings[key];
         let changed = previous.last_agent_status != agent.agent_status
             || previous.last_state_change_seq != agent.state_change_seq;
-        if previous.last_agent_status != agent.agent_status {
+        if previous.last_agent_status != agent.agent_status && agent.agent_status != "done" {
             self.state
                 .enqueue(&group, &format!("State: {}", agent.agent_status));
         }
