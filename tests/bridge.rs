@@ -122,6 +122,148 @@ async fn forwarding_command(config: &BridgeConfig, mode: &str) -> std::process::
         .unwrap()
 }
 
+fn decision_export(path: &std::path::Path, id: &str, question: &str) {
+    let data = json!({"messages":[
+        {"info":{"id":"user-decision","role":"user"},"parts":[]},
+        {"info":{"id":"assistant-decision","parentID":"user-decision","role":"assistant"},"parts":[
+            {"type":"text","text":"PRIVATE REASONING"},
+            {"type":"tool","id":id,"tool":"question","state":{"status":"running","input":{"questions":[{
+                "header":"Next step","question":question,"options":[
+                    {"label":"Proceed","description":"Continue with the plan"},
+                    {"label":"Review","description":"Review the alternatives"}
+                ]
+            }]}}}
+        ]}
+    ]});
+    std::fs::write(path, format!("#!/bin/sh\nprintf '%s' '{}'\n", data)).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+fn decision_terminal(question: &str) -> String {
+    format!(
+        "PRIVATE TOOL OUTPUT\n{question}\n1. Proceed\n   Continue with the plan\n2. Review\n   Review the alternatives\n3. Type your own answer\n↑↓ select enter submit esc dismiss\n"
+    )
+}
+
+async fn decision_herdr(
+    path: &std::path::Path,
+    observed: Arc<Mutex<Agent>>,
+    visible: Arc<Mutex<String>>,
+    calls: Arc<Mutex<Vec<Value>>>,
+) -> tokio::task::JoinHandle<()> {
+    let listener = UnixListener::bind(path).unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = tokio::io::BufReader::new(stream);
+            let request = read_line(&mut reader).await.unwrap();
+            calls.lock().unwrap().push(request.clone());
+            let mut response = match request["method"].as_str().unwrap() {
+                "agent.get" => json!({"result":{"agent":*observed.lock().unwrap()}}),
+                "agent.read" => {
+                    json!({"result":{"read":{"text":*visible.lock().unwrap(),"truncated":false}}})
+                }
+                "agent.send_keys" => {
+                    if visible.lock().unwrap().starts_with("DROP_SELECTION_ACK") {
+                        continue;
+                    }
+                    assert_eq!(
+                        request["params"]["keys"].as_array().unwrap().len(),
+                        1,
+                        "Never append Enter after a numbered single-choice shortcut"
+                    );
+                    let mut current = observed.lock().unwrap();
+                    current.agent_status = "working".into();
+                    current.state_change_seq += 1;
+                    json!({"result":{"type":"ok"}})
+                }
+                _ => panic!("Decision replies must not use agent.prompt"),
+            };
+            response["id"] = request["id"].clone();
+            reader
+                .get_mut()
+                .write_all((response.to_string() + "\n").as_bytes())
+                .await
+                .unwrap();
+        }
+    })
+}
+
+#[tokio::test]
+async fn a_phone_choice_answers_the_blocked_question_instead_of_becoming_a_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = editable_config(dir.path());
+    decision_export(&config.opencode_bin, "question-1", "Which next step?");
+    let mut blocked = agent();
+    blocked.agent_status = "blocked".into();
+    blocked.state_change_seq = 2;
+    let observed = Arc::new(Mutex::new(blocked.clone()));
+    let visible = Arc::new(Mutex::new(decision_terminal("Which next step?")));
+    let calls = Arc::new(Mutex::new(vec![]));
+    let herdr = decision_herdr(
+        &config.herdr_socket,
+        observed.clone(),
+        visible,
+        calls.clone(),
+    )
+    .await;
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge.state.mappings.insert(
+        agent().key(),
+        Mapping {
+            group_id_hex: Some("bb".repeat(16)),
+            active: true,
+            pending_prompt: true,
+            agent_record: Some(agent()),
+            last_agent_status: "working".into(),
+            last_state_change_seq: 1,
+            ..Mapping::default()
+        },
+    );
+    bridge.reconcile(vec![blocked]).await.unwrap();
+    bridge.flush().await.unwrap();
+    let mut answer = inbound(HEX, "choice-1");
+    answer["message"]["text"] = json!("1");
+    bridge.inbound(&answer).await.unwrap();
+    bridge.flush().await.unwrap();
+    let selected: Vec<_> = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r["method"] == "agent.send_keys")
+        .cloned()
+        .collect();
+    assert_eq!(
+        selected.len(),
+        1,
+        "A blocked question is waiting for an answer, not a new prompt"
+    );
+    assert_eq!(selected[0]["params"]["keys"], json!(["1"]));
+    assert!(
+        !calls.lock().unwrap().iter().any(|r| r["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("PRIVATE TOOL OUTPUT")
+                || text.contains("PRIVATE REASONING")
+                || text.contains("busy or blocked")))
+    );
+    let mut restarted = Bridge::open(config).unwrap();
+    let current = observed.lock().unwrap().clone();
+    restarted.reconcile(vec![current]).await.unwrap();
+    restarted.inbound(&answer).await.unwrap();
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r["method"] == "agent.send_keys")
+            .count(),
+        1
+    );
+    mdk.abort();
+    herdr.abort();
+}
+
 #[tokio::test]
 async fn desk_mode_discards_updates_and_away_does_not_replay_them() {
     for edits in [false, true] {
@@ -273,6 +415,236 @@ async fn only_a_new_authorised_phone_message_wakes_forwarding_for_all_sessions()
         "History replay must not undo a later Desk choice"
     );
     mdk.abort();
+}
+
+#[tokio::test]
+async fn a_replaced_question_does_not_accept_an_old_unqualified_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = editable_config(dir.path());
+    decision_export(&config.opencode_bin, "question-a", "First question?");
+    let mut blocked = agent();
+    blocked.agent_status = "blocked".into();
+    blocked.state_change_seq = 2;
+    let observed = Arc::new(Mutex::new(blocked.clone()));
+    let visible = Arc::new(Mutex::new(decision_terminal("First question?")));
+    let calls = Arc::new(Mutex::new(vec![]));
+    let herdr = decision_herdr(
+        &config.herdr_socket,
+        observed,
+        visible.clone(),
+        calls.clone(),
+    )
+    .await;
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge.state.mappings.insert(
+        agent().key(),
+        Mapping {
+            group_id_hex: Some("bb".repeat(16)),
+            active: true,
+            pending_prompt: true,
+            agent_record: Some(agent()),
+            ..Mapping::default()
+        },
+    );
+    bridge.reconcile(vec![blocked]).await.unwrap();
+    decision_export(&config.opencode_bin, "question-b", "Second question?");
+    *visible.lock().unwrap() = decision_terminal("Second question?");
+    let mut answer = inbound(HEX, "old-answer");
+    answer["message"]["text"] = json!("1");
+    bridge.inbound(&answer).await.unwrap();
+    answer["message"]["message_id_hex"] = json!("still-old-answer");
+    bridge.inbound(&answer).await.unwrap();
+    assert!(
+        !calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request["method"] == "agent.send_keys")
+    );
+    let decision = bridge.state.mappings[&agent().key()]
+        .decision
+        .as_ref()
+        .unwrap();
+    assert!(decision.requires_token);
+    answer["message"]["message_id_hex"] = json!("current-answer");
+    answer["message"]["text"] = json!(format!("{} 2", decision.token()));
+    bridge.inbound(&answer).await.unwrap();
+    let selected: Vec<_> = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r["method"] == "agent.send_keys")
+        .cloned()
+        .collect();
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0]["params"]["keys"], json!(["2"]));
+    herdr.abort();
+}
+
+#[tokio::test]
+async fn permission_or_changed_terminal_ui_cannot_receive_a_question_shortcut() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = editable_config(dir.path());
+    decision_export(&config.opencode_bin, "question-1", "Which next step?");
+    let mut blocked = agent();
+    blocked.agent_status = "blocked".into();
+    blocked.state_change_seq = 2;
+    let observed = Arc::new(Mutex::new(blocked.clone()));
+    let visible = Arc::new(Mutex::new(
+        "Allow writing files? enter confirm esc cancel".into(),
+    ));
+    let calls = Arc::new(Mutex::new(vec![]));
+    let herdr = decision_herdr(&config.herdr_socket, observed, visible, calls.clone()).await;
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge.state.mappings.insert(
+        agent().key(),
+        Mapping {
+            group_id_hex: Some("bb".repeat(16)),
+            active: true,
+            pending_prompt: true,
+            agent_record: Some(agent()),
+            ..Mapping::default()
+        },
+    );
+    bridge.reconcile(vec![blocked]).await.unwrap();
+    let mut answer = inbound(HEX, "invalid-ui");
+    answer["message"]["text"] = json!("1");
+    bridge.inbound(&answer).await.unwrap();
+    assert!(
+        !calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request["method"] == "agent.send_keys")
+    );
+    assert!(
+        !bridge.state.mappings[&agent().key()]
+            .decision
+            .as_ref()
+            .unwrap()
+            .submitted
+    );
+    assert!(
+        bridge
+            .state
+            .outbox
+            .iter()
+            .any(|message| message.text.contains("No answer was sent"))
+    );
+    herdr.abort();
+}
+
+#[tokio::test]
+async fn an_uncertain_decision_shortcut_is_not_sent_again_on_retry_or_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = editable_config(dir.path());
+    decision_export(&config.opencode_bin, "question-1", "Which next step?");
+    let mut blocked = agent();
+    blocked.agent_status = "blocked".into();
+    blocked.state_change_seq = 2;
+    let observed = Arc::new(Mutex::new(blocked.clone()));
+    let visible = Arc::new(Mutex::new(format!(
+        "DROP_SELECTION_ACK\n{}",
+        decision_terminal("Which next step?")
+    )));
+    let calls = Arc::new(Mutex::new(vec![]));
+    let herdr = decision_herdr(&config.herdr_socket, observed, visible, calls.clone()).await;
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge.state.mappings.insert(
+        agent().key(),
+        Mapping {
+            group_id_hex: Some("bb".repeat(16)),
+            active: true,
+            pending_prompt: true,
+            agent_record: Some(agent()),
+            ..Mapping::default()
+        },
+    );
+    bridge.reconcile(vec![blocked.clone()]).await.unwrap();
+    let mut answer = inbound(HEX, "uncertain-answer");
+    answer["message"]["text"] = json!("1");
+    bridge.inbound(&answer).await.unwrap();
+    assert!(
+        bridge.state.mappings[&agent().key()]
+            .decision
+            .as_ref()
+            .unwrap()
+            .submitted
+    );
+    let mut restarted = Bridge::open(config).unwrap();
+    restarted.reconcile(vec![blocked]).await.unwrap();
+    restarted.inbound(&answer).await.unwrap();
+    answer["message"]["message_id_hex"] = json!("another-answer");
+    restarted.inbound(&answer).await.unwrap();
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r["method"] == "agent.send_keys")
+            .count(),
+        1
+    );
+    herdr.abort();
+}
+
+#[tokio::test]
+async fn a_whitespace_or_uppercase_coded_answer_cannot_become_a_new_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path());
+    decision_export(&config.opencode_bin, "question-1", "Which next step?");
+    let mut blocked = agent();
+    blocked.agent_status = "blocked".into();
+    blocked.state_change_seq = 2;
+    let observed = Arc::new(Mutex::new(blocked.clone()));
+    let visible = Arc::new(Mutex::new(decision_terminal("Which next step?")));
+    let calls = Arc::new(Mutex::new(vec![]));
+    let herdr = decision_herdr(
+        &config.herdr_socket,
+        observed.clone(),
+        visible,
+        calls.clone(),
+    )
+    .await;
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge.state.mappings.insert(
+        agent().key(),
+        Mapping {
+            group_id_hex: Some("bb".repeat(16)),
+            active: true,
+            agent_record: Some(agent()),
+            ..Mapping::default()
+        },
+    );
+    bridge.reconcile(vec![blocked]).await.unwrap();
+    let token = bridge.state.mappings[&agent().key()]
+        .decision
+        .as_ref()
+        .unwrap()
+        .token();
+    let mut idle = agent();
+    idle.state_change_seq = 3;
+    *observed.lock().unwrap() = idle.clone();
+    export_script(&config.opencode_bin, "Finished", "finished");
+    bridge.reconcile(vec![idle]).await.unwrap();
+    let mut answer = inbound(HEX, "stale-coded");
+    answer["message"]["text"] = json!(format!(" {} 1", token.to_uppercase()));
+    bridge.inbound(&answer).await.unwrap();
+    assert!(
+        !calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request["method"] == "agent.prompt")
+    );
+    assert!(
+        bridge
+            .state
+            .outbox
+            .iter()
+            .any(|message| message.text.contains("no longer waiting"))
+    );
+    herdr.abort();
 }
 
 #[tokio::test]

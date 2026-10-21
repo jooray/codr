@@ -11,6 +11,7 @@ use tokio::process::Command;
 
 pub mod claude;
 pub mod codex;
+pub mod decision;
 mod native;
 pub mod tasks;
 

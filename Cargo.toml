@@ -1,6 +1,6 @@
 [package]
 name = "herdr-white-noise-bridge"
-version = "0.3.2"
+version = "0.4.0"
 edition = "2024"
 
 [dependencies]
@@ -16,3 +16,4 @@ tokio = { version = "1", features = ["full"] }
 tempfile = "3"
 fs2 = "0.4"
 uuid = { version = "1", features = ["v4", "serde"] }
+unicode-width = "0.2"

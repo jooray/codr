@@ -30,7 +30,7 @@ The phone account must publish a compatible Marmot KeyPackage before the bridge 
 Run these commands as your normal user, not root:
 
 ```bash
-herdr plugin install tidley/codr --ref v0.3.2
+herdr plugin install tidley/codr --ref v0.4.0
 herdr plugin action invoke local.white-noise.setup
 ```
 
@@ -77,7 +77,7 @@ HERDR refuses a GitHub install over a locally linked copy of the same plugin. To
 ```bash
 herdr plugin list
 herdr plugin unlink local.white-noise
-herdr plugin install tidley/codr --ref v0.3.2
+herdr plugin install tidley/codr --ref v0.4.0
 ```
 
 Unlinking leaves the local checkout and account state in place. Do not delete the MDK home or reset the bridge to perform an upgrade.
@@ -137,7 +137,7 @@ Before changing the host:
 Set `OWNER_NPUB` to the public key supplied by the user. Export the selected `HERDR_SOCKET_PATH` before running HERDR commands.
 
 ```bash
-herdr plugin install tidley/codr --ref v0.3.2 --yes
+herdr plugin install tidley/codr --ref v0.4.0 --yes
 PLUGIN_ROOT="$(herdr plugin list --plugin local.white-noise --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["plugins"][0]["plugin_root"])')"
 python3 "$PLUGIN_ROOT/scripts/setup.py" --npub "$OWNER_NPUB" --herdr-socket "$HERDR_SOCKET_PATH"
 ```
@@ -167,7 +167,7 @@ This path requires Rust and Cargo. Use the target host's build/storage policy.
 ```bash
 git clone https://github.com/tidley/codr.git
 cd codr
-git checkout v0.3.2
+git checkout v0.4.0
 cargo test --locked --tests
 cargo install --locked --path . --root "$HOME/.local"
 herdr plugin link "$PWD"

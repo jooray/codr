@@ -128,3 +128,18 @@ pub async fn prompt(socket: &Socket, agent: &Agent, text: &str) -> Result<Value>
         .herdr("agent.prompt", json!({"target":agent.pane_id,"text":text}))
         .await
 }
+
+pub async fn choose(socket: &Socket, agent: &Agent, choice: usize) -> Result<()> {
+    ensure!((1..=9).contains(&choice), "Invalid decision shortcut");
+    let response = socket
+        .herdr(
+            "agent.send_keys",
+            json!({"target":agent.pane_id,"keys":[choice.to_string()]}),
+        )
+        .await?;
+    ensure!(
+        response["result"]["type"] == "ok",
+        "Decision shortcut was not confirmed"
+    );
+    Ok(())
+}

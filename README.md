@@ -14,9 +14,9 @@ Send a request from White Noise. The bridge posts a working message, edits that 
 | :---: | :---: | :---: |
 | <img src="docs/screenshots/white-noise-working.png" width="240" alt="White Noise demo chat showing a request and State: working"> | <img src="docs/screenshots/white-noise-tasks.png" width="240" alt="The same progress message updated with completed, in-progress, and pending tasks"> | <img src="docs/screenshots/white-noise-final.png" width="240" alt="Completed progress checklist followed by a separate final answer"> |
 
-Captured from White Noise on Android with a dedicated demo profile. The agent data is synthetic; the app, encrypted transport, and bridge are real. Android status and navigation bars are cropped.
+Captured from White Noise on Android with a dedicated demo profile. A synthetic HERDR/OpenCode fixture supplies the agent data; the app, encrypted transport, and bridge are real. Android status and navigation bars are cropped.
 
-The editable checklist and mute controls are [source-build features](#at-desk--away-forwarding-source-build). The pinned v0.3.2 release binary does not include them.
+These captures use optional [editable progress](#editable-progress-and-separate-final-replies) with an MDK build that supports edits. Global mute controls and remote decisions are included in v0.4.0.
 
 ## Install with a coding agent
 
@@ -44,7 +44,7 @@ For manual installation, follow the [human installation guide](docs/INSTALL.md#i
 
 HERDR snapshots refresh every three seconds. Very short intermediate states can occur between snapshots. Native session references preserve routing across pane moves. Group creation waits for HERDR to report a native session reference. During identity uncertainty, the bridge defers prompts and preserves the existing group.
 
-### At desk / Away forwarding (source build)
+### At desk / Away forwarding
 
 Use the HERDR action **White Noise forwarding: At desk / Away** to open the control popup. **Toggle White Noise forwarding** switches modes directly and can be bound to a HERDR shortcut.
 
@@ -79,11 +79,11 @@ The command-line controls work while the worker runs:
 ~/.local/bin/herdr-white-noise-bridge forwarding toggle
 ```
 
-Forwarding defaults to Away on an existing installation. The control file is private and separate from routing state, so changing modes does not stop either service. These actions require the source build; the pinned v0.3.2 release binary does not include them.
+Forwarding defaults to Away on an existing installation. The control file is private and separate from routing state, so changing modes does not stop either service.
 
-### Editable progress and separate final replies (source build)
+### Editable progress and separate final replies
 
-The source build supports `edit_responses = true` in the bridge configuration. This mode requires an MDK build with the `edit_message` API, such as upstream commit `1d2b40dbd9bea1f7e9beb4ecab04482647a9e5a6`. The published `wn-agent` 0.13.0 binaries do not include that API. With those MDK binaries, leave this mode disabled. With the published codr v0.3.2 binary, omit the configuration key entirely.
+Set `edit_responses = true` in the bridge configuration to enable editable progress. This requires an MDK build with the `edit_message` API, such as upstream commit `1d2b40dbd9bea1f7e9beb4ecab04482647a9e5a6`. The published `wn-agent` 0.13.0 binaries do not include that API. With those binaries, leave this mode disabled.
 
 Each response starts as one `State: working` progress message. The bridge edits that message with the current task list, when available. It sends the final answer as a separate message through the normal durable send path, with its own retry key. The bridge never edits that final answer. When possible, it marks the progress message `State: done`.
 
@@ -93,7 +93,23 @@ Progress is best effort. Final replies take priority over progress updates, and 
 
 If HERDR becomes idle before the agent stores its final reply, the bridge keeps that response pending and retries the transcript read. After inspection, `clear-prompt` can release a cancelled response that has no final record.
 
-This source feature is not included in the pinned codr v0.3.2 release binary. Build codr from the source containing this option before enabling it.
+The installer preserves the pinned MDK transport. Editable progress needs a separately installed MDK build with edit support; ordinary progress, decisions, and final replies work without it.
+
+### Answer decisions from the phone
+
+When OpenCode asks one single-choice question, codr sends a clean question card with numbered options. Reply with **1**, **2**, or an exact option label. The answer goes to the active question, even while HERDR reports the agent as blocked; it is not submitted as a new chat prompt.
+
+| Decision waiting | Choice received and workflow continued |
+| :---: | :---: |
+| <img src="docs/screenshots/white-noise-decision.png" width="300" alt="White Noise showing a clean decision question with two numbered options"> | <img src="docs/screenshots/white-noise-decision-answered.png" width="300" alt="The phone reply 1, its choice confirmation, and a separate final reply"> |
+
+Actual Android captures using a synthetic HERDR/OpenCode fixture with the real codr bridge, MDK transport, and Android app. The phone's **1** selected the first option and continued the fixture workflow; this does not verify a live OpenCode dialog end to end. Decision cards and answers do not require editable progress.
+
+The bridge checks the session, pending tool request, and visible question before sending the native number shortcut. If a question was not answered through codr and is replaced, the new card requires its short code, for example `qabc123 1`. Duplicate deliveries and uncertain submissions are not sent again automatically.
+
+This targets OpenCode 1.18.35's single-choice question UI. Custom text entry, multi-select/multi-question dialogs, permission approvals, and decisions in other backends require the terminal. Unsupported OpenCode blockers show a short notice instead of forwarding unrelated tool output.
+
+HERDR 0.9.1 cannot make the final identity check and terminal input atomic. Avoid answering the same question simultaneously from the terminal and phone. After an uncertain answer, inspect the terminal before using `clear-prompt` and sending a new reply.
 
 ## Supported reply sources
 
@@ -156,7 +172,7 @@ Use the [installation guide](docs/INSTALL.md) for complete commands, including t
 Install a pinned release through HERDR, then open its guided setup tab:
 
 ```sh
-herdr plugin install tidley/codr --ref v0.3.2
+herdr plugin install tidley/codr --ref v0.4.0
 herdr plugin action invoke local.white-noise.setup
 ```
 

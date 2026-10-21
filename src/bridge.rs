@@ -73,6 +73,12 @@ impl Bridge {
                     mapping.response_id = None;
                     mapping.task_revision = None;
                     mapping.forwarding_baseline_pending = true;
+                    mapping.blocked_context_seq = None;
+                    mapping.decision_checked_at = 0;
+                    mapping.decision_refresh_pending = true;
+                    if let Some(decision) = mapping.decision.as_mut() {
+                        decision.announced = false;
+                    }
                 }
             }
             self.state.forwarding_enabled = control.enabled && !reset;
@@ -635,7 +641,56 @@ impl Bridge {
                 Err(_) => eprintln!("Task list unavailable; response delivery remains active."),
             }
         }
-        if agent.agent_status == "blocked"
+        let opencode = agent
+            .agent_session
+            .as_ref()
+            .is_some_and(|session| session.agent == "opencode");
+        if self.state.forwarding_enabled && agent.agent_status == "blocked" && opencode {
+            let mapping = &self.state.mappings[key];
+            if mapping.blocked_context_seq != Some(agent.state_change_seq)
+                || (mapping
+                    .decision
+                    .as_ref()
+                    .is_none_or(|decision| !decision.announced)
+                    || mapping.decision_refresh_pending)
+                    && now().saturating_sub(mapping.decision_checked_at) >= 5
+            {
+                let decision =
+                    output::decision::read(&self.config, agent.agent_session.as_ref().unwrap())
+                        .await;
+                self.state
+                    .mappings
+                    .get_mut(key)
+                    .unwrap()
+                    .decision_checked_at = now();
+                self.state
+                    .mappings
+                    .get_mut(key)
+                    .unwrap()
+                    .decision_refresh_pending = !matches!(&decision, Ok(Some(_)));
+                match decision {
+                    Ok(Some(decision)) => {
+                        self.announce_decision(key, &group, decision)?;
+                    }
+                    _ if self.state.mappings[key].blocked_context_seq
+                        != Some(agent.state_change_seq) =>
+                    {
+                        let notice = "Agent needs input in the terminal. No supported decision is available yet.";
+                        if self.config.edit_responses {
+                            self.state.update_response(key, &group, notice, false);
+                        } else {
+                            self.state.enqueue(&group, notice);
+                        }
+                    }
+                    _ => {}
+                }
+                self.state
+                    .mappings
+                    .get_mut(key)
+                    .unwrap()
+                    .blocked_context_seq = Some(agent.state_change_seq);
+            }
+        } else if agent.agent_status == "blocked"
             && self.state.mappings[key].blocked_context_seq != Some(agent.state_change_seq)
         {
             let response = self
@@ -759,6 +814,16 @@ impl Bridge {
             self.baseline_forwarding(&key, &agent).await?;
         }
         let text = msg["text"].as_str().unwrap_or("");
+        if text != "/status"
+            && !text.trim().is_empty()
+            && msg["text_truncated"] != true
+            && msg["attachments_truncated"] != true
+            && msg["media"].as_array().is_none_or(|media| media.is_empty())
+            && let Some(agent) = self.agents.get(&key).cloned()
+            && self.answer_decision(&key, &agent, group, id, text).await?
+        {
+            return Ok(());
+        }
         // A final transcript record can lag HERDR's idle state. Resolve it before
         // opening another response, so it cannot overwrite the next prompt's message.
         if self.config.edit_responses
@@ -858,6 +923,138 @@ impl Bridge {
             self.state.enqueue(group, &text);
         }
         self.save()
+    }
+
+    fn announce_decision(
+        &mut self,
+        key: &str,
+        group: &str,
+        mut decision: output::decision::Decision,
+    ) -> Result<()> {
+        if let Some(previous) = self.state.mappings[key].decision.as_ref() {
+            if previous.same_request(&decision) {
+                decision = previous.clone();
+            } else {
+                decision.requires_token = !previous.submitted;
+            }
+        }
+        if !decision.announced && self.state.forwarding_enabled {
+            self.state.enqueue(group, &decision.text());
+            decision.announced = true;
+            if self.config.edit_responses {
+                self.state.update_response(
+                    key,
+                    group,
+                    "State: blocked. Waiting for your decision.",
+                    false,
+                );
+            }
+        }
+        self.state.mappings.get_mut(key).unwrap().decision = Some(decision);
+        self.save()
+    }
+
+    fn decision_notice(&mut self, key: &str, group: &str, id: &str, text: &str) -> Result<bool> {
+        self.state
+            .mappings
+            .get_mut(key)
+            .unwrap()
+            .seen_messages
+            .push(id.into());
+        self.state.enqueue(group, text);
+        self.save()?;
+        Ok(true)
+    }
+
+    async fn answer_decision(
+        &mut self,
+        key: &str,
+        agent: &Agent,
+        group: &str,
+        id: &str,
+        text: &str,
+    ) -> Result<bool> {
+        let Some(session) = agent
+            .agent_session
+            .as_ref()
+            .filter(|session| session.agent == "opencode")
+        else {
+            return Ok(false);
+        };
+        let previous = self.state.mappings[key].decision.clone();
+        let numeric = text.trim().bytes().all(|byte| byte.is_ascii_digit());
+        let looks_like_answer = numeric
+            || text.trim().starts_with("/answer ")
+            || previous
+                .as_ref()
+                .is_some_and(|decision| decision.looks_like_answer(text));
+        if agent.agent_status != "blocked" && previous.is_none() && !looks_like_answer {
+            return Ok(false);
+        }
+        let current = herdr::get(&self.herdr, agent).await?;
+        if current.agent_status != "blocked" {
+            if previous.is_some() && looks_like_answer {
+                return self.decision_notice(
+                    key,
+                    group,
+                    id,
+                    "That decision is no longer waiting. No answer was sent.",
+                );
+            }
+            return Ok(false);
+        }
+        let Some(active) = output::decision::read(&self.config, session).await? else {
+            if looks_like_answer || previous.is_some() {
+                return self.decision_notice(key, group, id, "No supported decision is available yet. Wait for its question card or use the terminal. No answer was sent.");
+            }
+            return Ok(false);
+        };
+        if previous
+            .as_ref()
+            .is_none_or(|previous| !previous.announced || !previous.same_request(&active))
+        {
+            self.announce_decision(key, group, active)?;
+            return self.decision_notice(key, group, id, "The current decision is shown above. Please reply to that question; no answer was sent yet.");
+        }
+        let decision = previous.unwrap();
+        if decision.submitted {
+            return self.decision_notice(key, group, id, "An answer was already submitted for this question. Check the terminal if it is still waiting.");
+        }
+        let choice = match decision.choice(text) {
+            Ok(choice) => choice,
+            Err(error) => return self.decision_notice(key, group, id, &error.to_string()),
+        };
+        let visible = self.herdr.herdr("agent.read", json!({"target":agent.pane_id,"source":"visible","format":"text","lines":300,"strip_ansi":true})).await?;
+        let matches = visible["result"]["read"]["truncated"] != true
+            && visible["result"]["read"]["text"]
+                .as_str()
+                .is_some_and(|text| decision.matches_visible(text));
+        if !matches || herdr::get(&self.herdr, agent).await?.agent_status != "blocked" {
+            return self.decision_notice(key, group, id, "The terminal is no longer showing that decision's choice list. No answer was sent. Check the terminal or wait for its current question.");
+        }
+        let pending_prompt = self.state.mappings[key].pending_prompt;
+        let mapping = self.state.mappings.get_mut(key).unwrap();
+        mapping.decision.as_mut().unwrap().submitted = true;
+        mapping.pending_prompt = true;
+        mapping.seen_messages.push(id.into());
+        self.save()?;
+        match herdr::choose(&self.herdr, agent, choice).await {
+            Ok(()) => {
+                self.state.enqueue(group, &format!("Sent choice {choice}: {}.", decision.questions[0].options[choice-1].label));
+            }
+            Err(error) if error.downcast_ref::<crate::wire::NotSubmitted>().is_some() => {
+                let mapping = self.state.mappings.get_mut(key).unwrap();
+                mapping.decision.as_mut().unwrap().submitted = false;
+                mapping.pending_prompt = pending_prompt;
+                mapping.seen_messages.retain(|seen| seen != id);
+                self.herdr_available = false;
+                self.save()?;
+                return Err(error);
+            }
+            Err(_) => self.state.enqueue(group, "The decision answer could not be confirmed. It will not be retried automatically. Inspect the terminal before using clear-prompt and sending a new answer."),
+        }
+        self.save()?;
+        Ok(true)
     }
 
     pub async fn recover_inbound(&mut self) -> Result<()> {

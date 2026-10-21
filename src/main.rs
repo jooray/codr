@@ -156,6 +156,11 @@ async fn main() -> Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("Unknown session key"))?;
             mapping.pending_prompt = false;
             mapping.completion_pending = false;
+            if let Some(decision) = mapping.decision.as_mut() {
+                decision.submitted = false;
+                decision.announced = false;
+                mapping.decision_refresh_pending = true;
+            }
             let group = mapping
                 .group_id_hex
                 .clone()

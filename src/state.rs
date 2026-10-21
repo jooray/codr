@@ -38,6 +38,12 @@ pub struct Mapping {
     pub forwarding_baseline_pending: bool,
     #[serde(default)]
     pub muted_turns: Vec<String>,
+    #[serde(default)]
+    pub decision: Option<crate::output::decision::Decision>,
+    #[serde(default)]
+    pub decision_checked_at: u64,
+    #[serde(default)]
+    pub decision_refresh_pending: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
