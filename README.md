@@ -1,8 +1,8 @@
 # HERDR White Noise Remote
 
-A Linux [HERDR](https://github.com/herdrdev/herdr) plugin with one encrypted [White Noise](https://github.com/marmot-protocol/whitenoise) group per local agent session.
+A Linux [HERDR](https://github.com/herdrdev/herdr) plugin with one encrypted White Noise group per local agent session.
 
-The plugin uses the maintained [Marmot Development Kit (MDK)](https://github.com/marmot-protocol/mdk) `wn-agent` transport. One dedicated bridge identity joins every group. Your phone uses the normal White Noise app.
+The plugin uses the maintained [Marmot Development Kit (MDK)](https://github.com/marmot-protocol/mdk) `wn-agent` transport. One dedicated bridge identity joins every group. Your phone uses White Noise for [iOS](https://github.com/marmot-protocol/whitenoise-ios) or [Android](https://github.com/marmot-protocol/whitenoise-android).
 
 The current release runs on Linux, with structured final replies supported for OpenCode.
 
@@ -146,7 +146,7 @@ Without `--group`, the command sends the notice to every mapped group. The comma
 
 codr builds on the work of these projects and their maintainers and contributors:
 
-- [White Noise](https://github.com/marmot-protocol/whitenoise): the mobile messaging application used as codr's phone interface.
+- White Noise: the mobile messaging application used as codr's phone interface, maintained in the [iOS](https://github.com/marmot-protocol/whitenoise-ios) and [Android](https://github.com/marmot-protocol/whitenoise-android) repositories.
 - [Marmot Development Kit (MDK)](https://github.com/marmot-protocol/mdk): the `wn-agent` connector that provides identity management, encrypted group state, relay transport, invitations, and message delivery.
 - [Marmot protocol](https://github.com/marmot-protocol/marmot): the end-to-end encrypted group messaging protocol built on MLS with Nostr identity.
 - [HERDR](https://github.com/herdrdev/herdr): the agent runtime, plugin system, and local API that codr uses to discover and control sessions.
