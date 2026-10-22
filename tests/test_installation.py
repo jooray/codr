@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import plistlib
 import sys
 import tarfile
 import tempfile
@@ -13,6 +14,7 @@ from unittest.mock import patch
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 import install as installer
+import services
 
 spec = importlib.util.spec_from_file_location("codr_setup", SCRIPTS / "setup.py")
 setup = importlib.util.module_from_spec(spec)
@@ -23,8 +25,11 @@ class InstallerTests(unittest.TestCase):
     def test_supported_architectures_and_rejection(self):
         self.assertEqual(installer.platform_name("Linux", "x86_64"), "linux-x86_64")
         self.assertEqual(installer.platform_name("Linux", "arm64"), "linux-aarch64")
+        self.assertEqual(installer.platform_name("Darwin", "arm64"), "macos-aarch64")
+        self.assertEqual(installer.platform_name("Darwin", "x86_64"), "macos-x86_64")
+        self.assertEqual(installer.mdk_platform_name("Darwin", "arm64"), "darwin-aarch64")
         with self.assertRaises(installer.InstallError):
-            installer.platform_name("Darwin", "arm64")
+            installer.platform_name("Windows", "x86_64")
 
     def test_downloaded_archive_is_checked_before_installation(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -72,11 +77,19 @@ class InstallerTests(unittest.TestCase):
             self.assertFalse((root / "installed").exists())
 
 
+class ManifestTests(unittest.TestCase):
+    def test_manifest_declares_both_host_platforms(self):
+        manifest = setup.tomllib.loads((SCRIPTS.parent / "herdr-plugin.toml").read_text())
+        self.assertIn("linux", manifest["platforms"])
+        self.assertIn("macos", manifest["platforms"])
+        self.assertEqual(manifest["version"], setup.tomllib.loads((SCRIPTS.parent / "Cargo.toml").read_text())["package"]["version"])
+
+
 class SetupTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.home = Path(self.temporary.name)
-        self.environment = patch.dict(os.environ, {"HOME": str(self.home), "XDG_CONFIG_HOME": str(self.home / "config space %"), "XDG_STATE_HOME": str(self.home / "state"), "CODR_OWNER_NPUB": ""}, clear=True)
+        self.environment = patch.dict(os.environ, {"HOME": str(self.home), "XDG_CONFIG_HOME": str(self.home / "config space %"), "XDG_STATE_HOME": str(self.home / "state"), "CODR_OWNER_NPUB": "", "CODR_SERVICE_MANAGER": "systemd"}, clear=True)
         self.environment.start()
         self.addCleanup(self.environment.stop)
         self.addCleanup(self.temporary.cleanup)
@@ -112,7 +125,7 @@ class SetupTests(unittest.TestCase):
             self.assertEqual(self.config.stat().st_mode & 0o777, 0o600)
             config = setup.tomllib.loads(self.config.read_text())
             self.assertEqual(config["phone_npub"], "npub1fixture")
-            self.assertEqual(config["herdr_socket"], str(self.socket))
+            self.assertEqual(config["herdr_socket"], str(self.socket.resolve()))
             self.assertEqual(config["account_id_hex"], "ab" * 32)
             unit = self.config.parents[1] / "systemd/user/herdr-white-noise-bridge.service"
             self.assertIn("%%", unit.read_text())
@@ -195,7 +208,7 @@ class SetupTests(unittest.TestCase):
             setup.configure("npub1fixture", self.socket, self.runner)
         config = setup.tomllib.loads(self.config.read_text())
         self.assertEqual(config["opencode_bin"], "opencode")
-        self.assertEqual(config["codex_home"], str(self.home / ".codex"))
+        self.assertEqual(config["codex_home"], str((self.home / ".codex").resolve()))
 
     def test_claude_only_install_does_not_require_opencode_or_codex(self):
         def find(name, candidates=()):
@@ -205,8 +218,23 @@ class SetupTests(unittest.TestCase):
         with self.mocks(), patch.object(setup, "find_executable", side_effect=find):
             result = setup.configure("npub1fixture", self.socket, self.runner)
         config = setup.tomllib.loads(self.config.read_text())
-        self.assertEqual(config["claude_home"], str(self.home / ".claude"))
+        self.assertEqual(config["claude_home"], str((self.home / ".claude").resolve()))
         self.assertEqual(result["supported_agents"], ["claude"])
+
+    def test_macos_setup_writes_launch_agents_and_uses_launchctl(self):
+        agents = self.home / "LaunchAgents"
+        with self.mocks(), patch.dict(os.environ, {"CODR_SERVICE_MANAGER": "launchd", "CODR_LAUNCH_AGENTS_DIR": str(agents)}), \
+                patch.object(services, "_capture", return_value="state = running"):
+            result = setup.configure("npub1fixture", self.socket, self.runner)
+        self.assertEqual(result["bridge_npub"], "npub1bridge")
+        self.assertTrue((agents / "io.github.tidley.codr.wn-agent-herdr.plist").exists())
+        self.assertTrue((agents / "io.github.tidley.codr.herdr-white-noise-bridge.plist").exists())
+        self.assertFalse((self.config.parents[1] / "systemd").exists())
+        self.assertTrue(all("systemctl" not in " ".join(call) for call in self.calls))
+        self.assertIn(["launchctl", "kickstart", f"gui/{os.getuid()}/io.github.tidley.codr.herdr-white-noise-bridge"], self.calls)
+        plist = plistlib.loads((agents / "io.github.tidley.codr.herdr-white-noise-bridge.plist").read_bytes())
+        self.assertIn("--config", plist["ProgramArguments"])
+        self.assertEqual(plist["KeepAlive"], {"SuccessfulExit": False})
 
     def test_broken_unrelated_cli_does_not_block_an_observed_native_agent(self):
         def find(name, candidates=()):

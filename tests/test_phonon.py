@@ -65,6 +65,28 @@ class PhononTests(unittest.TestCase):
             self.assertIn("--socket", command)
             self.assertTrue(Path(command[1]).is_file())
 
+    def test_apple_silicon_installs_the_mlx_runtime(self):
+        import phonon
+        calls = []
+        with patch.object(phonon.sys, "platform", "darwin"), patch.object(phonon.platform, "machine", return_value="arm64"):
+            phonon.install_packages(lambda argv: calls.append(argv), "/venv/bin/python")
+        self.assertEqual(calls, [["/venv/bin/python", "-m", "pip", "install", "fermion-research[mlx]==0.2.12"]])
+
+    def test_intel_mac_uses_the_plain_fermion_wheel(self):
+        import phonon
+        calls = []
+        with patch.object(phonon.sys, "platform", "darwin"), patch.object(phonon.platform, "machine", return_value="x86_64"):
+            phonon.install_packages(lambda argv: calls.append(argv), "/venv/bin/python")
+        self.assertEqual(calls, [["/venv/bin/python", "-m", "pip", "install", "fermion-research==0.2.12"]])
+
+    def test_linux_installs_the_cpu_torch_wheel_first(self):
+        import phonon
+        calls = []
+        with patch.object(phonon.sys, "platform", "linux"):
+            phonon.install_packages(lambda argv: calls.append(argv), "/venv/bin/python")
+        self.assertEqual(len(calls), 2)
+        self.assertIn("https://download.pytorch.org/whl/cpu", calls[0])
+
     def test_worker_has_a_one_gibibyte_limit_and_a_private_socket(self):
         unit = (SCRIPTS.parent / "systemd/codr-phonon.service").read_text()
         self.assertIn("MemoryMax=1G", unit)

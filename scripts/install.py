@@ -7,11 +7,16 @@ from pathlib import Path
 import platform
 import re
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
-import tomllib
 import urllib.request
+
+try:
+    import tomllib
+except ImportError:  # macOS ships Python 3.9 as /usr/bin/python3
+    tomllib = None
 
 ROOT = Path(__file__).resolve().parents[1]
 MAX_DOWNLOAD = 256 * 1024 * 1024
@@ -25,16 +30,57 @@ def platform_name(system=None, machine=None):
     system = system or platform.system()
     machine = machine or platform.machine()
     architectures = {"x86_64": "x86_64", "aarch64": "aarch64", "arm64": "aarch64"}
-    if system != "Linux" or machine not in architectures:
-        raise InstallError("Supported platforms: Linux x86_64 and aarch64")
-    return "linux-" + architectures[machine]
+    if machine not in architectures:
+        raise InstallError("Supported architectures: x86_64 and aarch64")
+    if system == "Linux":
+        return "linux-" + architectures[machine]
+    if system == "Darwin":
+        return "macos-" + architectures[machine]
+    raise InstallError("Supported platforms: Linux and macOS on x86_64 and aarch64")
+
+
+def mdk_platform_name(system=None, machine=None):
+    """MDK names its macOS assets with the Darwin system name."""
+    return platform_name(system, machine).replace("macos-", "darwin-")
 
 
 def version():
-    value = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"]
+    text = (ROOT / "Cargo.toml").read_text()
+    if tomllib:
+        value = tomllib.loads(text)["package"]["version"]
+    else:
+        # The build hook can run under macOS's Python 3.9, which lacks tomllib.
+        found = re.search(r'(?ms)^\[package\]\s*$.*?^version\s*=\s*"([^"]+)"', text)
+        if not found:
+            raise InstallError("The checkout does not declare a package version")
+        value = found.group(1)
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", value):
         raise InstallError("The checkout does not select a numeric release")
     return value
+
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verify_signature(path):
+    """arm64 macOS refuses to execute unsigned code; fail before replacing a working binary."""
+    if platform.system() != "Darwin" or platform.machine() not in ("arm64", "aarch64"):
+        return
+    with Path(path).open("rb") as source:
+        magic = source.read(4)
+    if magic not in (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca"):
+        return  # scripts and other non-Mach-O files do not need a signature
+    try:
+        result = subprocess.run(["codesign", "--verify", "--strict", str(path)], capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise InstallError("Could not verify the downloaded binary's code signature") from error
+    if result.returncode:
+        raise InstallError("Downloaded binary has an invalid code signature")
 
 
 def download(url, destination):
@@ -63,9 +109,7 @@ def install_bundle(url, member, destination):
         fields = checksum.read_text().split()
         if not fields or not re.fullmatch(r"[a-fA-F0-9]{64}", fields[0]):
             raise InstallError("Invalid release checksum")
-        with archive.open("rb") as source:
-            actual = hashlib.file_digest(source, "sha256").hexdigest()
-        if actual != fields[0].lower():
+        if sha256(archive) != fields[0].lower():
             raise InstallError("Release checksum mismatch; nothing was installed")
         with tarfile.open(archive, "r:gz") as bundle:
             entries = [entry for entry in bundle.getmembers() if entry.name == member]
@@ -80,6 +124,7 @@ def install_bundle(url, member, destination):
                     output.flush()
                     os.fsync(output.fileno())
                     os.chmod(temporary_binary, 0o755)
+                    verify_signature(temporary_binary)
                     os.replace(temporary_binary, destination)
                 finally:
                     temporary_binary.unlink(missing_ok=True)

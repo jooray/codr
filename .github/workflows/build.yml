@@ -40,19 +40,46 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: python3 -m unittest discover -s tests -p 'test_*.py' -v
 
+  checks-macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: cargo test --locked --tests
+      - run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+
   binaries:
-    needs: checks
+    needs: [checks, checks-macos]
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
         include:
           - runner: ubuntu-24.04
+            os: linux
             arch: x86_64
             target: x86_64-unknown-linux-musl
+            rustflags: '-C linker=musl-gcc'
           - runner: ubuntu-24.04-arm
+            os: linux
             arch: aarch64
             target: aarch64-unknown-linux-musl
+            rustflags: '-C linker=musl-gcc'
+          - runner: macos-15
+            os: macos
+            arch: aarch64
+            target: aarch64-apple-darwin
+            rustflags: ''
+          - runner: macos-15-intel
+            os: macos
+            arch: x86_64
+            target: x86_64-apple-darwin
+            rustflags: ''
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -62,23 +89,33 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - name: Install native musl linker
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Build and package
         env:
           TARGET: ${{ matrix.target }}
+          OS_NAME: ${{ matrix.os }}
           ARCH: ${{ matrix.arch }}
-          RUSTFLAGS: '-C linker=musl-gcc'
+          RUSTFLAGS: ${{ matrix.rustflags }}
         run: |
           cargo build --locked --release --target "$TARGET"
           "target/$TARGET/release/herdr-white-noise-bridge" --version
-          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           mkdir -p dist
-          asset="codr-v$version-linux-$ARCH.tar.gz"
+          if [ "$OS_NAME" = macos ]; then
+            codesign --force --sign - "target/$TARGET/release/herdr-white-noise-bridge"
+            codesign --verify --strict "target/$TARGET/release/herdr-white-noise-bridge"
+          fi
+          asset="codr-v$version-$OS_NAME-$ARCH.tar.gz"
           tar -czf "dist/$asset" -C "target/$TARGET/release" herdr-white-noise-bridge
-          sha256sum "dist/$asset" > "dist/$asset.sha256"
+          if [ "$OS_NAME" = macos ]; then
+            shasum -a 256 "dist/$asset" > "dist/$asset.sha256"
+          else
+            sha256sum "dist/$asset" > "dist/$asset.sha256"
+          fi
       - uses: actions/upload-artifact@v4
         with:
-          name: codr-linux-${{ matrix.arch }}
+          name: codr-${{ matrix.os }}-${{ matrix.arch }}
           path: dist/*
           if-no-files-found: error
 
@@ -91,7 +128,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: codr-linux-*
+          pattern: codr-*
           merge-multiple: true
           path: dist
       - name: Publish versioned release

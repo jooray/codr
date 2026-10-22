@@ -133,7 +133,7 @@ Limits are four attachments per message, 25 MiB per file, and five minutes per a
 
 Setup installs `fermion-research` 0.2.12 with CPU-only PyTorch and downloads Phonon-2, approximately 164 MB plus runtime dependencies. FFmpeg is required. The worker uses an owner-only Unix socket under `$XDG_RUNTIME_DIR/codr-phonon` and processes recordings locally.
 
-`codr-phonon.service` has a 1 GiB memory limit and no swap allowance. The bridge starts it as a dependency. A healthy existing **codr** worker is reused. If the worker cannot start within the limit, setup reports failure rather than raising the limit.
+On Linux, `codr-phonon.service` has a 1 GiB memory limit and no swap allowance, and the bridge starts it as a dependency. launchd has no equivalent cap, so the macOS agent runs without a hard memory limit. A healthy existing **codr** worker is reused. If the worker cannot start within the Linux limit, setup reports failure rather than raising the limit.
 
 Fresh setup includes audio by default. Use `--no-audio` for a text/image-only installation. To add Phonon to an existing installation:
 
@@ -144,8 +144,12 @@ python3 scripts/setup.py --phonon
 This preserves the identity and mappings, adds the transcription command, and restarts only the bridge when its configuration changes. Existing custom transcription commands are not overwritten. A plain setup rerun preserves the existing selection.
 
 ```sh
+# Linux
 systemctl --user status codr-phonon.service
 journalctl --user -u codr-phonon.service
+# macOS
+launchctl print "gui/$(id -u)/io.github.tidley.codr.codr-phonon"
+tail -n 50 ~/Library/Logs/codr/codr-phonon.err.log
 ```
 
 Normalised audio files are temporary and removed after each attempt. MDK manages its downloaded temporary files. Image copies stay in **codr**'s private media directory. Do not commit media, transcripts, or model files to Git.
@@ -185,8 +189,8 @@ Existing history is baselined when a group is first attached or reply support is
 
 ## Requirements
 
-- Linux x86_64 or aarch64 with a systemd user manager.
-- Python 3.11 or newer and Git. Rust is only needed when building from source.
+- Linux x86_64 or aarch64 with a systemd user manager, or macOS on Apple silicon or Intel with a logged-in launchd session.
+- Python 3.11 or newer for setup, Git, and `launchctl` or `systemctl`. Setup finds a newer Homebrew interpreter when `/usr/bin/python3` is too old. Rust is only needed when building from source.
 - HERDR 0.9.1 or newer, with a running local server.
 - MDK `wn-agent` 0.13.0, including `group_create` and `timeline_list` in `marmot.agent-control.v2`.
 - A supported agent: OpenCode, Codex, or Claude Code. OpenCode needs `--pure export SESSION_ID`; Codex and Claude Code need readable native transcripts.
@@ -214,7 +218,7 @@ Use the [installation guide](INSTALL.md) for complete commands, including the pi
 Install a pinned release through HERDR, then open its guided setup tab:
 
 ```sh
-herdr plugin install tidley/codr --ref v0.5.0
+herdr plugin install tidley/codr --ref v0.6.0
 herdr plugin action invoke local.white-noise.setup
 ```
 
@@ -222,13 +226,13 @@ The installation hook downloads and verifies the matching **codr** binary from G
 
 For a non-interactive installation by a coding agent, see the [agent instructions](INSTALL.md#instructions-for-coding-agents).
 
-HERDR starts the plugin worker through its startup hook after restore. The worker's user service keeps it alive across client disconnects. Use `systemctl --user enable herdr-white-noise-bridge.service` if it must start independently at login.
+HERDR starts the plugin worker through its startup hook after restore. The worker's user service keeps it alive across client disconnects. On Linux, use `systemctl --user enable herdr-white-noise-bridge.service` if it must start independently at login. On macOS the LaunchAgents in `~/Library/LaunchAgents` run at login by default.
 
 Do not share the existing `wn-opencode` connector home. That adapter can also answer messages sent to its identity.
 
 ## GitHub builds
 
-GitHub Actions runs Rust formatting, tests, Clippy, and isolated installer/setup tests on pushes and pull requests. A version tag builds native Linux x86_64 and aarch64 binaries with musl, then publishes archives and SHA-256 checksums to [GitHub Releases](https://github.com/tidley/codr/releases).
+GitHub Actions runs Rust formatting, tests, Clippy, and isolated installer/setup tests on Linux, plus the Rust and Python test suites on macOS, for pushes and pull requests. A version tag builds native Linux x86_64 and aarch64 binaries with musl and native macOS aarch64 and x86_64 binaries, then publishes archives and SHA-256 checksums to [GitHub Releases](https://github.com/tidley/codr/releases). macOS binaries are ad-hoc signed.
 
 The installer selects the release version from the plugin checkout. It never silently substitutes a newer release. MDK uses its own pinned upstream release rather than a rebuilt or copied transport implementation.
 
@@ -246,7 +250,10 @@ A relay acknowledgement proves publication, not that the phone displayed or acce
 
 ```sh
 ~/.local/bin/herdr-white-noise-bridge status
+# Linux
 journalctl --user -u herdr-white-noise-bridge.service
+# macOS
+tail -n 50 ~/Library/Logs/codr/herdr-white-noise-bridge.err.log
 ```
 
 State and the pending outbox use owner-only files. Keep them on persistent storage, with the MDK account home. Do not put these files in Git.
@@ -256,9 +263,14 @@ The bridge saves consumed phone-message IDs before it submits terminal input. It
 If a prompt result remains uncertain, inspect the live session first. Stop the worker and release the pending flag without resubmitting:
 
 ```sh
+# Linux
 systemctl --user stop herdr-white-noise-bridge.service
 ~/.local/bin/herdr-white-noise-bridge clear-prompt 'SESSION_KEY_FROM_STATUS'
 systemctl --user start herdr-white-noise-bridge.service
+# macOS
+launchctl bootout "gui/$(id -u)/io.github.tidley.codr.herdr-white-noise-bridge"
+~/.local/bin/herdr-white-noise-bridge clear-prompt 'SESSION_KEY_FROM_STATUS'
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/io.github.tidley.codr.herdr-white-noise-bridge.plist"
 ```
 
 Group creation has no idempotency key in MDK 0.13.0. Connection failures before submission retry automatically. A timeout or ambiguous connector error requires inspection, including a missing KeyPackage error that MDK reports only as `app_error`.
