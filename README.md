@@ -55,6 +55,10 @@ OpenCode can use incremental, read-only SQLite reads instead of full exports. [R
 
 **Limits:** Decision replies support OpenCode single-choice questions with 1–9 options. Other dialogs need the terminal. Avoid simultaneous terminal/phone answers. [Decision compatibility](docs/REFERENCE.md#answer-decisions-from-the-phone) · [Media and audio](docs/REFERENCE.md#images-and-voice-messages)
 
+## Roadmap
+
+[Planned work and completed items](docs/REFERENCE.md#roadmap).
+
 ## Screenshots
 
 <details>
@@ -90,6 +94,6 @@ Alex invited Sam to the Garden planner chat. Sam can discuss the project, but on
 
 ---
 
-[Operating reference](docs/REFERENCE.md) · [Changelog](CHANGELOG.md) · [Roadmap](docs/REFERENCE.md#roadmap) · [Releases](https://github.com/tidley/codr/releases)
+[Operating reference](docs/REFERENCE.md) · [Changelog](CHANGELOG.md) · [Releases](https://github.com/tidley/codr/releases)
 
 Built on [HERDR](https://github.com/herdrdev/herdr), [White Noise](https://github.com/marmot-protocol/whitenoise-android), [MDK](https://github.com/marmot-protocol/mdk), and the [Marmot protocol](https://github.com/marmot-protocol/marmot). [Full credits](docs/REFERENCE.md#acknowledgements).

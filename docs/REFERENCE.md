@@ -107,7 +107,9 @@ HERDR 0.9.1 cannot make the final identity check and terminal input atomic. Avoi
 
 Group members can discuss a project and read the agent's replies. Only messages from the phone public key in **codr**'s configuration become agent prompts. Other participants' messages are not added to the agent's context. The owner can relay a suggestion in a new prompt.
 
-Invitations require group admin authority in White Noise. Group membership and **codr** prompt permission are separate. Automatic **codr** groups make the bridge identity their admin. The phone owner needs separate admin authority to invite from the app.
+Invitations require group admin authority in White Noise. Groups created by **codr** initially make the bridge identity an admin. The phone owner can also be promoted through MDK. Admin rights allow invitations and group profile edits. They do not grant other participants permission to prompt the agent.
+
+Renaming a White Noise group does not affect routing: **codr** uses its group ID, not its display name. The bridge does not automatically overwrite a renamed title. Running `rename-groups` explicitly resets titles to the HERDR tab labels.
 
 The gallery uses an owner-created group, bound to an isolated demo session. Alex creates the group and invites Sam through White Noise. Sam is a scripted second demo identity. Its message appears in the chat but produces no agent prompt. Alex's next message produces one prompt and a separate reply. This does not grant additional people agent control.
 
@@ -174,6 +176,7 @@ Existing history is baselined when a group is first attached or reply support is
 - [ ] Let the owner authorise additional people to prompt the same agent in a White Noise group.
   - Add owner-managed prompt permissions per group, including revocation.
   - Distinguish agent-directed requests from discussion between participants.
+- [ ] Make the configured phone owner an admin automatically when creating new groups.
 - [x] Download inbound images through MDK and pass their local paths and captions to the mapped agent.
 - [x] Convert White Noise voice messages and audio attachments directly into text prompts with a local Phonon-2 worker.
   - [ ] Add guided selection of other existing transcription services or local whisper.cpp.
