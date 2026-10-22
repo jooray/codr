@@ -85,7 +85,7 @@ jobs:
             target: x86_64-apple-darwin
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.os == 'linux' && 'ubuntu:22.04' || '' }}
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - name: Install native build tools
         if: runner.os == 'Linux'
