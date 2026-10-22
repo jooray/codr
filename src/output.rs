@@ -5,6 +5,7 @@ use std::{
     io::{BufReader, Read, Seek, SeekFrom},
     path::Path,
     process::Stdio,
+    sync::atomic::{AtomicU8, Ordering},
     time::Duration,
 };
 use tokio::process::Command;
@@ -132,6 +133,10 @@ pub fn final_messages(export: &Value) -> Result<Vec<FinalMessage>> {
     select_finals(serde_json::from_value(export.clone())?)
 }
 
+pub fn final_messages_v2(export: &Value) -> Result<Vec<FinalMessage>> {
+    select_finals(from_v2(serde_json::from_value(export.clone())?))
+}
+
 fn select_finals(export: Export) -> Result<Vec<FinalMessage>> {
     Ok(select_history(export).finals)
 }
@@ -198,26 +203,188 @@ pub async fn export(bin: &Path, session: &str) -> Result<Vec<FinalMessage>> {
     select_finals(export_data(bin, session).await?)
 }
 
+const EXPORT_UNKNOWN: u8 = 0;
+const EXPORT_V1: u8 = 1;
+const EXPORT_V2: u8 = 2;
+
+/// The first successful command selects the API for later reads. OpenCode 2.x removed
+/// the v1 `--pure export` command, so one failed attempt is expected after an upgrade.
+static EXPORT_API: AtomicU8 = AtomicU8::new(EXPORT_UNKNOWN);
+
 async fn export_data(bin: &Path, session: &str) -> Result<Export> {
-    // A regular file avoids OpenCode's observed stdout-pipe truncation. The file is anonymous and owner-only.
-    let mut file = tempfile::tempfile()?;
+    let attempts = if EXPORT_API.load(Ordering::Relaxed) == EXPORT_V2 {
+        [EXPORT_V2, EXPORT_V1]
+    } else {
+        [EXPORT_V1, EXPORT_V2]
+    };
+    let mut failures = [String::new(), String::new()];
+    for api in attempts {
+        match run_export(bin, session, api).await {
+            Ok(export) => {
+                EXPORT_API.store(api, Ordering::Relaxed);
+                return Ok(export);
+            }
+            Err(error) => failures[usize::from(api - EXPORT_V1)] = format!("{error:#}"),
+        }
+    }
+    anyhow::bail!(
+        "OpenCode export failed (v1: {}; v2: {})",
+        failures[0],
+        failures[1]
+    )
+}
+
+async fn run_export(bin: &Path, session: &str, api: u8) -> Result<Export> {
+    // Regular files avoid OpenCode's observed stdout-pipe truncation. They are anonymous and owner-only.
+    let mut output = tempfile::tempfile()?;
+    let mut errors = tempfile::tempfile()?;
+    let args: &[&str] = if api == EXPORT_V2 {
+        &["session", "export", session]
+    } else {
+        &["--pure", "export", session]
+    };
     let mut command = Command::new(bin);
     command
-        .args(["--pure", "export", session])
+        .args(args)
         .stdin(Stdio::null())
-        .stdout(file.try_clone()?)
-        .stderr(Stdio::null())
+        .stdout(output.try_clone()?)
+        .stderr(errors.try_clone()?)
         .kill_on_drop(true);
     let status = tokio::time::timeout(Duration::from_secs(30), command.status()).await??;
-    ensure!(status.success(), "OpenCode export failed");
+    if !status.success() {
+        errors.seek(SeekFrom::Start(0))?;
+        let mut message = String::new();
+        errors.take(4096).read_to_string(&mut message)?;
+        let message = message.trim();
+        anyhow::bail!(
+            "exited with {}: {}",
+            status,
+            if message.is_empty() {
+                "no error output"
+            } else {
+                message
+            }
+        );
+    }
     ensure!(
-        file.metadata()?.len() <= 128 * 1024 * 1024,
+        output.metadata()?.len() <= 128 * 1024 * 1024,
         "OpenCode export exceeds 128 MiB"
     );
-    file.seek(SeekFrom::Start(0))?;
-    tokio::task::spawn_blocking(move || Ok(serde_json::from_reader(BufReader::new(file))?))
+    output.seek(SeekFrom::Start(0))?;
+    match api {
+        EXPORT_V2 => tokio::task::spawn_blocking(move || {
+            Ok(from_v2(serde_json::from_reader(BufReader::new(output))?))
+        })
         .await
-        .map_err(|_| anyhow::anyhow!("OpenCode export reader failed"))?
+        .map_err(|_| anyhow::anyhow!("OpenCode export reader failed"))?,
+        _ => tokio::task::spawn_blocking(move || {
+            Ok(serde_json::from_reader(BufReader::new(output))?)
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("OpenCode export reader failed"))?,
+    }
+}
+
+#[derive(Deserialize)]
+struct ExportV2 {
+    messages: Vec<MessageV2>,
+}
+
+#[derive(Deserialize)]
+struct MessageV2 {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    content: Vec<PartV2>,
+    #[serde(default)]
+    time: MessageTimeV2,
+    #[serde(default)]
+    finish: Option<String>,
+    #[serde(default)]
+    error: Option<Value>,
+}
+
+#[derive(Default, Deserialize)]
+struct MessageTimeV2 {
+    #[serde(default)]
+    completed: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct PartV2 {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    state: Value,
+}
+
+/// OpenCode 2.x exports flattened session events instead of v1 messages with parts.
+fn from_v2(export: ExportV2) -> Export {
+    let messages = export
+        .messages
+        .into_iter()
+        .filter_map(|message| {
+            let (role, parts, finish, completed) = match message.kind.as_str() {
+                "user" => (
+                    "user",
+                    vec![Part {
+                        kind: "text".into(),
+                        text: message.text,
+                        synthetic: false,
+                        ignored: false,
+                        id: None,
+                        tool: None,
+                        state: Value::Null,
+                    }],
+                    None,
+                    None,
+                ),
+                "assistant" => (
+                    "assistant",
+                    message.content.into_iter().map(part_from_v2).collect(),
+                    message.finish,
+                    message.time.completed,
+                ),
+                // Subagent markers and idle events are not conversation messages.
+                _ => return None,
+            };
+            Some(Message {
+                info: Info {
+                    id: message.id,
+                    role: role.into(),
+                    time: MessageTime { completed },
+                    finish,
+                    error: message.error,
+                    summary: Value::Bool(false),
+                    parent_id: None,
+                },
+                parts,
+            })
+        })
+        .collect();
+    Export { messages }
+}
+
+fn part_from_v2(part: PartV2) -> Part {
+    Part {
+        kind: part.kind,
+        text: part.text,
+        synthetic: false,
+        ignored: false,
+        id: part.id,
+        tool: part.name,
+        state: part.state,
+    }
 }
 
 #[derive(Clone, Debug, Default)]
