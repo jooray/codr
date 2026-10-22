@@ -9,7 +9,7 @@ The bridge uses one dedicated MDK identity across all mapped groups. Setup keeps
 ## Behaviour
 
 - New sessions create groups and invite the configured phone `npub`.
-- Group names pair the HERDR tab label and workspace: `[cd] <tab name> (<workspace>)`, for example `[cd] review (Acme)`. A workspace without a label leaves `[cd] <tab name>`. Workspace and agent details also appear in the group description. Repository names and agent-generated conversation topics do not determine the chat name.
+- Group names pair the herdr tab label and workspace: `[cd] <tab name> (<workspace>)`, for example `[cd] review (Acme)`. A workspace without a label leaves `[cd] <tab name>`. Workspace and agent details also appear in the group description. Repository names and agent-generated conversation topics do not determine the chat name.
 - A phone message prompts only the agent mapped to that group.
 - Prompts sent while that agent is busy or blocked are not queued. Wait for idle and resend. Supported decision answers use their separate blocked-session route.
 - Final replies come from completed stored agent messages. They exclude reasoning and tool output.
@@ -19,13 +19,13 @@ The bridge uses one dedicated MDK identity across all mapped groups. Setup keeps
 - Images and audio use the media route below. Other attachment types and arbitrary terminal key commands are not supported.
 - Other detected agent backends get groups, prompts, and state notices. Structured final-reply extraction supports **OpenCode, Codex, and Claude Code**.
 
-HERDR snapshots refresh every three seconds. Very short intermediate states can occur between snapshots. Native session references preserve routing across pane moves. Group creation waits for HERDR to report a native session reference. During identity uncertainty, the bridge defers prompts and preserves the existing group.
+herdr snapshots refresh every three seconds. Very short intermediate states can occur between snapshots. Native session references preserve routing across pane moves. Group creation waits for herdr to report a native session reference. During identity uncertainty, the bridge defers prompts and preserves the existing group.
 
 The worker reads session transcripts in background jobs, with at most four reads in parallel and one outstanding read per session. Each OpenCode snapshot supplies replies, tasks, and decisions together. Completed reads wake the worker without waiting for slower sessions. State changes and terminal submissions remain serial. Reads from an older session state or forwarding mode are discarded. An exiting session gets a fresh final transcript read before its mapping closes.
 
 The four-reader limit bounds background I/O, not chat subscriptions. The bridge listens for phone messages across all mapped chats.
 
-This removes serial transcript exports from the main loop. HERDR control requests, MDK delivery, and history recovery still await their own I/O. Parallel reads do not guarantee a fixed phone-delivery time.
+This removes serial transcript exports from the main loop. herdr control requests, MDK delivery, and history recovery still await their own I/O. Parallel reads do not guarantee a fixed phone-delivery time.
 
 ### Incremental OpenCode database reads
 
@@ -59,9 +59,9 @@ Detection uses transcript polling, not keystrokes. Allow the three-second pollin
 
 If a native message appears before its text parts, outgoing delivery pauses until attribution is possible. If that session ends with incomplete input, **codr** mutes globally instead; a new authorized phone message can resume the other sessions.
 
-Use the HERDR action **White Noise forwarding: At desk / Away** to open the control popup. **Toggle White Noise forwarding** switches modes directly and can be bound to a HERDR shortcut.
+Use the herdr action **White Noise forwarding: At desk / Away** to open the control popup. **Toggle White Noise forwarding** switches modes directly and can be bound to a herdr shortcut.
 
-HERDR 0.9.1 does not list plugin actions in its main click menu. For quick access, add this to your HERDR configuration:
+herdr 0.9.1 does not list plugin actions in its main click menu. For quick access, add this to your herdr configuration:
 
 ```toml
 [[keys.command]]
@@ -71,9 +71,9 @@ command = "local.white-noise.forwarding"
 description = "White Noise: At desk / Away"
 ```
 
-With the default prefix, press **Ctrl+B**, release it, then press **f** without Shift. The shortcut also appears in **Keybinds** under **White Noise: At desk / Away**. HERDR reloads configuration changes live.
+With the default prefix, press **Ctrl+B**, release it, then press **f** without Shift. The shortcut also appears in **Keybinds** under **White Noise: At desk / Away**. herdr reloads configuration changes live.
 
-Remote HERDR clients use their local key bindings by default. Add the binding on the client machine, or reconnect with `herdr --remote <host> --remote-keybindings server`. This does not require a server restart. You can also run `herdr plugin pane open --plugin local.white-noise --entrypoint forwarding --focus` on the remote host.
+Remote herdr clients use their local key bindings by default. Add the binding on the client machine, or reconnect with `herdr --remote <host> --remote-keybindings server`. This does not require a server restart. You can also run `herdr plugin pane open --plugin local.white-noise --entrypoint forwarding --focus` on the remote host.
 
 Startup no longer opens the popup automatically. Use the shortcut or action when you need manual control.
 
@@ -100,19 +100,19 @@ Forwarding defaults to Away on an existing installation. The control file is pri
 
 Set `edit_responses = true` in the bridge configuration to enable editable progress. The release-matched connector includes the required `edit_message` API.
 
-Each response starts as one `> working` progress message. The bridge edits that message with the current task list, when available. It sends the final answer as a separate message through the normal durable send path, with its own retry key. The bridge never edits that final answer. When possible, it marks the progress message `> done`.
+Each response starts as one `> working...` progress message. The bridge edits that message with the current task list, when available. It sends the final answer as a separate message through the normal durable send path, with its own retry key. The bridge never edits that final answer. When possible, it marks the progress message `> done`.
 
 OpenCode to-do writes, Codex plan updates, and Claude Code to-do/task tools supply structured task data. The bridge does not prompt a model to obtain progress. Message IDs and pending updates survive bridge restarts. Updates coalesce between snapshots, and edit attempts are at least two timestamp seconds apart.
 
 Progress is best effort. Final replies take priority over progress updates, and progress requests have a three-second local deadline. A failed progress edit does not block a queued final answer. An MDK response or local readback does not prove phone delivery. Very long final replies use continuation messages to preserve all text. Progress messages are ordinary encrypted chat messages, not Nostr ephemeral events.
 
-If HERDR becomes idle before the agent stores its final reply, the bridge keeps that response pending and retries the transcript read. After inspection, `clear-prompt` can release a cancelled response that has no final record.
+If herdr becomes idle before the agent stores its final reply, the bridge keeps that response pending and retries the transcript read. After inspection, `clear-prompt` can release a cancelled response that has no final record.
 
 Edit support is included in the dedicated connector; the flag controls whether **codr** uses it.
 
 ### Answer decisions from the phone
 
-When OpenCode asks one single-choice question, **codr** sends a clean question card with numbered options. Reply with **1**, **2**, or an exact option label. The answer goes to the active question, even while HERDR reports the agent as blocked; it is not submitted as a new chat prompt.
+When OpenCode asks one single-choice question, **codr** sends a clean question card with numbered options. Reply with **1**, **2**, or an exact option label. The answer goes to the active question, even while herdr reports the agent as blocked; it is not submitted as a new chat prompt.
 
 Decision cards and answers do not require editable progress.
 
@@ -120,7 +120,7 @@ The bridge checks the session, pending tool request, and visible question before
 
 Decision routing was verified against OpenCode 1.18.35's single-choice question UI with 1–9 listed options. The gallery uses OpenCode 1.19.3, but does not verify live decision routing on that version. Custom text entry, multi-select/multi-question dialogs, permission approvals, and decisions in other backends require the terminal. Unsupported OpenCode blockers show a short notice instead of forwarding unrelated tool output.
 
-HERDR 0.9.1 cannot make the final identity check and terminal input atomic. Avoid answering the same question simultaneously from the terminal and phone. After an uncertain answer, inspect the terminal before using `clear-prompt` and sending a new reply.
+herdr 0.9.1 cannot make the final identity check and terminal input atomic. Avoid answering the same question simultaneously from the terminal and phone. After an uncertain answer, inspect the terminal before using `clear-prompt` and sending a new reply.
 
 ## Shared chats and owner-only control
 
@@ -130,7 +130,7 @@ New groups make both the configured phone owner and the bridge identity admins i
 
 This requires the release-matched connector included with **codr**. The bridge checks support before recording creation intent, then uses an explicit owner-admin creation operation. An older connector cannot silently create a group without the requested rights. Existing groups keep their current admin policy.
 
-Renaming a White Noise group does not affect routing: **codr** uses its group ID, not its display name. A title changed outside **codr** is left alone; running `rename-groups` explicitly resets titles to the HERDR tab labels.
+Renaming a White Noise group does not affect routing: **codr** uses its group ID, not its display name. A title changed outside **codr** is left alone; running `rename-groups` explicitly resets titles to the herdr tab labels.
 
 The gallery uses an owner-created group, bound to an isolated demo session. Alex creates the group and invites Sam through White Noise. Sam is a scripted second demo identity. Its message appears in the chat but produces no agent prompt. Alex's next message produces one prompt and a separate reply. This does not grant additional people agent control.
 
@@ -183,7 +183,7 @@ Normalised audio files are temporary and removed after each attempt. MDK manages
 | Codex | Successful `task_complete` / `turn_complete` events with a turn ID and final message | `~/.codex/sessions` and `~/.codex/archived_sessions` |
 | Claude Code | Completed main-conversation assistant responses with `message.stop_reason = "end_turn"` | `~/.claude/projects/<project>/<session-id>.jsonl` |
 
-The bridge reads the existing session. It does not start another model invocation, change authentication, or use terminal snapshots as final replies. HERDR must report the native session ID.
+The bridge reads the existing session. It does not start another model invocation, change authentication, or use terminal snapshots as final replies. herdr must report the native session ID.
 
 Codex and Claude Code readers verify session identity, ignore partial records, and reject ambiguous transcript files. Claude's null stop reasons and duration markers alone are not treated as successful replies. Transcript formats are internal to the agent tools; unsupported or incomplete records are not guessed into final answers.
 
@@ -195,9 +195,9 @@ Existing history is baselined when a group is first attached or reply support is
 
 - [x] Add structured final replies for existing Codex sessions.
 - [x] Add structured final replies for existing Claude Code sessions.
-- [ ] Add structured final replies for further HERDR-supported agents.
-- [ ] Create new agent conversations from White Noise by messaging the main worker, which starts a HERDR session and creates its mapped group.
-  - Select the HERDR workspace, directory, agent, and model.
+- [ ] Add structured final replies for further herdr-supported agents.
+- [ ] Create new agent conversations from White Noise by messaging the main worker, which starts a herdr session and creates its mapped group.
+  - Select the herdr workspace, directory, agent, and model.
 - [ ] Let the owner authorise additional people to prompt the same agent in a White Noise group.
   - Add owner-managed prompt permissions per group, including revocation.
   - Distinguish agent-directed requests from discussion between participants.
@@ -212,10 +212,10 @@ Existing history is baselined when a group is first attached or reply support is
 
 - Linux x86_64 or aarch64 with a systemd user manager, or macOS on Apple silicon or Intel with a logged-in launchd session.
 - Python 3.11 or newer for setup, Git, and `launchctl` or `systemctl`. Setup finds a newer Homebrew interpreter when `/usr/bin/python3` is too old. Rust is only needed when building from source.
-- HERDR 0.9.1 or newer, with a running local server.
+- herdr 0.9.1 or newer, with a running local server.
 - The release-matched dedicated connector, including `group_create_with_admins` and `timeline_list` in `marmot.agent-control.v2`.
 - A supported agent: OpenCode, Codex, or Claude Code. OpenCode needs `--pure export SESSION_ID`; Codex and Claude Code need readable native transcripts.
-- HERDR native session references for the agents you want to control.
+- herdr native session references for the agents you want to control.
 - Your phone must publish a compatible Marmot KeyPackage. The phone and bridge need reachable relays.
 
 The repository does not implement MLS or Nostr cryptography. MDK owns keys, encrypted group state, relay connections, invitations, and delivery.
@@ -236,7 +236,7 @@ cargo build --locked --release
 
 Use the [installation guide](INSTALL.md) for complete commands and checksum verification.
 
-Install a pinned release through HERDR, then open its guided setup tab:
+Install a pinned release through herdr, then open its guided setup tab:
 
 ```sh
 herdr plugin install tidley/codr --ref v0.6.0
@@ -247,7 +247,7 @@ The installation hook downloads and verifies the matching **codr** bridge and co
 
 For a non-interactive installation by a coding agent, see the [agent instructions](INSTALL.md#instructions-for-coding-agents).
 
-HERDR starts the plugin worker through its startup hook after restore. The worker's user service keeps it alive across client disconnects. On Linux, use `systemctl --user enable herdr-white-noise-bridge.service` if it must start independently at login. On macOS the LaunchAgents in `~/Library/LaunchAgents` run at login by default.
+herdr starts the plugin worker through its startup hook after restore. The worker's user service keeps it alive across client disconnects. On Linux, use `systemctl --user enable herdr-white-noise-bridge.service` if it must start independently at login. On macOS the LaunchAgents in `~/Library/LaunchAgents` run at login by default.
 
 Do not share the existing `wn-opencode` connector home. That adapter can also answer messages sent to its identity.
 
@@ -262,7 +262,7 @@ The installer selects the bridge and connector release from the plugin checkout.
 1. Accept an invitation from the verified bridge identity.
 2. Send `/status` and check that it identifies a connected session.
 3. Send a harmless request with a fresh word. Ask for that word without tools or file changes.
-4. Check that the matching HERDR session receives the prompt.
+4. Check that the matching herdr session receives the prompt.
 5. Check that its completed reply returns to the same White Noise group.
 
 A relay acknowledgement proves publication, not that the phone displayed or accepted a message. Phone verification requires the round trip above.
@@ -310,9 +310,9 @@ Offline recovery scans retained group history every minute and after reconnect. 
 
 MDK truncates long timeline text to 8,192 characters. The bridge rejects truncated recovered prompts and asks for a shorter message.
 
-### HERDR input limitation
+### herdr input limitation
 
-HERDR 0.9.1 does not accept an expected native-session ID in `agent.prompt`. The bridge verifies the current terminal and session immediately before submission. A concurrent session replacement between verification and submission remains a server-API race. Avoid replacing an agent while sending a phone prompt. Atomic protection requires an upstream expected-session guard.
+herdr 0.9.1 does not accept an expected native-session ID in `agent.prompt`. The bridge verifies the current terminal and session immediately before submission. A concurrent session replacement between verification and submission remains a server-API race. Avoid replacing an agent while sending a phone prompt. Atomic protection requires an upstream expected-session guard.
 
 ## Group names and completion notices
 
@@ -324,7 +324,7 @@ To update existing group names without changing their session mappings, stop the
 
 Then start the worker again. This refreshes names and descriptions without changing group IDs, clears a manual-rename lock, and enables automatic renames for groups created by older versions. Ended sessions without a stored tab label use their existing title, replacing earlier **codr** prefixes or suffixes. Unavailable historical workspace details appear as `unknown`.
 
-Live sessions automatically update their group title and description when the HERDR tab or workspace changes. A title changed in White Noise is never overwritten automatically. If a profile update is not confirmed, automatic renames for that group stop; run `rename-groups` to re-apply the current titles and clear that state. Sessions in tabs with identical labels and workspaces can share a display name, while their routing remains separate.
+Live sessions automatically update their group title and description when the herdr tab or workspace changes. A title changed in White Noise is never overwritten automatically. If a profile update is not confirmed, automatic renames for that group stop; run `rename-groups` to re-apply the current titles and clear that state. Sessions in tabs with identical labels and workspaces can share a display name, while their routing remains separate.
 
 ### Completion notice
 
@@ -338,9 +338,9 @@ Without `--group`, the command sends the notice to every mapped group. The comma
 
 ## Screenshot provenance
 
-The [README gallery](../README.md#screenshots) contains side-by-side composites of real HERDR 0.9.1, OpenCode 1.19.3, and White Noise Android interfaces.
+The [README gallery](../README.md#screenshots) contains side-by-side composites of real herdr 0.9.1, OpenCode 1.19.3, and White Noise Android interfaces.
 
-All seven images use the same fictional Garden planner project. The desktop replays matching history imported into an isolated OpenCode installation. The phone uses a dedicated Alex demo profile. A synthetic HERDR/OpenCode fixture supplies agent state and scripted replies through the real **codr** bridge and an isolated MDK transport.
+All seven images use the same fictional Garden planner project. The desktop replays matching history imported into an isolated OpenCode installation. The phone uses a dedicated Alex demo profile. A synthetic herdr/OpenCode fixture supplies agent state and scripted replies through the real **codr** bridge and an isolated MDK transport.
 
 The captures show current `[cd]` names, blockquote status labels, editable tasks, decisions, separate replies, images, local voice transcription, a three-member chat, and a White Noise project folder. The folder is configured manually, not created by **codr**.
 
@@ -355,7 +355,7 @@ The phone's `1` reply continues the question fixture, not a live OpenCode dialog
 - White Noise: the mobile messaging application used as **codr**'s phone interface, maintained in the [iOS](https://github.com/marmot-protocol/whitenoise-ios) and [Android](https://github.com/marmot-protocol/whitenoise-android) repositories.
 - [Marmot Development Kit (MDK)](https://github.com/marmot-protocol/mdk): the `wn-agent` connector that provides identity management, encrypted group state, relay transport, invitations, and message delivery.
 - [Marmot protocol](https://github.com/marmot-protocol/marmot): the end-to-end encrypted group messaging protocol built on MLS with Nostr identity.
-- [HERDR](https://github.com/herdrdev/herdr): the agent runtime, plugin system, and local API that **codr** uses to discover and control sessions.
+- [herdr](https://github.com/herdrdev/herdr): the agent runtime, plugin system, and local API that **codr** uses to discover and control sessions.
 - [OpenCode](https://github.com/anomalyco/opencode): the coding-agent runtime whose stored final replies **codr** currently reads.
 - [Codex](https://github.com/openai/codex): the coding-agent runtime and native rollout records used by **codr**'s Codex reply reader.
 - [Claude Code](https://github.com/anthropics/claude-code): the coding-agent runtime whose native session transcripts **codr** reads for completed main-conversation replies.

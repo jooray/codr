@@ -1,16 +1,16 @@
 # codr
 
-**codr** connects coding agent sessions in [HERDR](https://github.com/herdrdev/herdr) to [White Noise](https://github.com/marmot-protocol/whitenoise-android), with one encrypted chat per session. It forwards prompts to the mapped agent and returns completed replies to the same chat.
+**codr** connects coding agent sessions in [herdr](https://github.com/herdrdev/herdr) to [White Noise](https://github.com/marmot-protocol/whitenoise-android), with one encrypted chat per session. It forwards prompts to the mapped agent and returns completed replies to the same chat.
 
 Supported agents: OpenCode, Codex, and Claude Code on Linux and macOS.
 
-<img src="docs/screenshots/herdr-phone-progress.png" width="1280" alt="HERDR with the Garden planner task checklist beside matching working status and editable tasks in White Noise">
+<img src="docs/screenshots/herdr-phone-progress.png" width="1280" alt="herdr with the Garden planner task checklist beside matching working status and editable tasks in White Noise">
 
 *Real interfaces, encrypted messages, and local speech-to-text. Fictional participants and scripted agent replies. Editable checklists require `edit_responses = true`. [Capture details](docs/REFERENCE.md#screenshot-provenance).*
 
 ## Behaviour
 
-- Chat names pair the HERDR tab and workspace: `[cd] review (Acme)`. Descriptions contain workspace and agent details.
+- Chat names pair the herdr tab and workspace: `[cd] review (Acme)`. Descriptions contain workspace and agent details.
 - Status notices, optional editable checklists, and final replies appear as separate messages.
 - Supported OpenCode questions accept a number or option label as a reply.
 - New groups make your configured account an admin, so you can invite participants and rename the group. Only the owner can prompt the agent. [Group setup](docs/REFERENCE.md#shared-chats-and-owner-only-control)
@@ -18,7 +18,7 @@ Supported agents: OpenCode, Codex, and Claude Code on Linux and macOS.
 
 ## Install
 
-Needs Linux x86_64 or aarch64 or macOS on Apple silicon or Intel, a per-user service manager (systemd or launchd), Python 3.11+, Git, and HERDR 0.9.1+. No Rust toolchain required.
+Needs Linux x86_64 or aarch64 or macOS on Apple silicon or Intel, a per-user service manager (systemd or launchd), Python 3.11+, Git, and herdr 0.9.1+. No Rust toolchain required.
 
 ```sh
 herdr plugin install tidley/codr --ref v0.6.0
@@ -39,15 +39,15 @@ Or give your coding agent this prompt, with your own public key:
 2. Send `/status` to check the connection. Send a prompt to continue that session.
 3. Read the reply in the same chat. For a supported decision, reply `1`, `2`, or an exact option label.
 
-Handoff is automatic. Manual controls remain available through HERDR's **White Noise forwarding: At desk / Away** action. [Controls and limits →](docs/REFERENCE.md#at-desk--away-forwarding)
+Handoff is automatic. Manual controls remain available through herdr's **White Noise forwarding: At desk / Away** action. [Controls and limits →](docs/REFERENCE.md#at-desk--away-forwarding)
 
 ## How it works
 
 ```text
-White Noise ↔ MDK ↔ codr ↔ HERDR ↔ your agent
+White Noise ↔ MDK ↔ codr ↔ herdr ↔ your agent
 ```
 
-[MDK](https://github.com/marmot-protocol/mdk) handles identity, encrypted messaging, and relays. **codr** routes prompts through HERDR and reads completed replies from existing agent transcripts.
+[MDK](https://github.com/marmot-protocol/mdk) handles identity, encrypted messaging, and relays. **codr** routes prompts through herdr and reads completed replies from existing agent transcripts.
 
 Reply collection uses existing transcripts without an additional model call or terminal scraping. [Behaviour and recovery](docs/REFERENCE.md)
 
@@ -68,7 +68,7 @@ OpenCode can use incremental, read-only SQLite reads instead of full exports. [R
 
 Alex invited Sam to the Garden planner chat. Sam can discuss the project, but only Alex's messages reach the agent.
 
-<img src="docs/screenshots/herdr-phone-shared.png" width="1280" alt="Alex, Sam, and codr in a three-member White Noise chat, with only Alex's request shown in HERDR">
+<img src="docs/screenshots/herdr-phone-shared.png" width="1280" alt="Alex, Sam, and codr in a three-member White Noise chat, with only Alex's request shown in herdr">
 
 **Image attachment**
 
@@ -84,11 +84,11 @@ Alex invited Sam to the Garden planner chat. Sam can discuss the project, but on
 
 **Review output**
 
-<img src="docs/screenshots/herdr-phone-review.png" width="1280" alt="The HERDR review tab beside its White Noise chat, both showing checks for the Garden planner watering reminder">
+<img src="docs/screenshots/herdr-phone-review.png" width="1280" alt="The herdr review tab beside its White Noise chat, both showing checks for the Garden planner watering reminder">
 
 **Session chats in a project folder**
 
-<img src="docs/screenshots/herdr-phone-conversations.png" width="1280" alt="Six Garden planner session tabs in HERDR beside their six matching chats in a White Noise Garden folder">
+<img src="docs/screenshots/herdr-phone-conversations.png" width="1280" alt="Six Garden planner session tabs in herdr beside their six matching chats in a White Noise Garden folder">
 
 </details>
 
@@ -96,4 +96,4 @@ Alex invited Sam to the Garden planner chat. Sam can discuss the project, but on
 
 [Operating reference](docs/REFERENCE.md) · [Changelog](CHANGELOG.md) · [Releases](https://github.com/tidley/codr/releases)
 
-Built on [HERDR](https://github.com/herdrdev/herdr), [White Noise](https://github.com/marmot-protocol/whitenoise-android), [MDK](https://github.com/marmot-protocol/mdk), and the [Marmot protocol](https://github.com/marmot-protocol/marmot). [Full credits](docs/REFERENCE.md#acknowledgements).
+Built on [herdr](https://github.com/herdrdev/herdr), [White Noise](https://github.com/marmot-protocol/whitenoise-android), [MDK](https://github.com/marmot-protocol/mdk), and the [Marmot protocol](https://github.com/marmot-protocol/marmot). [Full credits](docs/REFERENCE.md#acknowledgements).
