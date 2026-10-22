@@ -64,22 +64,18 @@ jobs:
             os: linux
             arch: x86_64
             target: x86_64-unknown-linux-musl
-            rustflags: '-C linker=musl-gcc'
           - runner: ubuntu-24.04-arm
             os: linux
             arch: aarch64
             target: aarch64-unknown-linux-musl
-            rustflags: '-C linker=musl-gcc'
           - runner: macos-15
             os: macos
             arch: aarch64
             target: aarch64-apple-darwin
-            rustflags: ''
           - runner: macos-15-intel
             os: macos
             arch: x86_64
             target: x86_64-apple-darwin
-            rustflags: ''
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.os == 'linux' && 'ubuntu:22.04' || '' }}
     timeout-minutes: 60
@@ -110,10 +106,16 @@ jobs:
           TARGET: ${{ matrix.target }}
           OS_NAME: ${{ matrix.os }}
           ARCH: ${{ matrix.arch }}
-          RUSTFLAGS: ${{ matrix.rustflags }}
         run: |
           cargo build --locked --release --target "$TARGET"
           "target/$TARGET/release/herdr-white-noise-bridge" --version
+          "target/$TARGET/release/herdr-white-noise-bridge" --help > /dev/null
+          if [ "$OS_NAME" = linux ]; then
+            if readelf -l "target/$TARGET/release/herdr-white-noise-bridge" | grep -q INTERP; then
+              echo "The musl bridge unexpectedly requires a runtime loader" >&2
+              exit 1
+            fi
+          fi
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           mkdir -p dist
           if [ "$OS_NAME" = macos ]; then
