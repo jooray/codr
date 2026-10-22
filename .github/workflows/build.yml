@@ -6,6 +6,11 @@ on:
     tags: ['v*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'Source tag or commit to verify and package (blank uses this ref)'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -16,6 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.source_ref || github.ref }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -45,6 +51,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.source_ref || github.ref }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
@@ -82,9 +89,10 @@ jobs:
     steps:
       - name: Install native build tools
         if: runner.os == 'Linux'
-        run: apt-get update && apt-get install -y build-essential musl-tools pkg-config libssl-dev git curl ca-certificates python3
+        run: apt-get update && apt-get install -y build-essential musl-tools pkg-config libssl-dev git curl ca-certificates python3 unzip ripgrep
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.source_ref || github.ref }}
           persist-credentials: false
       - uses: actions/setup-python@v5
         if: runner.os == 'macOS'
@@ -149,7 +157,7 @@ jobs:
         run: |
           # macOS's default temp path can exceed the Unix socket staging limit.
           if [ "$RUNNER_OS" = macOS ]; then
-            export TMPDIR="$(mktemp -d /tmp/codr.XXXXXX)"
+            export TMPDIR="$(mktemp -d /private/tmp/codr.XXXXXX)"
           fi
           cargo test --locked -p agent-control -p agent-connector -j 2 -- --test-threads=1
       - name: Install upstream verification tools
@@ -201,7 +209,7 @@ jobs:
 
   release:
     needs: binaries
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     permissions:
       contents: write
