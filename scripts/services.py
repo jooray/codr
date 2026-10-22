@@ -110,7 +110,7 @@ def python_version(executable):
         return None
 
 
-def find_python(minimum=(3, 10), preferred=("python3.12", "python3.11", "python3.13", "python3.10")):
+def find_python(minimum=(3, 10), preferred=("python3.12", "python3.11", "python3.13", "python3.10"), maximum=None):
     """Find a suitable interpreter, preferring Homebrew versions over a too-new global python3."""
     candidates = []
     explicit = os.environ.get("CODR_PYTHON")
@@ -129,7 +129,7 @@ def find_python(minimum=(3, 10), preferred=("python3.12", "python3.11", "python3
             continue
         seen.add(found)
         version = python_version(found)
-        if version and version >= minimum:
+        if version and version >= minimum and (maximum is None or version <= maximum):
             return str(Path(found).resolve())
     return None
 

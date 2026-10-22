@@ -77,16 +77,18 @@ def configure_phonon(runner, private_write, unit_argument=None):
     helper = root / "transcribe.py"
     private_write(helper, (ROOT / "scripts/transcribe.py").read_text())
     ffmpeg = ffmpeg_path()
-    python = services.find_python((3, 10))
-    command = [python or sys.executable, str(helper), "--socket", str(speech_socket), "--ffmpeg", ffmpeg]
+    command = [sys.executable, str(helper), "--socket", str(speech_socket), "--ffmpeg", ffmpeg]
     if ready(speech_socket):
         if manager.backend == services.SYSTEMD and (manager.unit_root / "codr-phonon.service").exists():
             attach_worker(private_write, manager)
             manager.reload()
         return command
     print("Phonon-2: local CPU or MLX worker, approximately 164 MB model download.", flush=True)
+    maximum = (3, 12) if sys.platform == "darwin" and platform.machine() not in ("arm64", "aarch64") else None
+    python = services.find_python((3, 10), maximum=maximum)
     if not python:
-        raise ValueError("Audio support needs Python 3.10 or newer; install one (for example: brew install python@3.12), then run setup again")
+        requirement = "Python 3.10 to 3.12" if maximum else "Python 3.10 or newer"
+        raise ValueError(f"Audio support needs {requirement}; install one (for example: brew install python@3.12), then run setup again")
     venv = root / "venv"
     interpreter = venv / "bin/python"
     if not interpreter.exists():
@@ -112,7 +114,8 @@ def configure_phonon(runner, private_write, unit_argument=None):
     runner(["env", f"FERMION_CACHE_DIR={root / 'models'}", f"HF_HOME={root / 'huggingface'}",
             str(fermion), "transcribe", "phonon-2", "--download-only", "unused.wav"])
     manager.install(services.Service("codr-phonon", "codr local Phonon-2 speech worker",
-        [fermion, "serve", "phonon-2", "--unix-socket", speech_socket, "--threads", "4"], throttle=10))
+        [fermion, "serve", "phonon-2", "--unix-socket", speech_socket, "--threads", "4"],
+        environment={"FERMION_CACHE_DIR": str(root / "models"), "HF_HOME": str(root / "huggingface")}, throttle=10))
     attach_worker(private_write, manager)
     manager.reload()
     manager.start("codr-phonon")

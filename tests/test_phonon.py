@@ -65,6 +65,45 @@ class PhononTests(unittest.TestCase):
             self.assertIn("--socket", command)
             self.assertTrue(Path(command[1]).is_file())
 
+    def test_healthy_worker_keeps_the_setup_helper_interpreter_without_discovery(self):
+        import phonon
+        import setup
+        with tempfile.TemporaryDirectory() as temporary, patch.dict("os.environ", {"HOME": temporary, "XDG_RUNTIME_DIR": temporary, "CODR_SERVICE_MANAGER": "systemd"}):
+            with patch.object(phonon, "ready", return_value=True), patch.object(phonon.shutil, "which", return_value="/usr/bin/ffmpeg"), patch.object(phonon.sys, "executable", "/existing/python3.11"), patch.object(phonon.services, "find_python", return_value="/preferred/python3.12") as discover:
+                command = phonon.configure_phonon(lambda argv: self.fail("Healthy worker must not be changed"), setup.private_write)
+            self.assertEqual(command[0], "/existing/python3.11")
+            discover.assert_not_called()
+
+    def test_launchd_speech_worker_uses_the_model_cache_prepared_by_setup(self):
+        import phonon
+        import services
+        import setup
+        import plistlib
+        with tempfile.TemporaryDirectory() as temporary, patch.dict("os.environ", {"HOME": temporary, "XDG_RUNTIME_DIR": temporary}):
+            root = Path(temporary) / ".local/share/codr/phonon"
+            binaries = root / "venv/bin"
+            binaries.mkdir(parents=True)
+            for name in ("python", "fermion"):
+                (binaries / name).write_text("fixture")
+            def runner(argv):
+                return "True" if "find_spec('pip')" in str(argv[-1]) else ""
+            manager = services.LaunchdServices(runner, setup.private_write, Path(temporary) / ".config")
+            with patch.object(phonon.services, "for_host", return_value=manager), patch.object(phonon.services, "find_python", return_value="/python3.12"), patch.object(phonon, "ready", side_effect=[False, True]), patch.object(phonon, "ffmpeg_path", return_value="/ffmpeg"), patch.object(manager, "start"):
+                phonon.configure_phonon(runner, setup.private_write)
+            payload = plistlib.loads(manager.path("codr-phonon").read_bytes())
+            self.assertEqual(payload["EnvironmentVariables"]["FERMION_CACHE_DIR"], str(root / "models"))
+            self.assertEqual(payload["EnvironmentVariables"]["HF_HOME"], str(root / "huggingface"))
+
+    def test_runtime_selection_limits_python_only_on_intel_macos(self):
+        import phonon
+        import setup
+        for system, machine, maximum in (("darwin", "x86_64", (3, 12)), ("darwin", "arm64", None), ("linux", "x86_64", None)):
+            with self.subTest(system=system, machine=machine), tempfile.TemporaryDirectory() as temporary:
+                with patch.dict("os.environ", {"HOME": temporary, "XDG_RUNTIME_DIR": temporary, "CODR_SERVICE_MANAGER": "systemd"}), patch.object(phonon.sys, "platform", system), patch.object(phonon.platform, "machine", return_value=machine), patch.object(phonon, "ready", return_value=False), patch.object(phonon, "ffmpeg_path", return_value="/ffmpeg"), patch.object(phonon.services, "find_python", return_value=None) as discover:
+                    with self.assertRaisesRegex(ValueError, "Audio support needs Python"):
+                        phonon.configure_phonon(lambda argv: self.fail("No runtime selected"), setup.private_write)
+                    discover.assert_called_once_with((3, 10), maximum=maximum)
+
     def test_apple_silicon_installs_the_mlx_runtime(self):
         import phonon
         calls = []

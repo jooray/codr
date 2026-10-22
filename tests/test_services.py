@@ -69,6 +69,11 @@ class LaunchdTests(unittest.TestCase):
 
 
 class SystemdTests(unittest.TestCase):
+    def test_bounded_python_selection_skips_313_for_the_intel_mac_runtime(self):
+        versions = {"/python3.13": (3, 13), "/python3.10": (3, 10)}
+        with patch.dict(os.environ, {"CODR_PYTHON": ""}), patch.object(services.shutil, "which", side_effect=lambda name: {"python3.13": "/python3.13", "python3.10": "/python3.10"}.get(name)), patch.object(services, "python_version", side_effect=lambda path: versions.get(path)):
+            self.assertEqual(services.find_python((3, 10), preferred=("python3.13", "python3.10"), maximum=(3, 12)), "/python3.10")
+
     def test_directives_are_replaced_once(self):
         text = services._replace_directive("A=1\nExecStart=old\nB=2\n", "ExecStart=", "ExecStart=new")
         self.assertEqual(text, "A=1\nExecStart=new\nB=2\n")
