@@ -1,6 +1,6 @@
-# Install codr
+# Install **codr**
 
-**codr** is a herdr plugin backed by two per-user services: the Rust bridge and its MDK transport. Linux uses systemd; macOS uses launchd LaunchAgents.
+**codr** is a **herdr** plugin backed by two per-user services: the Rust bridge and its MDK transport. Linux uses systemd; macOS uses launchd LaunchAgents.
 
 ## One-prompt installation
 
@@ -16,10 +16,10 @@ The [agent section](#instructions-for-coding-agents) provides the non-interactiv
 - glibc 2.35 or newer for the dedicated Linux connector.
 - Python 3.11 or newer and Git. On macOS, setup re-executes through a newer Homebrew interpreter when `/usr/bin/python3` is 3.9.
 - FFmpeg for voice prompts. Use `--no-audio` for a text/image-only installation.
-- A working systemd user manager under the account that runs herdr, or a logged-in launchd session on macOS.
-- herdr 0.9.1 or newer, with a running local server.
+- A working systemd user manager under the account that runs **herdr**, or a logged-in launchd session on macOS.
+- **herdr** 0.9.1 or newer, with a running local server.
 - A working, authenticated OpenCode, Codex, or Claude Code installation.
-- herdr native session IDs and access to the selected agent's local transcripts.
+- **herdr** native session IDs and access to the selected agent's local transcripts.
 - White Noise on your phone and your own public `npub`.
 - Access to GitHub release assets and the configured White Noise relays.
 
@@ -27,7 +27,7 @@ Agent authentication stays in its existing location. Setup does not request a pr
 
 The phone account must publish a compatible Marmot KeyPackage before the bridge can invite it. Open White Noise and let it connect to its relays.
 
-## Install through herdr
+## Install through **herdr**
 
 Run these commands as your normal user, not root:
 
@@ -36,12 +36,12 @@ herdr plugin install tidley/codr --ref v0.6.0
 herdr plugin action invoke local.white-noise.setup
 ```
 
-herdr previews and runs the manifest's installation hook, then registers the plugin. The hook downloads the bridge and dedicated connector for the host architecture and checks their SHA-256 checksums. Users do not need Rust or Cargo.
+**herdr** previews and runs the manifest's installation hook, then registers the plugin. The hook downloads the bridge and dedicated connector for the host architecture and checks their SHA-256 checksums. Users do not need Rust or Cargo.
 
-The Setup action opens a herdr tab. Enter your own White Noise public `npub` there. Setup:
+The Setup action opens a **herdr** tab. Enter your own White Noise public `npub` there. Setup:
 
 1. Validates the key through **codr**'s configuration parser before changing accounts or services.
-2. Checks the herdr socket, available supported agents, Git, and the host service manager. Codex-only and Claude-only installations do not need OpenCode.
+2. Checks the **herdr** socket, available supported agents, Git, and the host service manager. Codex-only and Claude-only installations do not need OpenCode.
 3. Selects the release-matched connector in **codr**'s own binary directory.
 4. Creates or reuses the dedicated `herdr-bridge` identity under `~/.marmot-agents/herdr`.
 5. Writes owner-only configuration and dedicated systemd units or launchd agents.
@@ -51,11 +51,11 @@ The dedicated connector uses a pinned MDK revision with **codr**'s founding-admi
 
 The binary installer selects the **codr** version from the installed plugin checkout. A pinned installation uses that exact version's assets and checksums. A missing release asset or checksum stops installation rather than falling back to unverified code.
 
-### Select a herdr server
+### Select a **herdr** server
 
-The setup tab receives `HERDR_SOCKET_PATH` from its herdr server. For direct setup outside a tab, pass `--herdr-socket /absolute/path/to/herdr.sock` or set `HERDR_SOCKET_PATH` explicitly.
+The setup tab receives `HERDR_SOCKET_PATH` from its **herdr** server. For direct setup outside a tab, pass `--herdr-socket /absolute/path/to/herdr.sock` or set `HERDR_SOCKET_PATH` explicitly.
 
-One **codr** configuration targets one herdr server. Select the intended server before installation when using named sessions:
+One **codr** configuration targets one **herdr** server. Select the intended server before installation when using named sessions:
 
 ```bash
 export HERDR_SOCKET_PATH="/absolute/path/to/the/intended/herdr.sock"
@@ -79,7 +79,7 @@ systemctl --user restart herdr-white-noise-bridge.service
 launchctl kickstart -k "gui/$(id -u)/io.github.tidley.codr.herdr-white-noise-bridge"
 ```
 
-herdr refuses a GitHub install over a locally linked copy of the same plugin. To switch from a local checkout to managed releases, inspect the current installation, then unregister the local plugin before installing the release:
+**herdr** refuses a GitHub install over a locally linked copy of the same plugin. To switch from a local checkout to managed releases, inspect the current installation, then unregister the local plugin before installing the release:
 
 ```bash
 herdr plugin list
@@ -101,7 +101,7 @@ Ambiguous accounts or service files that differ from the proposed fresh configur
 2. Accept a session-group invitation from that identity.
 3. Send `/status` and check that it reports a connected session.
 4. Send a harmless request with a fresh word. Ask the agent to echo it without tools or file changes.
-5. Check that the intended herdr session receives the prompt and its final reply returns to the same group.
+5. Check that the intended **herdr** session receives the prompt and its final reply returns to the same group.
 
 Group creation can take time. Group names and initial connection/status messages provide the normal visible installation signal. They do not prove the phone-to-agent round trip.
 
@@ -127,7 +127,7 @@ Set `opencode_db` to select incremental, read-only OpenCode database reads. Sele
 
 For Codex profiles, `codex_home` selects the directory containing `sessions` and `archived_sessions`. It defaults to `CODEX_HOME` or `~/.codex`. For Claude Code, `claude_home` selects the directory containing `projects`; it defaults to `CLAUDE_CONFIG_DIR` or `~/.claude`. Use absolute paths. Setup saves the installing shell's roots for new configurations, and preserves existing configurations during upgrades.
 
-If a supported agent appears without a native session ID, check its herdr integration. Enable the matching herdr integration when needed rather than guessing a transcript from its terminal title or repository. **codr** does not copy credentials or reconfigure the model provider.
+If a supported agent appears without a native session ID, check its **herdr** integration. Enable the matching **herdr** integration when needed rather than guessing a transcript from its terminal title or repository. **codr** does not copy credentials or reconfigure the model provider.
 
 Native transcript reads are bounded to 128 MiB per file and 16 MiB per record. Missing, ambiguous, or unsupported transcript data stays unavailable for final-reply extraction. Claude Code must record an explicit `end_turn` stop reason; the bridge retries later if the writer has not persisted it yet.
 
@@ -143,12 +143,12 @@ Before changing the host:
 
 1. Verify the OS and architecture, Python 3.11+, Git, the systemd user bus or launchd session, and executable paths.
 2. Inspect existing **codr** configuration, services, identities, and plugin registration.
-3. Resolve the intended herdr socket and verify it with `session.snapshot`. Ask which server to use if several are plausible.
-4. Check that at least one supported agent already works under this user and reports a native herdr session reference. Do not change model authentication or execution permissions.
+3. Resolve the intended **herdr** socket and verify it with `session.snapshot`. Ask which server to use if several are plausible.
+4. Check that at least one supported agent already works under this user and reports a native **herdr** session reference. Do not change model authentication or execution permissions.
 
 ### Non-interactive installation
 
-Set `OWNER_NPUB` to the public key supplied by the user. Export the selected `HERDR_SOCKET_PATH` before running herdr commands.
+Set `OWNER_NPUB` to the public key supplied by the user. Export the selected `HERDR_SOCKET_PATH` before running **herdr** commands.
 
 ```bash
 herdr plugin install tidley/codr --ref v0.6.0 --yes
@@ -168,7 +168,7 @@ Do not overwrite customised configuration or service definitions, broaden sender
 
 ### Completion report
 
-Report the installed revision/version, configuration path, selected herdr socket, service status, bridge public `npub`, and mapped-session count. Use the bridge's `status` command to inspect mappings after setup.
+Report the installed revision/version, configuration path, selected **herdr** socket, service status, bridge public `npub`, and mapped-session count. Use the bridge's `status` command to inspect mappings after setup.
 
 State exactly which checks ran. Report the phone round trip as pending unless the user or observed inbound/reply traffic confirms it. Never include private keys, provider credentials, prompts, or exported transcripts.
 
@@ -188,6 +188,6 @@ herdr plugin link "$PWD"
 python3 scripts/setup.py --npub "$OWNER_NPUB"
 ```
 
-`plugin link` does not run the download hook. Keep the linked checkout at its permanent location. The startup hook starts the configured worker after herdr restores its session; a client disconnect does not stop it.
+`plugin link` does not run the download hook. Keep the linked checkout at its permanent location. The startup hook starts the configured worker after **herdr** restores its session; a client disconnect does not stop it.
 
 Use `python3 scripts/setup.py --npub "$OWNER_NPUB" --no-audio` to skip speech setup. Existing installations can add it with `python3 scripts/setup.py --phonon`. See [media and speech details](REFERENCE.md#images-and-voice-messages).

@@ -1,6 +1,6 @@
-# codr
+# **codr**
 
-**codr** connects coding agent sessions in [herdr](https://github.com/herdrdev/herdr) to [White Noise](https://github.com/marmot-protocol/whitenoise-android), with one encrypted chat per session. It forwards prompts to the mapped agent and returns completed replies to the same chat.
+**codr** connects coding agent sessions in [**herdr**](https://github.com/herdrdev/herdr) to [White Noise](https://github.com/marmot-protocol/whitenoise-android), with one encrypted chat per session. It forwards prompts to the mapped agent and returns completed replies to the same chat.
 
 Supported agents: OpenCode, Codex, and Claude Code on Linux and macOS.
 
@@ -10,7 +10,7 @@ Supported agents: OpenCode, Codex, and Claude Code on Linux and macOS.
 
 ## Behaviour
 
-- Chat names pair the herdr tab and workspace: `[cd] review (Acme)`. Descriptions contain workspace and agent details.
+- Chat names pair the **herdr** tab and workspace: `[cd] review (Acme)`. Descriptions contain workspace and agent details.
 - Status notices, optional editable checklists, and final replies appear as separate messages.
 - Supported OpenCode questions accept a number or option label as a reply.
 - New groups make your configured account an admin, so you can invite participants and rename the group. Only the owner can prompt the agent. [Group setup](docs/REFERENCE.md#shared-chats-and-owner-only-control)
@@ -18,7 +18,7 @@ Supported agents: OpenCode, Codex, and Claude Code on Linux and macOS.
 
 ## Install
 
-Needs Linux x86_64 or aarch64 or macOS on Apple silicon or Intel, a per-user service manager (systemd or launchd), Python 3.11+, Git, and herdr 0.9.1+. No Rust toolchain required.
+Needs Linux x86_64 or aarch64 or macOS on Apple silicon or Intel, a per-user service manager (systemd or launchd), Python 3.11+, Git, and **herdr** 0.9.1+. No Rust toolchain required.
 
 ```sh
 herdr plugin install tidley/codr --ref v0.6.0
@@ -39,15 +39,13 @@ Or give your coding agent this prompt, with your own public key:
 2. Send `/status` to check the connection. Send a prompt to continue that session.
 3. Read the reply in the same chat. For a supported decision, reply `1`, `2`, or an exact option label.
 
-Handoff is automatic. Manual controls remain available through herdr's **White Noise forwarding: At desk / Away** action. [Controls and limits →](docs/REFERENCE.md#at-desk--away-forwarding)
+Handoff is automatic. Manual controls remain available through **herdr**'s **White Noise forwarding: At desk / Away** action. [Controls and limits →](docs/REFERENCE.md#at-desk--away-forwarding)
 
 ## How it works
 
-```text
-White Noise ↔ MDK ↔ codr ↔ herdr ↔ your agent
-```
+White Noise ↔ MDK ↔ **codr** ↔ **herdr** ↔ your agent
 
-[MDK](https://github.com/marmot-protocol/mdk) handles identity, encrypted messaging, and relays. **codr** routes prompts through herdr and reads completed replies from existing agent transcripts.
+[MDK](https://github.com/marmot-protocol/mdk) handles identity, encrypted messaging, and relays. **codr** routes prompts through **herdr** and reads completed replies from existing agent transcripts.
 
 Reply collection uses existing transcripts without an additional model call or terminal scraping. [Behaviour and recovery](docs/REFERENCE.md)
 
@@ -96,4 +94,4 @@ Alex invited Sam to the Garden planner chat. Sam can discuss the project, but on
 
 [Operating reference](docs/REFERENCE.md) · [Changelog](CHANGELOG.md) · [Releases](https://github.com/tidley/codr/releases)
 
-Built on [herdr](https://github.com/herdrdev/herdr), [White Noise](https://github.com/marmot-protocol/whitenoise-android), [MDK](https://github.com/marmot-protocol/mdk), and the [Marmot protocol](https://github.com/marmot-protocol/marmot). [Full credits](docs/REFERENCE.md#acknowledgements).
+Built on [**herdr**](https://github.com/herdrdev/herdr), [White Noise](https://github.com/marmot-protocol/whitenoise-android), [MDK](https://github.com/marmot-protocol/mdk), and the [Marmot protocol](https://github.com/marmot-protocol/marmot). [Full credits](docs/REFERENCE.md#acknowledgements).

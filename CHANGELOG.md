@@ -20,7 +20,7 @@
 - The install hook and setup tolerate macOS's Python 3.9 when only stdlib parsing is needed.
 - Group names include the workspace, with UTF-8 byte limits.
 - OpenCode session exports support both 1.x and 2.x formats.
-- Live group titles follow herdr label changes, with durable rename intent and protection for manually renamed groups.
+- Live group titles follow **herdr** label changes, with durable rename intent and protection for manually renamed groups.
 - Session readers select CLI export when an OpenCode database history format becomes incompatible, including upgrades while the worker runs. Storage errors still defer reads.
 - Setup checks live transcript readers before changing services or identities. `check-readers` repeats that read-only validation without printing transcripts.
 
@@ -55,7 +55,7 @@
 
 ### Fixed
 
-- Pending and prepared media survive restarts and temporary herdr outages without duplicate prompt submission.
+- Pending and prepared media survive restarts and temporary **herdr** outages without duplicate prompt submission.
 - Deferred media in one session does not block preparation for other chats.
 - Transcript reads preserve session identity and forwarding-mode checks. Exiting sessions get a fresh final read.
 - Transcription notice delivery retries independently of agent submission, including lost send or edit responses.
