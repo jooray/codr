@@ -9,7 +9,7 @@ platforms = ["linux", "macos"]
 command = ["python3", "scripts/install.py"]
 
 [[startup]]
-command = ["sh", "plugin-start.sh", "--show-menu"]
+command = ["sh", "plugin-start.sh"]
 
 [[actions]]
 id = "setup"

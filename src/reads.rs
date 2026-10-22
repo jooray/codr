@@ -129,7 +129,12 @@ impl Reads {
                 .await
                 .map_err(|_| anyhow::anyhow!("Session reader failed"))?;
             if job.context == context {
-                let snapshot = Arc::new(result?);
+                let snapshot = Arc::new(result.inspect_err(|error| {
+                    eprintln!(
+                        "Session history read failed: {}.",
+                        output::read_error_message(error)
+                    );
+                })?);
                 self.ready
                     .insert(key.clone(), (context.clone(), snapshot.clone()));
                 return Ok(snapshot);
@@ -176,24 +181,12 @@ pub(crate) async fn snapshot(
     session: &crate::herdr::Session,
     database: Arc<Mutex<output::opencode::Reader>>,
 ) -> Result<output::SessionSnapshot> {
-    if let Some(path) = &config.opencode_db
-        && session.agent == "opencode"
-    {
+    if config.opencode_db.is_some() && session.agent == "opencode" {
         anyhow::ensure!(
             session.kind == "id",
             "Unsupported native session reference kind"
         );
-        let path = path.clone();
-        let id = session.value.clone();
-        return tokio::task::spawn_blocking(move || {
-            database
-                .lock()
-                .map_err(|_| anyhow::anyhow!("OpenCode database reader failed"))?
-                .read(&path, &id)
-                .map(|read| read.snapshot)
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("OpenCode database reader failed"))?;
+        return output::read_opencode_snapshot(config, session, database).await;
     }
     output::read_snapshot(config, session).await
 }

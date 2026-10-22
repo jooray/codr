@@ -38,6 +38,157 @@ fn complete() -> Value {
 }
 
 #[test]
+fn attachment_only_database_input_is_complete_local_activity() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("opencode.db");
+    let db = database(&path);
+    message(&db, "image-user", 1, json!({"role":"user"}));
+    part(
+        &db,
+        "image",
+        "image-user",
+        json!({"type":"file","mime":"image/png"}),
+    );
+    let snapshot = Reader::default()
+        .read(&path, "ses_fixture")
+        .unwrap()
+        .snapshot;
+    let mut activity = herdr_white_noise_bridge::activity::Activity::default();
+    activity.baseline(&[]);
+    assert!(activity.observe(&snapshot.history.user_inputs));
+    assert!(!activity.unresolved());
+}
+
+fn fallback_config(root: &std::path::Path) -> herdr_white_noise_bridge::BridgeConfig {
+    use std::os::unix::fs::PermissionsExt;
+    let cli = root.join("opencode");
+    std::fs::write(&cli, r##"#!/bin/sh
+if [ "$1" = "--pure" ]; then exit 2; fi
+printf x >> "$(dirname "$0")/cli-calls"
+printf '%s\n' '{"info":{"id":"ses_fixture"},"messages":[{"type":"user","id":"user","text":"prompt"},{"type":"assistant","id":"reply","finish":"stop","time":{"completed":1},"content":[{"type":"text","text":"CLI recovered reply"}]}]}'
+"##).unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+    serde_json::from_value(json!({
+        "phone_npub":"unused", "account_id_hex":"aa".repeat(32),
+        "state_path":root.join("state.json"), "herdr_socket":root.join("herdr.sock"),
+        "wn_agent_socket":root.join("mdk.sock"), "opencode_bin":cli, "opencode_db":root.join("opencode.db")
+    })).unwrap()
+}
+
+fn fallback_session() -> herdr_white_noise_bridge::herdr::Session {
+    herdr_white_noise_bridge::herdr::Session {
+        source: "herdr:opencode".into(),
+        agent: "opencode".into(),
+        kind: "id".into(),
+        value: "ses_fixture".into(),
+    }
+}
+
+#[tokio::test]
+async fn configured_database_recovers_with_cli_when_the_v1_log_or_schema_is_unavailable() {
+    for mutation in [
+        "DELETE FROM event",
+        "DROP TABLE event",
+        "ALTER TABLE message RENAME COLUMN data TO newer_data",
+        "UPDATE event SET type='message.updated.2'",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let config = fallback_config(root.path());
+        let db = database(config.opencode_db.as_ref().unwrap());
+        db.execute_batch(mutation).unwrap();
+        let snapshot =
+            herdr_white_noise_bridge::output::read_snapshot(&config, &fallback_session())
+                .await
+                .unwrap();
+        assert_eq!(snapshot.history.finals.len(), 1, "{mutation}");
+        assert_eq!(snapshot.history.finals[0].text, "CLI recovered reply");
+        assert_eq!(snapshot.history.user_inputs.len(), 1);
+        assert_eq!(snapshot.history.user_inputs[0].id, "opencode:user");
+        assert_eq!(
+            snapshot.history.user_inputs[0].fingerprint,
+            herdr_white_noise_bridge::activity::UserInput::new(String::new(), "prompt").fingerprint
+        );
+    }
+}
+
+#[test]
+fn database_user_parts_supply_phone_fingerprints_and_exclude_synthetic_input() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("opencode.db");
+    let db = database(&path);
+    message(&db, "user", 1, json!({"role":"user"}));
+    part(
+        &db,
+        "text",
+        "user",
+        json!({"type":"text","text":"phone prompt"}),
+    );
+    message(&db, "synthetic", 2, json!({"role":"user"}));
+    part(
+        &db,
+        "synthetic-text",
+        "synthetic",
+        json!({"type":"text","text":"generated context","synthetic":true}),
+    );
+    let snapshot = Reader::default()
+        .read(&path, "ses_fixture")
+        .unwrap()
+        .snapshot;
+    assert_eq!(snapshot.history.user_inputs.len(), 1);
+    assert_eq!(
+        snapshot.history.user_inputs[0].fingerprint,
+        herdr_white_noise_bridge::activity::UserInput::new(String::new(), "phone prompt")
+            .fingerprint
+    );
+}
+
+#[tokio::test]
+async fn database_access_and_content_errors_never_silently_select_cli() {
+    for failure in ["missing", "corrupt", "malformed-message", "missing-session"] {
+        let root = tempfile::tempdir().unwrap();
+        let config = fallback_config(root.path());
+        let path = config.opencode_db.as_ref().unwrap();
+        match failure {
+            "missing" => {}
+            "corrupt" => std::fs::write(path, b"not a sqlite database").unwrap(),
+            _ => {
+                let db = database(path);
+                if failure == "missing-session" {
+                    db.execute("DELETE FROM session", []).unwrap();
+                } else {
+                    message(&db, "broken", 1, json!({"wrong":"message shape"}));
+                }
+            }
+        }
+        assert!(
+            herdr_white_noise_bridge::output::read_snapshot(&config, &fallback_session())
+                .await
+                .is_err(),
+            "{failure}"
+        );
+        assert!(!root.path().join("cli-calls").exists(), "{failure}");
+    }
+}
+
+#[tokio::test]
+async fn a_locked_database_is_not_misclassified_as_an_upgrade() {
+    let root = tempfile::tempdir().unwrap();
+    let config = fallback_config(root.path());
+    let db = database(config.opencode_db.as_ref().unwrap());
+    db.execute_batch("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE")
+        .unwrap();
+    let result =
+        herdr_white_noise_bridge::output::read_snapshot(&config, &fallback_session()).await;
+    assert!(result.is_err());
+    assert!(!root.path().join("cli-calls").exists());
+    assert_eq!(
+        herdr_white_noise_bridge::output::read_error_message(&result.err().unwrap()),
+        "database is busy or locked"
+    );
+    db.execute_batch("ROLLBACK").unwrap();
+}
+
+#[test]
 fn idle_reads_fetch_no_bodies_and_an_in_place_update_fetches_only_its_message() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("opencode.db");

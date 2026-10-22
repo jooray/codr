@@ -125,8 +125,9 @@ async fn codex_turn_identity_is_available_before_the_final_record() {
         value: id.into(),
     };
     let prefix = format!(
-        "{}\n{}\n",
+        "{}\n{}\n{}\n",
         json!({"type":"session_meta","payload":{"id":id}}),
+        json!({"type":"event_msg","timestamp":"2026-01-01T00:00:00Z","payload":{"type":"user_message","message":"Work"}}),
         json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-a"}})
     );
     std::fs::write(&path, &prefix).unwrap();
@@ -134,6 +135,11 @@ async fn codex_turn_identity_is_available_before_the_final_record() {
         .await
         .unwrap();
     assert!(history.finals.is_empty());
+    assert_eq!(history.user_inputs.len(), 1);
+    assert_eq!(
+        history.user_inputs[0].fingerprint,
+        herdr_white_noise_bridge::activity::UserInput::new(String::new(), "Work").fingerprint
+    );
     assert_eq!(history.latest_turn.as_deref(), Some("codex:turn-a"));
     std::fs::write(&path,format!("{prefix}{}\n{}\n",json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-a","last_agent_message":"Late final"}}),json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-b"}}))).unwrap();
     let history = herdr_white_noise_bridge::output::read_history(&config, &session)
@@ -170,6 +176,12 @@ async fn claude_turn_identity_uses_the_main_user_prompt_before_the_final() {
         .unwrap();
     assert!(history.finals.is_empty());
     assert_eq!(history.latest_turn.as_deref(), Some("claude:u1"));
+    assert_eq!(history.user_inputs.len(), 1);
+    assert_eq!(history.user_inputs[0].id, "claude:u1");
+    assert_eq!(
+        history.user_inputs[0].fingerprint,
+        herdr_white_noise_bridge::activity::UserInput::new(String::new(), "Work").fingerprint
+    );
     std::fs::write(&path,format!("{prefix}{}\n{}\n",json!({"uuid":"a1","parentUuid":"u1","type":"assistant","sessionId":id,"message":{"id":"api","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"Late final"}]}}),json!({"uuid":"u2","parentUuid":"a1","type":"user","sessionId":id,"message":{"role":"user","content":"Next request"}}))).unwrap();
     let history = herdr_white_noise_bridge::output::read_history(&config, &session)
         .await

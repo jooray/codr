@@ -66,6 +66,8 @@ herdr api snapshot
 
 Setup preserves existing configuration, identities, mappings, and customised service definitions. A supplied owner that differs from the configured phone account is rejected.
 
+Version 0.6.0 enables automatic handoff by default: a new local native prompt mutes all groups, and a new authorized phone message resumes forwarding. Existing history is only a baseline on first observation. Set `auto_forwarding = false` in the bridge configuration before restarting its worker if you prefer manual local-activity control. See [controls and polling limits](REFERENCE.md#at-desk--away-forwarding).
+
 For an existing installation, setup validates the configuration and selects the release-matched connector. A managed transport upgrade pauses the bridge and transport, replaces only the transport executable in its unit, then restarts both services. Configuration, identities, and mappings are preserved. Custom transport overrides require inspection before an upgrade. `--check` validates without changing services.
 
 The binary installer replaces **codr**'s executable atomically. A running worker continues with its previous executable until restarted. Run setup first to select the matching connector. After that, a separately replaced bridge executable can be applied by restarting only the **codr** worker when work and group creation have settled:
@@ -121,7 +123,7 @@ tail -n 50 ~/Library/Logs/codr/wn-agent-herdr.err.log ~/Library/Logs/codr/herdr-
 
 Configuration lives under `${XDG_CONFIG_HOME:-~/.config}/herdr-white-noise-bridge/config.toml`. The worker's service definition specifies that path explicitly. State uses `${XDG_STATE_HOME:-~/.local/state}/herdr-white-noise-bridge/state.json`.
 
-Set `opencode_db` to select incremental, read-only OpenCode database reads. Select the database for the mapped sessions explicitly. See [reader configuration](REFERENCE.md#incremental-opencode-database-reads).
+Set `opencode_db` to select incremental, read-only OpenCode database reads. Select the database for the mapped sessions explicitly. An incompatible history format selects CLI export automatically, including after an OpenCode upgrade. Database access, corruption, and locking errors still stop collection. See [reader configuration](REFERENCE.md#incremental-opencode-database-reads).
 
 For Codex profiles, `codex_home` selects the directory containing `sessions` and `archived_sessions`. It defaults to `CODEX_HOME` or `~/.codex`. For Claude Code, `claude_home` selects the directory containing `projects`; it defaults to `CLAUDE_CONFIG_DIR` or `~/.claude`. Use absolute paths. Setup saves the installing shell's roots for new configurations, and preserves existing configurations during upgrades.
 

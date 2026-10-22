@@ -23,9 +23,16 @@ pub struct BridgeConfig {
     /// Requires an MDK connector with edit_message support.
     #[serde(default)]
     pub edit_responses: bool,
+    /// Local native user input mutes all groups; authorized phone input wakes them.
+    #[serde(default = "automatic_default")]
+    pub auto_forwarding: bool,
     /// Executable and fixed arguments. The downloaded audio path is appended.
     #[serde(default)]
     pub transcribe_command: Vec<String>,
+}
+
+fn automatic_default() -> bool {
+    true
 }
 
 fn default_opencode() -> PathBuf {

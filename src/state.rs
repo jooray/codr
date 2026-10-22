@@ -55,6 +55,8 @@ pub struct Mapping {
     pub decision_checked_at: u64,
     #[serde(default)]
     pub decision_refresh_pending: bool,
+    #[serde(default)]
+    pub activity: crate::activity::Activity,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

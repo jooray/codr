@@ -32,6 +32,7 @@ fn config(dir: &std::path::Path) -> BridgeConfig {
         codex_home: dir.join("codex"),
         claude_home: dir.join("claude"),
         edit_responses: false,
+        auto_forwarding: false,
         transcribe_command: vec![],
     }
 }
@@ -128,6 +129,275 @@ fn export_script(path: &std::path::Path, text: &str, id: &str) {
     let data = json!({"messages":[{"info":{"id":id,"role":"assistant","time":{"completed":1},"finish":"stop"},"parts":[{"type":"text","text":text}]}]});
     std::fs::write(path, format!("#!/bin/sh\nprintf '%s' '{}'\n", data)).unwrap();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+fn input_history(
+    config: &BridgeConfig,
+    session: &str,
+    inputs: &[(&str, &str)],
+    reply: Option<(&str, &str)>,
+) {
+    let mut messages: Vec<_> = inputs.iter().map(|(id, text)| json!({"info":{"id":id,"role":"user"},"parts":[{"type":"text","text":text}]})).collect();
+    if let Some((id, text)) = reply {
+        messages.push(json!({"info":{"id":id,"role":"assistant","parentID":inputs.last().unwrap().0,"finish":"stop","time":{"completed":1}},"parts":[{"type":"text","text":text}]}));
+    }
+    std::fs::write(
+        config
+            .opencode_bin
+            .with_file_name(format!("{session}.json")),
+        json!({"messages":messages}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        &config.opencode_bin,
+        "#!/bin/sh\ncat \"$(dirname \"$0\")/$3.json\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&config.opencode_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+fn activity_mapping(observed: Agent, group: &str) -> Mapping {
+    Mapping {
+        group_id_hex: Some(group.into()),
+        active: true,
+        output_initialised: true,
+        last_agent_status: "idle".into(),
+        last_state_change_seq: 1,
+        agent_record: Some(observed),
+        ..Mapping::default()
+    }
+}
+
+#[tokio::test]
+async fn incomplete_input_in_an_ended_session_mutes_but_does_not_block_a_phone_wake() {
+    let root = tempfile::tempdir().unwrap();
+    let mut config = config(root.path());
+    config.auto_forwarding = true;
+    let first = agent();
+    let mut other = first.clone();
+    other.agent_session.as_mut().unwrap().value = "ses_other".into();
+    other.pane_id = "w1:p2".into();
+    other.terminal_id = "term2".into();
+    input_history(&config, "ses_1", &[], None);
+    input_history(&config, "ses_other", &[], None);
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge.state.mappings.insert(
+        first.key(),
+        activity_mapping(first.clone(), &"bb".repeat(16)),
+    );
+    bridge.state.mappings.insert(
+        other.key(),
+        activity_mapping(other.clone(), &"dd".repeat(16)),
+    );
+    bridge
+        .reconcile(vec![first.clone(), other.clone()])
+        .await
+        .unwrap();
+    std::fs::write(
+        config.opencode_bin.with_file_name("ses_1.json"),
+        json!({"messages":[{"info":{"id":"incomplete","role":"user"},"parts":[]}]}).to_string(),
+    )
+    .unwrap();
+    bridge.reconcile(vec![other.clone()]).await.unwrap();
+    assert!(!bridge.state.forwarding_enabled);
+    assert!(!bridge.state.mappings[&first.key()].active);
+    assert!(!bridge.state.mappings[&first.key()].activity.unresolved());
+    drop(bridge);
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let herdr = peer_for_agent(&config.herdr_socket, false, calls.clone(), other.clone()).await;
+    let mut reopened = Bridge::open(config).unwrap();
+    reopened.reconcile(vec![other]).await.unwrap();
+    let mut event = inbound(HEX, "wake-after-end");
+    event["group_id_hex"] = json!("dd".repeat(16));
+    reopened.inbound(&event).await.unwrap();
+    assert!(reopened.state.forwarding_enabled);
+    reopened
+        .state
+        .enqueue(&"dd".repeat(16), "Delivery is no longer blocked");
+    reopened.flush().await.unwrap();
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call["text"] == "Delivery is no longer blocked")
+    );
+    mdk.abort();
+    herdr.abort();
+}
+
+#[tokio::test]
+async fn a_local_user_message_mutes_every_group_and_drops_queued_output() {
+    let root = tempfile::tempdir().unwrap();
+    let mut config = config(root.path());
+    config.auto_forwarding = true;
+    let first = agent();
+    let mut other = first.clone();
+    other.agent_session.as_mut().unwrap().value = "ses_other".into();
+    input_history(&config, "ses_1", &[("old", "Historical prompt")], None);
+    input_history(
+        &config,
+        "ses_other",
+        &[("old-other", "Other historical prompt")],
+        None,
+    );
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge.state.mappings.insert(
+        first.key(),
+        activity_mapping(first.clone(), &"bb".repeat(16)),
+    );
+    bridge.state.mappings.insert(
+        other.key(),
+        activity_mapping(other.clone(), &"dd".repeat(16)),
+    );
+    bridge
+        .reconcile(vec![first.clone(), other.clone()])
+        .await
+        .unwrap();
+    assert!(
+        bridge.state.forwarding_enabled,
+        "Initial history is only a baseline"
+    );
+    bridge
+        .state
+        .enqueue(&"dd".repeat(16), "Queued output from the other group");
+    input_history(
+        &config,
+        "ses_1",
+        &[
+            ("old", "Historical prompt"),
+            ("local", "Work entered in HERDR"),
+        ],
+        Some(("answer", "Local work must not be forwarded")),
+    );
+    let mut changed = first.clone();
+    changed.state_change_seq = 2;
+    bridge.reconcile(vec![changed, other]).await.unwrap();
+    assert!(!bridge.state.forwarding_enabled);
+    assert!(bridge.state.outbox.is_empty());
+    assert!(
+        !herdr_white_noise_bridge::forwarding::load(&config.state_path)
+            .unwrap()
+            .enabled
+    );
+    drop(bridge);
+    assert!(!Bridge::open(config).unwrap().state.forwarding_enabled);
+}
+
+#[tokio::test]
+async fn phone_input_wakes_all_groups_and_its_native_echo_does_not_mute_after_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let mut config = config(root.path());
+    config.auto_forwarding = true;
+    let first = agent();
+    let mut other = first.clone();
+    other.agent_session.as_mut().unwrap().value = "ses_other".into();
+    input_history(&config, "ses_1", &[("old", "Historical prompt")], None);
+    input_history(&config, "ses_other", &[], None);
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let herdr = peer(&config.herdr_socket, false, calls.clone()).await;
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge.state.mappings.insert(
+        first.key(),
+        activity_mapping(first.clone(), &"bb".repeat(16)),
+    );
+    bridge.state.mappings.insert(
+        other.key(),
+        activity_mapping(other.clone(), &"dd".repeat(16)),
+    );
+    bridge
+        .reconcile(vec![first.clone(), other.clone()])
+        .await
+        .unwrap();
+    input_history(
+        &config,
+        "ses_1",
+        &[("old", "Historical prompt"), ("local", "Local prompt")],
+        None,
+    );
+    bridge
+        .reconcile(vec![first.clone(), other.clone()])
+        .await
+        .unwrap();
+    assert!(!bridge.state.forwarding_enabled);
+    let event = inbound(HEX, "phone-handoff");
+    bridge.inbound(&event).await.unwrap();
+    assert!(bridge.state.forwarding_enabled);
+    drop(bridge);
+    let transcript = config.opencode_bin.with_file_name("ses_1.json");
+    let mut incomplete: Value =
+        serde_json::from_slice(&std::fs::read(&transcript).unwrap()).unwrap();
+    incomplete["messages"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"info":{"id":"phone","role":"user"},"parts":[]}));
+    std::fs::write(&transcript, incomplete.to_string()).unwrap();
+    let mut reopened = Bridge::open(config.clone()).unwrap();
+    reopened
+        .reconcile(vec![first.clone(), other.clone()])
+        .await
+        .unwrap();
+    assert!(reopened.state.forwarding_enabled);
+    assert!(reopened.state.mappings[&first.key()].activity.unresolved());
+    reopened
+        .state
+        .enqueue(&"dd".repeat(16), "Hold while user text is incomplete");
+    let before_flush = calls.lock().unwrap().len();
+    reopened.flush().await.unwrap();
+    assert_eq!(calls.lock().unwrap().len(), before_flush);
+    input_history(
+        &config,
+        "ses_1",
+        &[
+            ("old", "Historical prompt"),
+            ("local", "Local prompt"),
+            ("phone", "test prompt"),
+        ],
+        Some(("phone-reply", "Reply to the phone")),
+    );
+    let mut changed = first.clone();
+    changed.state_change_seq = 3;
+    reopened
+        .reconcile(vec![changed.clone(), other.clone()])
+        .await
+        .unwrap();
+    assert!(reopened.state.forwarding_enabled);
+    reopened.inbound(&event).await.unwrap();
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call["method"] == "agent.prompt")
+            .count(),
+        1
+    );
+    assert!(
+        reopened
+            .state
+            .outbox
+            .iter()
+            .any(|item| item.text == "Reply to the phone")
+    );
+    // The same text typed locally later is not another phone-origin prompt.
+    input_history(
+        &config,
+        "ses_1",
+        &[
+            ("old", "Historical prompt"),
+            ("local", "Local prompt"),
+            ("phone", "test prompt"),
+            ("local-again", "test prompt"),
+        ],
+        None,
+    );
+    changed.state_change_seq = 4;
+    reopened.reconcile(vec![changed, other]).await.unwrap();
+    assert!(!reopened.state.forwarding_enabled);
+    mdk.abort();
+    herdr.abort();
 }
 
 #[tokio::test]
@@ -551,7 +821,7 @@ fn editable_config(dir: &std::path::Path) -> BridgeConfig {
         "wn_agent_socket":dir.join("wn.sock"), "account_id_hex":"aa".repeat(32),
         "state_path":dir.join("state.json"), "opencode_bin":dir.join("opencode"),
         "codex_home":dir.join("codex"), "claude_home":dir.join("claude"),
-        "edit_responses":true
+        "edit_responses":true, "auto_forwarding":false
     }))
     .unwrap()
 }
@@ -1322,6 +1592,111 @@ async fn global_phone_wake_checkpoints_other_sessions_before_returning() {
                 && request["text"] == "Reply completed after wake")
     );
     mdk.abort();
+}
+
+#[tokio::test]
+async fn a_database_upgrade_recovers_phone_input_once_without_replaying_muted_history() {
+    let root = tempfile::tempdir().unwrap();
+    let mut config = config(root.path());
+    let path = root.path().join("opencode.db");
+    config.opencode_db = Some(path.clone());
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch(
+        "CREATE TABLE session(id TEXT); INSERT INTO session VALUES('ses_1');
+        CREATE TABLE event(id TEXT,aggregate_id TEXT,seq INTEGER,type TEXT,data TEXT);
+        INSERT INTO event VALUES('event-0','ses_1',0,'session.created.1','{}');
+        CREATE TABLE message(id TEXT,session_id TEXT,time_created INTEGER,data TEXT);
+        CREATE TABLE part(id TEXT,session_id TEXT,message_id TEXT,data TEXT);",
+    )
+    .unwrap();
+    let old = json!({"info":{"id":"ses_1"},"messages":[{"type":"user","id":"muted-user","text":"old prompt"},{"type":"assistant","id":"muted-reply","finish":"stop","time":{"completed":1},"content":[{"type":"text","text":"Never replay this reply"}]}]});
+    let calls_path = root.path().join("cli-calls");
+    let failing = root.path().join("export-fails");
+    std::fs::write(&config.opencode_bin, format!("#!/bin/sh\nif [ \"$1\" = --pure ] || [ -f {failing:?} ]; then exit 2; fi\nprintf x >> {calls_path:?}\nprintf '%s' '{old}'\n")).unwrap();
+    std::fs::set_permissions(&config.opencode_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let herdr = peer(&config.herdr_socket, false, calls.clone()).await;
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge.state.mappings.insert(
+        agent().key(),
+        Mapping {
+            group_id_hex: Some("bb".repeat(16)),
+            output_initialised: true,
+            active: true,
+            agent_record: Some(agent()),
+            last_agent_status: "idle".into(),
+            last_state_change_seq: 1,
+            ..Mapping::default()
+        },
+    );
+    bridge.reconcile(vec![agent()]).await.unwrap();
+    assert!(
+        !calls_path.exists(),
+        "Compatible v1 history must stay on SQLite"
+    );
+    db.execute("DELETE FROM event", []).unwrap();
+    std::fs::write(&failing, b"fixture").unwrap();
+    assert!(forwarding_command(&config, "desk").await.status.success());
+    bridge.poll_sessions(vec![agent()]).await.unwrap();
+    let event = inbound(HEX, "phone-after-upgrade");
+    assert!(bridge.inbound(&event).await.is_err());
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(bridge.poll_ready_sessions().await.is_err());
+    assert!(
+        !bridge.state.mappings[&agent().key()]
+            .seen_messages
+            .contains(&"phone-after-upgrade".into())
+    );
+    assert!(
+        !calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request["method"] == "agent.prompt")
+    );
+    assert!(bridge.state.forwarding_resume_pending);
+    std::fs::remove_file(&failing).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let _ = bridge.poll_ready_sessions().await;
+            if bridge.inbound(&event).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(bridge.state.forwarding_enabled && !bridge.state.forwarding_resume_pending);
+    assert!(calls_path.exists());
+    assert!(
+        bridge.state.mappings[&agent().key()]
+            .final_ids
+            .contains(&"muted-reply".into())
+    );
+    assert!(
+        !bridge
+            .state
+            .outbox
+            .iter()
+            .any(|item| item.text.contains("Never replay"))
+    );
+    bridge.inbound(&event).await.unwrap();
+    drop(bridge);
+    let mut reopened = Bridge::open(config).unwrap();
+    reopened.inbound(&event).await.unwrap();
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request["method"] == "agent.prompt")
+            .count(),
+        1
+    );
+    mdk.abort();
+    herdr.abort();
 }
 
 #[tokio::test]

@@ -250,6 +250,17 @@ def toml_text(values):
     return "".join(f"{key} = {json.dumps(value if isinstance(value, (list, bool, int)) else str(value), ensure_ascii=False)}\n" for key, value in values.items())
 
 
+def check_readers(bridge, config_path, runner):
+    try:
+        result = json.loads(runner([str(bridge), "--config", str(config_path), "check-readers"]))
+        checked = result["checked_sessions"]
+        if type(checked) is not int or checked < 0:
+            raise ValueError("Invalid reader check count")
+    except (SetupError, ValueError, KeyError, TypeError) as error:
+        raise SetupError("Session history check failed; verify CLI export support and native transcript access before starting services") from error
+    return checked
+
+
 def private_write(path, text):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as output:
@@ -320,6 +331,7 @@ def _configure(owner, herdr_socket, runner, check, enable_audio):
         if selected and Path(selected).resolve() != Path(existing["herdr_socket"]).resolve():
             raise SetupError("Existing configuration targets another HERDR server; nothing was replaced")
         runner([str(bridge), "--config", str(config_path), "status"])
+        checked = check_readers(bridge, config_path, runner)
         if not check:
             upgrade_transport(existing, config_root, runner)
         if not check and enable_audio:
@@ -344,7 +356,8 @@ def _configure(owner, herdr_socket, runner, check, enable_audio):
         if not check:
             manager.start("herdr-white-noise-bridge")
         report = {"configuration": str(config_path), "existing_configuration_preserved": True,
-                  "bridge_account_id": existing["account_id_hex"], "phone_round_trip": "requires user confirmation"}
+                  "bridge_account_id": existing["account_id_hex"], "phone_round_trip": "requires user confirmation",
+                  "checked_session_readers": checked, "reader_validation": "passed" if checked else "deferred: no live supported sessions"}
         bootstrap_file = Path(existing["wn_agent_socket"]).parent.parent / "codr-bootstrap.json"
         if bootstrap_file.exists():
             bootstrap = json.loads(bootstrap_file.read_text())
@@ -377,6 +390,14 @@ def _configure(owner, herdr_socket, runner, check, enable_audio):
     if not available:
         raise SetupError("Install or start a supported agent: OpenCode, Codex, or Claude Code")
     opencode = executables.get("opencode", "opencode")
+    with tempfile.TemporaryDirectory(prefix="codr-reader-check-") as temporary:
+        directory = Path(temporary)
+        candidate = directory / "config.toml"
+        candidate.write_text(toml_text({"phone_npub": owner, "account_id_hex": "00" * 32,
+            "herdr_socket": herdr_socket, "wn_agent_socket": directory / "wn.sock", "state_path": directory / "state.json",
+            "opencode_bin": opencode, "codex_home": Path(os.environ.get("CODEX_HOME", home / ".codex")).resolve(),
+            "claude_home": Path(os.environ.get("CLAUDE_CONFIG_DIR", home / ".claude")).resolve()}))
+        checked = check_readers(bridge, candidate, runner)
     transcribe_command = configure_phonon(runner, private_write, unit_argument) if enable_audio is not False else []
     mdk = ensure_mdk(runner)
     mdk_home = home / ".marmot-agents/herdr"
@@ -416,6 +437,7 @@ def _configure(owner, herdr_socket, runner, check, enable_audio):
     manager.is_active(["wn-agent-herdr", "herdr-white-noise-bridge"])
     return {"configuration": str(config_path), "bridge_npub": result["npub"], "herdr_socket": str(herdr_socket),
             "detected_sessions": len(snapshot["agents"]), "supported_agents": sorted(available),
+            "checked_session_readers": checked, "reader_validation": "passed" if checked else "deferred: no live supported sessions",
             "phone_round_trip": "requires user confirmation"}
 
 

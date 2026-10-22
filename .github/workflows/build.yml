@@ -146,7 +146,12 @@ jobs:
           shared-key: codr-connector-${{ matrix.os }}-${{ matrix.arch }}
       - name: Test connector protocol and compatibility
         working-directory: mdk
-        run: cargo test --locked -p agent-control -p agent-connector -j 2 -- --test-threads=1
+        run: |
+          # macOS's default temp path can exceed the Unix socket staging limit.
+          if [ "$RUNNER_OS" = macOS ]; then
+            export TMPDIR="$(mktemp -d /tmp/codr.XXXXXX)"
+          fi
+          cargo test --locked -p agent-control -p agent-connector -j 2 -- --test-threads=1
       - name: Install upstream verification tools
         if: matrix.os == 'linux' && matrix.arch == 'x86_64'
         uses: taiki-e/install-action@b18fb392e1a1b90971f7c7572c92790fa54f23d5

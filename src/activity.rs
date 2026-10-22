@@ -1,0 +1,127 @@
+//! Durable attribution of native user input without storing its plaintext.
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
+
+#[derive(Clone, Debug)]
+pub struct UserInput {
+    pub id: String,
+    pub fingerprint: Option<String>,
+    complete: bool,
+}
+
+impl UserInput {
+    pub fn new(id: String, text: &str) -> Self {
+        let text = text.replace("\r\n", "\n");
+        Self {
+            id,
+            complete: true,
+            fingerprint: (!text.trim().is_empty())
+                .then(|| hex::encode(Sha256::digest(text.trim().as_bytes()))),
+        }
+    }
+
+    pub fn pending(id: String) -> Self {
+        Self {
+            id,
+            fingerprint: None,
+            complete: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct PhoneInput {
+    receipt: String,
+    before: Vec<String>,
+    fingerprint: Option<String>,
+    confirmed: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Activity {
+    observed: Option<Vec<String>>,
+    phone: Vec<PhoneInput>,
+    #[serde(default)]
+    unresolved: bool,
+}
+
+impl Activity {
+    /// First observation is a migration baseline, never evidence of fresh activity.
+    pub fn observe(&mut self, inputs: &[UserInput]) -> bool {
+        let Some(observed) = &mut self.observed else {
+            self.observed = Some(inputs.iter().map(|input| input.id.clone()).collect());
+            return false;
+        };
+        let known: HashSet<_> = observed.iter().cloned().collect();
+        self.unresolved = inputs
+            .iter()
+            .any(|input| !input.complete && !known.contains(&input.id));
+        let fresh: Vec<_> = inputs
+            .iter()
+            .filter(|input| input.complete && !known.contains(&input.id))
+            .collect();
+        let local = fresh.iter().any(|input| {
+            let candidates: Vec<_> = self
+                .phone
+                .iter()
+                .filter(|phone| {
+                    phone.confirmed
+                        && input.fingerprint.is_some()
+                        && input.fingerprint == phone.fingerprint
+                        && !phone.before.contains(&input.id)
+                })
+                .collect();
+            candidates.len() != 1
+                || fresh
+                    .iter()
+                    .filter(|other| {
+                        other.fingerprint == candidates[0].fingerprint
+                            && !candidates[0].before.contains(&other.id)
+                    })
+                    .count()
+                    != 1
+        });
+        // A submission can explain only the first new input batch after its checkpoint.
+        self.phone
+            .retain(|phone| !fresh.iter().any(|input| !phone.before.contains(&input.id)));
+        observed.extend(fresh.into_iter().map(|input| input.id.clone()));
+        local
+    }
+
+    pub fn baseline(&mut self, inputs: &[UserInput]) {
+        let _ = self.observe(inputs);
+    }
+
+    pub fn unresolved(&self) -> bool {
+        self.unresolved
+    }
+
+    /// An ended session cannot complete attribution reliably. The caller mutes first.
+    pub fn retire(&mut self) {
+        self.unresolved = false;
+        self.phone.clear();
+    }
+
+    pub fn start_phone(&mut self, receipt: &str, text: &str, inputs: &[UserInput]) {
+        self.baseline(inputs);
+        self.phone.push(PhoneInput {
+            receipt: receipt.into(),
+            before: inputs.iter().map(|input| input.id.clone()).collect(),
+            fingerprint: UserInput::new(String::new(), text).fingerprint,
+            confirmed: false,
+        });
+    }
+
+    pub fn confirm_phone(&mut self, receipt: &str) {
+        for phone in &mut self.phone {
+            if phone.receipt == receipt {
+                phone.confirmed = true;
+            }
+        }
+    }
+
+    pub fn cancel_phone(&mut self, receipt: &str) {
+        self.phone.retain(|phone| phone.receipt != receipt);
+    }
+}

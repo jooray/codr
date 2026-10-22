@@ -11,6 +11,10 @@ use std::{
 const MAX_BYTES: usize = 128 * 1024 * 1024;
 const MAX_EVENTS: usize = 10_000;
 
+#[derive(Debug, thiserror::Error)]
+#[error("OpenCode database history format is incompatible")]
+struct IncompatibleDatabase;
+
 struct CachedMessage {
     created: i64,
     bytes: usize,
@@ -28,6 +32,7 @@ struct Cache {
 #[derive(Default)]
 pub struct Reader {
     sessions: BTreeMap<(PathBuf, String), Cache>,
+    cli_sessions: HashSet<(PathBuf, String)>,
 }
 
 pub struct Read {
@@ -42,6 +47,26 @@ impl Reader {
     pub(crate) fn retain(&mut self, sessions: &HashSet<String>) {
         self.sessions
             .retain(|(_, session), _| sessions.contains(session));
+        self.cli_sessions
+            .retain(|(_, session)| sessions.contains(session));
+    }
+
+    /// None selects CLI export only after proven projection incompatibility.
+    pub(crate) fn read_compatible(&mut self, path: &Path, session: &str) -> Result<Option<Read>> {
+        let key = (path.to_owned(), session.to_owned());
+        if self.cli_sessions.contains(&key) {
+            return Ok(None);
+        }
+        match self.read(path, session) {
+            Ok(read) => Ok(Some(read)),
+            Err(error) if error.is::<IncompatibleDatabase>() => {
+                self.sessions.remove(&key);
+                self.cli_sessions.insert(key);
+                eprintln!("OpenCode database history is incompatible; using CLI export.");
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub fn read(&mut self, path: &Path, session: &str) -> Result<Read> {
@@ -53,6 +78,20 @@ impl Reader {
         db.set_limit(Limit::SQLITE_LIMIT_LENGTH, 16 * 1024 * 1024)?;
         db.execute_batch("PRAGMA query_only=ON")?;
         let tx = db.transaction()?;
+        for (table, required) in [
+            ("session", &["id"][..]),
+            ("event", &["id", "aggregate_id", "seq", "type", "data"][..]),
+            ("message", &["id", "session_id", "time_created", "data"][..]),
+            ("part", &["id", "session_id", "message_id", "data"][..]),
+        ] {
+            let mut statement = tx.prepare("SELECT name FROM pragma_table_info(?1)")?;
+            let columns = statement
+                .query_map([table], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<HashSet<_>>>()?;
+            if required.iter().any(|column| !columns.contains(*column)) {
+                return Err(IncompatibleDatabase.into());
+            }
+        }
         ensure!(
             tx.query_row("SELECT 1 FROM session WHERE id=?1", [session], |_| Ok(()))
                 .optional()?
@@ -68,10 +107,9 @@ impl Reader {
             .optional()?;
         // This reader requires the durable v1 event log. Do not infer change cursors
         // from message IDs or wall-clock timestamps, which miss in-place updates.
-        ensure!(
-            latest.is_some(),
-            "OpenCode session has no durable event log"
-        );
+        if latest.is_none() {
+            return Err(IncompatibleDatabase.into());
+        }
         let key = (path.to_owned(), session.to_owned());
         let cached = self.sessions.get(&key);
         let cursor = cached.and_then(|cache| cache.cursor.as_ref());
@@ -111,16 +149,15 @@ impl Reader {
                 expected += 1;
                 let kind: String = row.get(1)?;
                 if kind.starts_with("message.") {
-                    ensure!(
-                        matches!(
-                            kind.as_str(),
-                            "message.updated.1"
-                                | "message.part.updated.1"
-                                | "message.removed.1"
-                                | "message.part.removed.1"
-                        ),
-                        "Unsupported OpenCode message event version"
-                    );
+                    if !matches!(
+                        kind.as_str(),
+                        "message.updated.1"
+                            | "message.part.updated.1"
+                            | "message.removed.1"
+                            | "message.part.removed.1"
+                    ) {
+                        return Err(IncompatibleDatabase.into());
+                    }
                     let id: String = row.get(2)?;
                     ensure!(!id.is_empty(), "OpenCode change has no message identity");
                     changed.insert(id);
@@ -139,7 +176,9 @@ impl Reader {
                  AND type NOT IN ('message.updated.1','message.part.updated.1','message.removed.1','message.part.removed.1') LIMIT 1",
                 [session], |_| Ok(())
             ).optional()?.is_some();
-            ensure!(!unsupported, "Unsupported OpenCode message event version");
+            if unsupported {
+                return Err(IncompatibleDatabase.into());
+            }
             let mut statement =
                 tx.prepare("SELECT id FROM message WHERE session_id=?1 ORDER BY time_created,id")?;
             changed = statement
@@ -229,10 +268,10 @@ fn read_message(
     let mut info: Info = serde_json::from_str(&data)?;
     info.id = id.into();
     let mut parts = Vec::new();
-    if info.role == "assistant" {
+    if info.role == "assistant" || info.role == "user" {
         let mut statement = tx.prepare(
             "SELECT id,data FROM part WHERE session_id=?1 AND message_id=?2 AND
-             (json_extract(data,'$.type')='text' OR
+              (json_extract(data,'$.type') IN ('text','file','image') OR
               (json_extract(data,'$.type')='tool' AND json_extract(data,'$.tool') IN ('todowrite','question')))
              ORDER BY id")?;
         let mut rows = statement.query((session, id))?;

@@ -4,6 +4,7 @@
 
 ### Added
 
+- Automatically mute all groups on local native prompts and resume on authorized phone input. Preserve manual controls without opening a startup popup.
 - macOS support for the Rust bridge, the MDK transport, and the local Phonon-2 worker.
 - launchd LaunchAgents on macOS, with the same restart-on-failure behaviour as the systemd units.
 - Native macOS aarch64 and x86_64 release binaries, ad-hoc signed, alongside the existing musl builds.
@@ -20,11 +21,16 @@
 - Group names include the workspace, with UTF-8 byte limits.
 - OpenCode session exports support both 1.x and 2.x formats.
 - Live group titles follow HERDR label changes, with durable rename intent and protection for manually renamed groups.
+- Session readers select CLI export when an OpenCode database history format becomes incompatible, including upgrades while the worker runs. Storage errors still defer reads.
+- Setup checks live transcript readers before changing services or identities. `check-readers` repeats that read-only validation without printing transcripts.
 
 ### Known limits
 
+- Automatic handoff observes native transcripts after polling and read latency. It cannot recall output already submitted to MDK. Set `auto_forwarding = false` to retain manual local-activity control.
+- Phone prompts are not queued behind busy or blocked agents. Wait for idle and resend; supported decision answers remain available while blocked.
 - launchd has no memory cap, so the 1 GiB Phonon limit applies only on Linux.
 - macOS setup needs a logged-in launchd session; a headless SSH session cannot bootstrap the agents.
+
 ### Compatibility
 
 - Upgrade the bridge and dedicated connector together through setup. Shared `wn-agent` installations are not replaced.

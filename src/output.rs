@@ -33,6 +33,7 @@ pub struct SessionHistory {
     pub finals: Vec<FinalMessage>,
     pub latest_turn: Option<String>,
     pub turns: Vec<String>,
+    pub user_inputs: Vec<crate::activity::UserInput>,
 }
 
 pub async fn read_history(
@@ -150,9 +151,36 @@ fn history_from_data(export: &Export) -> SessionHistory {
     let mut latest_turn = None;
     let mut turns = std::collections::BTreeSet::new();
     let mut has_user = false;
+    let mut user_inputs = Vec::new();
     for message in &export.messages {
         let info = &message.info;
         if info.role == "user" {
+            let parts: Vec<_> = message
+                .parts
+                .iter()
+                .filter(|part| part.kind == "text" && !part.synthetic && !part.ignored)
+                .collect();
+            if !info.id.is_empty()
+                && info.summary != true
+                && (message.parts.is_empty()
+                    || !parts.is_empty()
+                    || message
+                        .parts
+                        .iter()
+                        .any(|part| matches!(part.kind.as_str(), "file" | "image")))
+            {
+                let text = parts
+                    .iter()
+                    .filter_map(|part| part.text.as_deref())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let id = format!("opencode:{}", info.id);
+                user_inputs.push(if message.parts.is_empty() {
+                    crate::activity::UserInput::pending(id)
+                } else {
+                    crate::activity::UserInput::new(id, &text)
+                });
+            }
             latest_turn = Some(format!("opencode:{}", info.id));
             turns.insert(latest_turn.clone().unwrap());
             has_user = true;
@@ -196,6 +224,7 @@ fn history_from_data(export: &Export) -> SessionHistory {
         finals: out,
         latest_turn,
         turns: turns.into_iter().collect(),
+        user_inputs,
     }
 }
 
@@ -394,6 +423,53 @@ pub struct SessionSnapshot {
     pub decision: Option<decision::Decision>,
 }
 
+/// Fixed diagnostics never include transcript content, IDs, paths, or CLI stderr.
+pub fn read_error_message(error: &anyhow::Error) -> &'static str {
+    if let Some(rusqlite::Error::SqliteFailure(code, _)) = error.downcast_ref::<rusqlite::Error>() {
+        return match code.code {
+            rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked => {
+                "database is busy or locked"
+            }
+            rusqlite::ErrorCode::CannotOpen | rusqlite::ErrorCode::PermissionDenied => {
+                "database access failed"
+            }
+            rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase => {
+                "database is corrupt or invalid"
+            }
+            _ => "database read failed",
+        };
+    }
+    "transcript read failed; verify CLI export support and transcript contents"
+}
+
+pub(crate) async fn read_opencode_snapshot(
+    config: &crate::BridgeConfig,
+    session: &crate::herdr::Session,
+    database: std::sync::Arc<std::sync::Mutex<opencode::Reader>>,
+) -> Result<SessionSnapshot> {
+    if let Some(path) = &config.opencode_db {
+        let path = path.clone();
+        let id = session.value.clone();
+        let read = tokio::task::spawn_blocking(move || {
+            database
+                .lock()
+                .map_err(|_| anyhow::anyhow!("OpenCode database reader failed"))?
+                .read_compatible(&path, &id)
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("OpenCode database reader failed"))??;
+        if let Some(read) = read {
+            return Ok(read.snapshot);
+        }
+    }
+    let export = export_data(&config.opencode_bin, &session.value).await?;
+    Ok(SessionSnapshot {
+        history: history_from_data(&export),
+        tasks: tasks::from_data(&export),
+        decision: decision::from_data(&export).ok().flatten(),
+    })
+}
+
 /// Read reply, task and decision projections from one consistent transcript.
 pub async fn read_snapshot(
     config: &crate::BridgeConfig,
@@ -403,28 +479,8 @@ pub async fn read_snapshot(
         session.kind == "id",
         "Unsupported native session reference kind"
     );
-    if let Some(path) = &config.opencode_db
-        && session.agent == "opencode"
-    {
-        let path = path.clone();
-        let session = session.clone();
-        return tokio::task::spawn_blocking(move || {
-            opencode::Reader::default()
-                .read(&path, &session.value)
-                .map(|read| read.snapshot)
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("OpenCode database reader failed"))?;
-    }
     match session.agent.as_str() {
-        "opencode" => {
-            let export = export_data(&config.opencode_bin, &session.value).await?;
-            Ok(SessionSnapshot {
-                history: history_from_data(&export),
-                tasks: tasks::from_data(&export),
-                decision: decision::from_data(&export).ok().flatten(),
-            })
-        }
+        "opencode" => read_opencode_snapshot(config, session, Default::default()).await,
         "codex" | "claude" => {
             let provider = session.agent.clone();
             let id = session.value.clone();

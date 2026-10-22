@@ -26,9 +26,19 @@ pub(super) fn snapshot(
     let mut latest_turn = None;
     let mut turns = std::collections::BTreeSet::new();
     let mut has_started_turn = false;
+    let mut user_inputs = Vec::new();
     native::records(&path, |row| {
         tasks.codex_record(&row);
         let payload = &row["payload"];
+        if row["type"] == "event_msg" && payload["type"] == "user_message" {
+            let text = payload["message"].as_str().unwrap_or("");
+            let id = format!(
+                "codex:user:{}:{}",
+                user_inputs.len(),
+                row["timestamp"].as_str().unwrap_or("")
+            );
+            user_inputs.push(crate::activity::UserInput::new(id, text));
+        }
         if ((row["type"] == "event_msg"
             && matches!(
                 payload["type"].as_str(),
@@ -100,6 +110,7 @@ pub(super) fn snapshot(
             finals: replies,
             latest_turn,
             turns: turns.into_iter().collect(),
+            user_inputs,
         },
         tasks.latest,
     ))

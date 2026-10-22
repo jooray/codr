@@ -18,6 +18,8 @@ enum Action {
     Run,
     /// Print public routing state without message contents.
     Status,
+    /// Validate live session history readers without changing bridge state.
+    CheckReaders,
     /// Control global White Noise forwarding without stopping the worker.
     Forwarding {
         #[arg(value_enum, default_value = "status")]
@@ -63,6 +65,11 @@ async fn main() -> Result<()> {
         root.join("herdr-white-noise-bridge/config.toml")
     });
     let config = BridgeConfig::load(&config_path)?;
+    if matches!(args.command, Some(Action::CheckReaders)) {
+        let checked = check_readers(config).await?;
+        println!("{}", serde_json::json!({"checked_sessions":checked}));
+        return Ok(());
+    }
     if let Some(Action::Forwarding { mode }) = args.command {
         let control = match mode {
             ForwardingMode::Status => forwarding::load(&config.state_path)?,
@@ -177,6 +184,60 @@ async fn main() -> Result<()> {
         }
         Action::RenameGroups => bridge.rename_groups().await,
         Action::Status => unreachable!(),
+        Action::CheckReaders => unreachable!(),
         Action::Forwarding { .. } => unreachable!(),
     }
+}
+
+async fn check_readers(config: BridgeConfig) -> Result<usize> {
+    use herdr_white_noise_bridge::{herdr, output, wire::Socket};
+    let agents = herdr::snapshot(&Socket {
+        path: config.herdr_socket.clone(),
+    })
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!("Session history check failed: HERDR snapshot is unavailable or invalid")
+    })?;
+    let sessions: std::collections::BTreeMap<_, _> = agents
+        .into_iter()
+        .filter(|agent| {
+            agent
+                .agent_session
+                .as_ref()
+                .is_some_and(|session| output::supported(&session.agent))
+        })
+        .map(|agent| (agent.key(), agent.agent_session.unwrap()))
+        .collect();
+    let checked = sessions.len();
+    let limit = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+    let mut readers = tokio::task::JoinSet::new();
+    for session in sessions.into_values() {
+        let config = config.clone();
+        let limit = limit.clone();
+        readers.spawn(async move {
+            let _permit = limit.acquire_owned().await?;
+            output::read_snapshot(&config, &session)
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "Session history check failed: {}",
+                        output::read_error_message(&error)
+                    )
+                })?;
+            Ok::<_, anyhow::Error>(())
+        });
+    }
+    let mut failure = None;
+    while let Some(result) = readers.join_next().await {
+        if let Err(error) = result
+            .map_err(|_| anyhow::anyhow!("Session history check failed: reader task failed"))
+            .and_then(|result| result)
+        {
+            failure = Some(error);
+        }
+    }
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    Ok(checked)
 }

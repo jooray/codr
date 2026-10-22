@@ -254,6 +254,7 @@ impl Bridge {
     ) -> Result<()> {
         if let Some(history) = history {
             let mapping = self.state.mappings.get_mut(key).unwrap();
+            mapping.activity.baseline(&history.user_inputs);
             let known: HashSet<_> = mapping.final_ids.iter().cloned().collect();
             mapping.final_ids.extend(
                 history
@@ -284,7 +285,7 @@ impl Bridge {
 
     pub async fn flush(&mut self) -> Result<()> {
         self.refresh_forwarding()?;
-        if !self.state.forwarding_enabled {
+        if !self.state.forwarding_enabled || self.activity_unresolved() {
             return Ok(());
         }
         let mut failed = HashSet::new();
@@ -293,7 +294,7 @@ impl Bridge {
         outbox.sort_by_key(|item| item.response.is_some());
         for item in outbox {
             self.refresh_forwarding()?;
-            if !self.state.forwarding_enabled {
+            if !self.state.forwarding_enabled || self.activity_unresolved() {
                 return Ok(());
             }
             if !self
@@ -507,6 +508,11 @@ impl Bridge {
                     self.state.enqueue(&group, "> ended This group retains its history. A restored native session will reconnect here.");
                 }
             }
+            if self.config.auto_forwarding && self.state.mappings[&key].activity.unresolved() {
+                forwarding::set(&self.config.state_path, false)?;
+                self.refresh_forwarding()?;
+                self.state.mappings.get_mut(&key).unwrap().activity.retire();
+            }
             let m = self.state.mappings.get_mut(&key).unwrap();
             m.active = false;
             m.pending_prompt = false;
@@ -522,11 +528,12 @@ impl Bridge {
                 .as_ref()
                 .filter(|session| matches!(session.agent.as_str(), "codex" | "claude"))
         {
-            let finals = self.read_history(agent).await?.finals;
+            let history = self.read_history(agent).await?;
             let mapping = self.state.mappings.get_mut(key).unwrap();
+            mapping.activity.baseline(&history.user_inputs);
             mapping
                 .final_ids
-                .extend(finals.into_iter().map(|reply| reply.id));
+                .extend(history.finals.into_iter().map(|reply| reply.id));
             mapping.output_initialised = true;
             mapping.last_export_at = now();
             self.save()?;
@@ -549,6 +556,7 @@ impl Bridge {
             .is_some_and(|s| output::supported(&s.agent))
         {
             let history = self.read_history(agent).await?;
+            self.observe_activity(key, &history)?;
             if !self.state.forwarding_enabled {
                 let mapping = self.state.mappings.get_mut(key).unwrap();
                 let muted: HashSet<_> = mapping.muted_turns.iter().cloned().collect();
@@ -593,7 +601,8 @@ impl Bridge {
                 .is_some_and(|s| output::supported(&s.agent))
         {
             let needs_read = self.state.mappings.get(key).is_none_or(|mapping| {
-                !mapping.output_initialised
+                self.config.auto_forwarding
+                    || !mapping.output_initialised
                     || mapping.forwarding_baseline_pending
                     || (self.config.edit_responses && agent.agent_status == "working")
                     || (agent.agent_status == "blocked"
@@ -638,8 +647,9 @@ impl Bridge {
                 .as_ref()
                 .is_some_and(|s| output::supported(&s.agent))
             {
-                let finals = self.read_history(agent).await?.finals;
-                m.final_ids = finals.into_iter().map(|f| f.id).collect();
+                let history = self.read_history(agent).await?;
+                m.activity.baseline(&history.user_inputs);
+                m.final_ids = history.finals.into_iter().map(|f| f.id).collect();
                 m.output_initialised = true;
                 if self.config.edit_responses && agent.settled() {
                     m.task_revision = self
@@ -657,11 +667,24 @@ impl Bridge {
         // Older bridge versions created these groups without a transcript watermark.
         // Seed their existing history once when enabling native reply support.
         self.seed_native_history(key, agent).await?;
+        if self.config.auto_forwarding
+            && agent
+                .agent_session
+                .as_ref()
+                .is_some_and(|session| output::supported(&session.agent))
+        {
+            let history = self.read_history(agent).await?;
+            self.observe_activity(key, &history)?;
+        }
         self.refresh_forwarding()?;
         let name = agent.group_name();
         let description = agent.group_description();
         let m = &self.state.mappings[key];
-        if m.group_id_hex.is_none() && !m.creating && self.state.forwarding_enabled {
+        if m.group_id_hex.is_none()
+            && !m.creating
+            && self.state.forwarding_enabled
+            && !self.activity_unresolved()
+        {
             let capabilities = self
                 .marmot
                 .marmot(json!({"type":"group_create_capabilities"}))
@@ -883,6 +906,40 @@ impl Bridge {
         Ok(())
     }
 
+    fn observe_activity(&mut self, key: &str, history: &output::SessionHistory) -> Result<()> {
+        if !self.config.auto_forwarding {
+            return Ok(());
+        }
+        let previous = self.state.mappings[key].activity.clone();
+        if self
+            .state
+            .mappings
+            .get_mut(key)
+            .unwrap()
+            .activity
+            .observe(&history.user_inputs)
+        {
+            if let Err(error) = forwarding::set(&self.config.state_path, false) {
+                self.state.mappings.get_mut(key).unwrap().activity = previous;
+                // Keep outgoing delivery closed even if the control write failed.
+                self.state.forwarding_enabled = false;
+                return Err(error);
+            }
+            self.refresh_forwarding()?;
+            eprintln!("Local native user input muted White Noise forwarding for all groups.");
+        }
+        self.save()
+    }
+
+    fn activity_unresolved(&self) -> bool {
+        self.config.auto_forwarding
+            && self
+                .state
+                .mappings
+                .values()
+                .any(|mapping| mapping.activity.unresolved())
+    }
+
     async fn read_history(&mut self, agent: &Agent) -> Result<output::SessionHistory> {
         Ok(self
             .reads
@@ -1071,6 +1128,33 @@ impl Bridge {
             self.state.media_pending.push(pending);
             return self.save();
         }
+        let phone_history = if self.config.auto_forwarding
+            && text != "/status"
+            && !text.trim().is_empty()
+            && msg["text_truncated"] != true
+            && msg["attachments_truncated"] != true
+            && msg["media"].as_array().is_none_or(|media| media.is_empty())
+            && !media_busy
+            && !self.state.mappings[&key].pending_prompt
+            && self.agents.get(&key).is_some_and(|agent| {
+                agent.settled()
+                    && agent
+                        .agent_session
+                        .as_ref()
+                        .is_some_and(|session| output::supported(&session.agent))
+            }) {
+            let revision = self.state.forwarding_revision.clone();
+            let session = self.agents[&key].agent_session.as_ref().unwrap().clone();
+            let history = self.reads.fresh(&self.config, &session).await?.history;
+            self.refresh_forwarding()?;
+            ensure!(
+                self.state.forwarding_enabled && self.state.forwarding_revision == revision,
+                "Forwarding selection changed; phone input deferred before submission"
+            );
+            Some(history)
+        } else {
+            None
+        };
         // Persist consumption before terminal input: uncertain prompts must not run twice.
         let m = self.state.mappings.get_mut(&key).unwrap();
         m.seen_messages.push(id.into());
@@ -1095,10 +1179,21 @@ impl Bridge {
             } else if text.trim().is_empty() {
                 Some("Send a non-empty text message.".into())
             } else {
-                self.state.mappings.get_mut(&key).unwrap().pending_prompt = true;
+                let mapping = self.state.mappings.get_mut(&key).unwrap();
+                mapping.pending_prompt = true;
+                if let Some(history) = phone_history {
+                    mapping.activity.start_phone(id, text, &history.user_inputs);
+                }
                 self.save()?;
                 match herdr::prompt(&self.herdr, &agent, text).await {
                     Ok(_) => {
+                        self.state
+                            .mappings
+                            .get_mut(&key)
+                            .unwrap()
+                            .activity
+                            .confirm_phone(id);
+                        self.save()?;
                         if self.config.edit_responses {
                             if self.state.mappings[&key].response_id.is_some() {
                                 self.state.update_response(
@@ -1116,6 +1211,7 @@ impl Bridge {
                         if error.downcast_ref::<crate::wire::NotSubmitted>().is_some() {
                             let m = self.state.mappings.get_mut(&key).unwrap();
                             m.pending_prompt = false;
+                            m.activity.cancel_phone(id);
                             m.seen_messages.retain(|seen| seen != id);
                             self.herdr_available = false;
                             self.save()?;

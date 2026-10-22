@@ -14,6 +14,7 @@ struct Row {
     private: bool,
     api_error: bool,
     user_prompt: bool,
+    input_text: String,
     message: Option<String>,
     stop: Option<String>,
     text: Vec<String>,
@@ -88,7 +89,11 @@ pub(super) fn snapshot(
             && !private
             && !truthy(&value["isCompactSummary"])
             && (content.is_string()
-                || blocks.is_some_and(|parts| parts.iter().any(|part| part["type"] == "text")));
+                || blocks.is_some_and(|parts| {
+                    parts.iter().any(|part| {
+                        matches!(part["type"].as_str(), Some("text" | "image" | "document"))
+                    })
+                }));
         let text = if kind == "assistant" && !private && value["message"]["role"] == "assistant" {
             blocks
                 .map(|parts| {
@@ -110,6 +115,19 @@ pub(super) fn snapshot(
             private,
             api_error: truthy(&value["isApiErrorMessage"]) || !value["message"]["error"].is_null(),
             user_prompt,
+            input_text: if user_prompt {
+                content.as_str().map(str::to_owned).unwrap_or_else(|| {
+                    blocks
+                        .into_iter()
+                        .flatten()
+                        .filter(|part| part["type"] == "text")
+                        .filter_map(|part| part["text"].as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+            } else {
+                String::new()
+            },
             message: value["message"]["id"].as_str().map(str::to_owned),
             stop: value["message"]["stop_reason"].as_str().map(str::to_owned),
             text,
@@ -176,12 +194,17 @@ pub(super) fn snapshot(
     let mut tasks = super::tasks::Tracker::default();
     let mut latest_turn = None;
     let mut turns = std::collections::BTreeSet::new();
+    let mut user_inputs = Vec::new();
     for position in chain.into_iter().rev() {
         let row = &rows[position];
         if row.private || !row.same_session {
             continue;
         }
         if row.user_prompt {
+            user_inputs.push(crate::activity::UserInput::new(
+                format!("claude:{}", row.id),
+                &row.input_text,
+            ));
             response.finish(&mut replies);
             latest_turn = Some(format!("claude:{}", row.id));
             turns.insert(latest_turn.clone().unwrap());
@@ -238,6 +261,7 @@ pub(super) fn snapshot(
             finals: replies,
             latest_turn,
             turns: turns.into_iter().collect(),
+            user_inputs,
         },
         tasks.latest,
     ))

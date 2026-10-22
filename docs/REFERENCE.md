@@ -11,6 +11,7 @@ The bridge uses one dedicated MDK identity across all mapped groups. Setup keeps
 - New sessions create groups and invite the configured phone `npub`.
 - Group names pair the HERDR tab label and workspace: `[cd] <tab name> (<workspace>)`, for example `[cd] review (Acme)`. A workspace without a label leaves `[cd] <tab name>`. Workspace and agent details also appear in the group description. Repository names and agent-generated conversation topics do not determine the chat name.
 - A phone message prompts only the agent mapped to that group.
+- Prompts sent while that agent is busy or blocked are not queued. Wait for idle and resend. Supported decision answers use their separate blocked-session route.
 - Final replies come from completed stored agent messages. They exclude reasoning and tool output.
 - Working, idle, blocked, and ended notices appear in the group. Blocked notices can include a labelled terminal excerpt. Unsupported OpenCode blockers use a short notice. Separate `done` notices are suppressed; the final reply signals completion.
 - `/status` reports the mapped session state.
@@ -38,9 +39,25 @@ opencode_db = "/home/your-user/.local/share/opencode/opencode.db"
 
 The first read loads the selected session once. Later reads use the indexed per-session event sequence and fetch only messages affected by new events. Updates to existing text, tasks, and questions are included. Unchanged sessions read no message or part bodies. Deletions remove cached content. A restart, replaced checkpoint, or event-log gap rebuilds the cache once. Durable reply IDs still prevent replay after a restart.
 
-This reader supports the v1 `message`/`part` projections and durable message-event format verified with OpenCode 1.19.3. The configured database must contain the mapped sessions. Missing sessions, unsupported message-event versions, and read errors defer collection. They do not silently switch to full exports. Without `opencode_db`, the CLI export reader remains available for installations with a different storage format.
+This reader supports the v1 `message`/`part` projections and durable message-event format verified with OpenCode 1.19.3. If required projection columns, the session's durable event log, or a supported message-event version are unavailable, **codr** logs the compatibility change and uses CLI export for that session. This also applies when OpenCode upgrades while the bridge is running. The configured `opencode_bin` must export the same mapped sessions. CLI exports support OpenCode 1.x and 2.x, but full exports cost more than incremental database reads.
+
+Missing sessions in a compatible database, unreadable or corrupt databases, locks, and malformed content remain errors. They do not select another reader or consume pending phone input. A failed export also leaves the history checkpoint pending. Forwarding resumes only after a successful checkpoint; muted history is not replayed.
+
+Setup validates live supported session histories before it changes accounts or services. If no supported session is live, it reports that validation is deferred. To repeat the read-only check manually, run:
+
+```sh
+~/.local/bin/herdr-white-noise-bridge check-readers
+```
+
+The result reports the number of checked session readers. It does not print transcripts or change bridge state.
 
 ### At desk / Away forwarding
+
+By default, a new native user prompt in OpenCode, Codex, or Claude Code mutes **all groups**. A new authorized owner message from your phone enables forwarding for all groups after the history checkpoint. Phone prompts are attributed through durable message IDs and prompt fingerprints, including across bridge restarts. Ambiguous or unconfirmed input is treated as local input and mutes forwarding. Historical input on first observation is only a baseline.
+
+Detection uses transcript polling, not keystrokes. Allow the three-second polling interval plus transcript read time. Output already submitted to MDK cannot be recalled. Do not use automatic handoff as an instantaneous privacy boundary. Set `auto_forwarding = false` in the bridge configuration to disable local-prompt detection and retain the previous manual controls and phone wake behavior.
+
+If a native message appears before its text parts, outgoing delivery pauses until attribution is possible. If that session ends with incomplete input, **codr** mutes globally instead; a new authorized phone message can resume the other sessions.
 
 Use the HERDR action **White Noise forwarding: At desk / Away** to open the control popup. **Toggle White Noise forwarding** switches modes directly and can be bound to a HERDR shortcut.
 
@@ -56,7 +73,9 @@ description = "White Noise: At desk / Away"
 
 With the default prefix, press **Ctrl+B**, release it, then press **f** without Shift. The shortcut also appears in **Keybinds** under **White Noise: At desk / Away**. HERDR reloads configuration changes live.
 
-The plugin opens this popup once when a fresh HERDR server starts after session restore. Reattaching to an existing server does not run the startup hook again; use the shortcut. Starting the bridge manually does not open another popup.
+Remote HERDR clients use their local key bindings by default. Add the binding on the client machine, or reconnect with `herdr --remote <host> --remote-keybindings server`. This does not require a server restart. You can also run `herdr plugin pane open --plugin local.white-noise --entrypoint forwarding --focus` on the remote host.
+
+Startup no longer opens the popup automatically. Use the shortcut or action when you need manual control.
 
 - **At desk:** suppress outgoing messages and new group invitations while the bridge continues to listen for your phone.
 - **Away:** forward progress and final replies from every mapped session.

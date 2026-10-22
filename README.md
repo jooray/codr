@@ -14,7 +14,7 @@ Supported agents: OpenCode, Codex, and Claude Code on Linux and macOS.
 - Status notices, optional editable checklists, and final replies appear as separate messages.
 - Supported OpenCode questions accept a number or option label as a reply.
 - New groups make your configured account an admin, so you can invite participants and rename the group. Only the owner can prompt the agent. [Group setup](docs/REFERENCE.md#shared-chats-and-owner-only-control)
-- At desk mutes forwarding for all sessions. Away enables it. A new owner message switches all sessions to Away.
+- Local prompts automatically mute all sessions. A new owner message from your phone enables forwarding again.
 
 ## Install
 
@@ -39,7 +39,7 @@ Or give your coding agent this prompt, with your own public key:
 2. Send `/status` to check the connection. Send a prompt to continue that session.
 3. Read the reply in the same chat. For a supported decision, reply `1`, `2`, or an exact option label.
 
-Use HERDR's **White Noise forwarding: At desk / Away** action to control forwarding. [Shortcut and controls →](docs/REFERENCE.md#at-desk--away-forwarding)
+Handoff is automatic. Manual controls remain available through HERDR's **White Noise forwarding: At desk / Away** action. [Controls and limits →](docs/REFERENCE.md#at-desk--away-forwarding)
 
 ## How it works
 

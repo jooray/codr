@@ -45,14 +45,13 @@ class PluginStartupTests(unittest.TestCase):
         calls = [json.loads(line) for line in self.log.read_text().splitlines()]
         return result, calls
 
-    def test_startup_opens_the_forwarding_popup_after_starting_the_worker(self):
+    def test_startup_starts_the_worker_without_a_forwarding_popup(self):
         manifest = tomllib.loads((ROOT / "herdr-plugin.toml").read_text())
         startup = next(hook for hook in manifest["startup"] if hook["command"][:2] == ["sh", "plugin-start.sh"])
         result, calls = self.run_start(*startup["command"][2:])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(calls, [
             ["systemctl", "--user", "start", "herdr-white-noise-bridge.service"],
-            ["herdr fixture", "plugin", "pane", "open", "--plugin", "local.white-noise", "--entrypoint", "forwarding", "--focus"],
         ])
 
     def test_manual_worker_start_does_not_open_another_popup(self):

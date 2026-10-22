@@ -120,6 +120,8 @@ class SetupTests(unittest.TestCase):
             return json.dumps({"account_id_hex": "ab" * 32, "npub": "npub1bridge", "label": "herdr-bridge", "key_package_published": True})
         if "--version" in argv:
             return f"wn-agent {setup.MDK_VERSION}"
+        if "check-readers" in argv:
+            return json.dumps({"checked_sessions": 0})
         return ""
 
     def mocks(self):
@@ -332,6 +334,54 @@ class SetupTests(unittest.TestCase):
         self.assertFalse(self.config.exists())
         self.assertFalse((self.home / ".marmot-agents/herdr").exists())
         self.assertTrue(all("systemctl" not in str(call) for call in self.calls))
+
+    def test_reader_failure_stops_fresh_setup_before_transport_or_identity_creation(self):
+        def runner(argv):
+            if "check-readers" in argv:
+                raise setup.SetupError("Session history check failed")
+            return self.runner(argv)
+        with self.mocks():
+            with self.assertRaisesRegex(setup.SetupError, "history check"):
+                setup.configure("npub1fixture", self.socket, runner)
+        self.assertEqual(self.bootstrap_count, 0)
+        self.assertFalse(self.config.exists())
+        self.assertFalse(any(call[:3] in (["systemctl", "--user", "start"], ["systemctl", "--user", "stop"]) for call in self.calls))
+
+    def test_existing_reader_failure_stops_before_connector_upgrade(self):
+        with self.mocks():
+            setup.configure("npub1fixture", self.socket, self.runner)
+        self.calls.clear()
+        def runner(argv):
+            if "check-readers" in argv:
+                raise setup.SetupError("Session history check failed")
+            return self.runner(argv)
+        with self.mocks(), patch.object(setup, "upgrade_transport") as upgrade:
+            with self.assertRaisesRegex(setup.SetupError, "history check"):
+                setup.configure("npub1fixture", self.socket, runner)
+            upgrade.assert_not_called()
+
+    def test_setup_check_reports_deferred_readers_without_changing_services_or_config(self):
+        with self.mocks():
+            setup.configure("npub1fixture", self.socket, self.runner)
+        before = self.config.read_bytes()
+        self.calls.clear()
+        with self.mocks(), patch.object(setup, "upgrade_transport") as upgrade:
+            result = setup.configure("npub1fixture", self.socket, self.runner, check=True)
+            upgrade.assert_not_called()
+        self.assertEqual(result["checked_session_readers"], 0)
+        self.assertEqual(result["reader_validation"], "deferred: no live supported sessions")
+        self.assertEqual(self.config.read_bytes(), before)
+        self.assertFalse(any(call[0] in ("systemctl", "launchctl") or "bootstrap" in call for call in self.calls))
+
+    def test_setup_reports_the_number_of_validated_live_readers(self):
+        def runner(argv):
+            if "check-readers" in argv:
+                return json.dumps({"checked_sessions": 3})
+            return self.runner(argv)
+        with self.mocks():
+            result = setup.configure("npub1fixture", self.socket, runner)
+        self.assertEqual(result["checked_session_readers"], 3)
+        self.assertEqual(result["reader_validation"], "passed")
 
     def test_resume_selects_existing_account_without_creating_another(self):
         with self.mocks(), patch.object(setup, "local_accounts", return_value=[{"label": "herdr-bridge", "account_id_hex": "ab" * 32, "local_signing": True}]):
