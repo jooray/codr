@@ -2873,6 +2873,7 @@ async fn renaming_existing_groups_keeps_their_mapping_and_skips_matching_names()
         .get_mut(&agent().key())
         .unwrap()
         .group_description = None;
+    after.mappings.get_mut(&agent().key()).unwrap().group_name = None;
     assert_eq!(after, original);
     let requests = requests.lock().unwrap();
     let updates: Vec<_> = requests
@@ -3307,4 +3308,161 @@ async fn audio_queue_survives_restart_and_submits_the_transcript_once_without_co
     );
     mdk.abort();
     herdr.abort();
+}
+
+struct GroupProfile {
+    subject: String,
+    description: String,
+    reject_updates: bool,
+}
+
+async fn group_profile_peer(
+    path: &std::path::Path,
+    profile: Arc<Mutex<GroupProfile>>,
+    calls: Arc<Mutex<Vec<Value>>>,
+) -> tokio::task::JoinHandle<()> {
+    let listener = UnixListener::bind(path).unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = tokio::io::BufReader::new(stream);
+            let req = read_line(&mut reader).await.unwrap();
+            calls.lock().unwrap().push(req.clone());
+            let mut response = match req["type"].as_str().unwrap() {
+                "group_info" => {
+                    let profile = profile.lock().unwrap();
+                    json!({"type":"group_info","subject":profile.subject,"description":profile.description})
+                }
+                "group_profile_update" => {
+                    let mut profile = profile.lock().unwrap();
+                    if profile.reject_updates {
+                        json!({"type":"error","error":"uncertain"})
+                    } else {
+                        profile.subject = req["name"].as_str().unwrap().to_owned();
+                        profile.description = req["description"].as_str().unwrap().to_owned();
+                        json!({"type":"group_profile_updated","message_ids_hex":["ee".repeat(32)]})
+                    }
+                }
+                other => panic!("unexpected group profile request: {other}"),
+            };
+            response["id"] = req["id"].clone();
+            response["marmot_agent_control"] = json!("marmot.agent-control.v2");
+            let mut bytes = serde_json::to_vec(&response).unwrap();
+            bytes.push(b'\n');
+            reader.get_mut().write_all(&bytes).await.unwrap();
+        }
+    })
+}
+
+fn mapped_bridge(config: BridgeConfig, observed: &Agent) -> Bridge {
+    let mut bridge = Bridge::open(config).unwrap();
+    bridge.state.mappings.insert(
+        observed.key(),
+        Mapping {
+            group_id_hex: Some("bb".repeat(16)),
+            group_name: Some(observed.group_name()),
+            group_description: Some(observed.group_description()),
+            output_initialised: true,
+            last_agent_status: "idle".into(),
+            last_state_change_seq: observed.state_change_seq,
+            last_export_at: now(),
+            active: true,
+            agent_record: Some(observed.clone()),
+            ..Mapping::default()
+        },
+    );
+    bridge
+}
+
+#[tokio::test]
+async fn a_tab_rename_updates_the_group_once() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let mut observed = agent();
+    observed.tab_label = Some("Review".into());
+    let profile = Arc::new(Mutex::new(GroupProfile {
+        subject: observed.group_name(),
+        description: observed.group_description(),
+        reject_updates: false,
+    }));
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = group_profile_peer(&config.wn_agent_socket, profile, calls.clone()).await;
+    let mut bridge = mapped_bridge(config, &observed);
+    let mut renamed = observed.clone();
+    renamed.tab_label = Some("Renamed".into());
+    bridge.reconcile(vec![renamed.clone()]).await.unwrap();
+    bridge.reconcile(vec![renamed]).await.unwrap();
+    let updates: Vec<_> = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request["type"] == "group_profile_update")
+        .cloned()
+        .collect();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0]["name"], "[cd] Renamed");
+    assert_eq!(
+        bridge.state.mappings[&observed.key()].group_name.as_deref(),
+        Some("[cd] Renamed")
+    );
+    mdk.abort();
+}
+
+#[tokio::test]
+async fn a_group_renamed_by_the_user_is_not_overwritten() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let mut observed = agent();
+    observed.tab_label = Some("Review".into());
+    let profile = Arc::new(Mutex::new(GroupProfile {
+        subject: "My project".into(),
+        description: observed.group_description(),
+        reject_updates: false,
+    }));
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = group_profile_peer(&config.wn_agent_socket, profile, calls.clone()).await;
+    let mut bridge = mapped_bridge(config, &observed);
+    let mut renamed = observed.clone();
+    renamed.tab_label = Some("Renamed".into());
+    bridge.reconcile(vec![renamed]).await.unwrap();
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request["type"] != "group_profile_update")
+    );
+    assert!(bridge.state.mappings[&observed.key()].group_name_locked);
+    mdk.abort();
+}
+
+#[tokio::test]
+async fn an_unconfirmed_profile_update_is_not_retried() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let mut observed = agent();
+    observed.tab_label = Some("Review".into());
+    let profile = Arc::new(Mutex::new(GroupProfile {
+        subject: observed.group_name(),
+        description: observed.group_description(),
+        reject_updates: true,
+    }));
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = group_profile_peer(&config.wn_agent_socket, profile, calls.clone()).await;
+    let mut bridge = mapped_bridge(config, &observed);
+    let mut renamed = observed.clone();
+    renamed.tab_label = Some("Renamed".into());
+    bridge.reconcile(vec![renamed.clone()]).await.unwrap();
+    bridge.reconcile(vec![renamed]).await.unwrap();
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request["type"] == "group_profile_update")
+            .count(),
+        1
+    );
+    assert!(bridge.state.mappings[&observed.key()].rename_uncertain);
+    mdk.abort();
 }

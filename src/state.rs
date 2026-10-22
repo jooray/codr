@@ -14,6 +14,15 @@ pub struct Mapping {
     pub group_id_hex: Option<String>,
     #[serde(default)]
     pub group_description: Option<String>,
+    /// Last title this bridge applied or adopted for the group.
+    #[serde(default)]
+    pub group_name: Option<String>,
+    /// The group title was changed outside codr; never overwrite it automatically.
+    #[serde(default)]
+    pub group_name_locked: bool,
+    /// A profile update may have reached the group; do not retry automatically.
+    #[serde(default)]
+    pub rename_uncertain: bool,
     pub creating: bool,
     pub last_agent_status: String,
     pub last_state_change_seq: u64,
