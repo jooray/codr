@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.6.0] - 2026-10-22
+
+### Added
+
+- macOS support for the Rust bridge, the MDK transport, and the local Phonon-2 worker.
+- launchd LaunchAgents on macOS, with the same restart-on-failure behaviour as the systemd units.
+- Native macOS aarch64 and x86_64 release binaries, ad-hoc signed, alongside the existing musl builds.
+- Setup finds a Python 3.10+ interpreter for Phonon, preferring Homebrew versions over a too-new global `python3`.
+- Phonon installs its MLX runtime on Apple silicon and the CPU runtime on Intel Macs.
+
+### Changed
+
+- Service supervision moved behind one interface shared by systemd and launchd.
+- The install hook and setup tolerate macOS's Python 3.9 when only stdlib parsing is needed.
+
+### Known limits
+
+- launchd has no memory cap, so the 1 GiB Phonon limit applies only on Linux.
+- macOS setup needs a logged-in launchd session; a headless SSH session cannot bootstrap the agents.
+
 ## [0.5.0] - 2026-10-22
 
 ### Added

@@ -6,18 +6,27 @@ from contextlib import contextmanager
 import fcntl
 import json
 import os
-import re
 from pathlib import Path
+import re
 import shutil
 import socket
 import subprocess
 import sys
 import tempfile
 import time
-import tomllib
 import uuid
 
-from install import InstallError, install_bundle, platform_name
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+if __name__ == "__main__":
+    import services as _services
+    # macOS still ships Python 3.9 as /usr/bin/python3 and tomllib needs 3.11.
+    _services.ensure_python((3, 11), __file__)
+
+import tomllib
+
+import services
+from install import InstallError, install_bundle, mdk_platform_name, platform_name
 from phonon import configure_phonon
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,8 +39,9 @@ class SetupError(Exception):
 
 def run(argv):
     environment = dict(os.environ)
-    environment.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-    environment.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path={environment['XDG_RUNTIME_DIR']}/bus")
+    if sys.platform != "darwin":
+        environment.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+        environment.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path={environment['XDG_RUNTIME_DIR']}/bus")
     try:
         result = subprocess.run([str(arg) for arg in argv], capture_output=True, text=True, timeout=180, env=environment)
     except (OSError, subprocess.TimeoutExpired) as error:
@@ -45,6 +55,9 @@ def find_executable(name, candidates=()):
     found = shutil.which(name)
     if found:
         return str(Path(found).resolve())
+    candidates = [Path(candidate) for candidate in candidates]
+    if sys.platform == "darwin":
+        candidates.extend([Path("/opt/homebrew/bin") / name, Path("/usr/local/bin") / name])
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return str(candidate.resolve())
@@ -103,7 +116,7 @@ def ensure_mdk(runner):
                 return binary.resolve()
     if dedicated.exists():
         raise SetupError("The dedicated MDK executable does not match the required version")
-    platform = platform_name()
+    platform = mdk_platform_name()
     asset = f"wn-agent-{platform}-{MDK_VERSION}.tar.gz"
     url = f"https://github.com/marmot-protocol/mdk/releases/download/wn-agent-v{MDK_VERSION}/{asset}"
     install_bundle(url, f"wn-agent-{platform}/wn-agent", dedicated)
@@ -131,10 +144,11 @@ def private_write(path, text):
 
 
 def unit_argument(value):
-    value = str(value)
-    if any(ord(char) < 32 or ord(char) == 127 for char in value):
-        raise SetupError("A service path contains control characters")
-    return json.dumps(value, ensure_ascii=False).replace("%", "%%").replace("$", "$$")
+    """Kept for callers and tests; systemd quoting now lives in services.py."""
+    try:
+        return services.systemd_argument(value)
+    except services.ServiceError as error:
+        raise SetupError(str(error)) from error
 
 
 @contextmanager
@@ -166,6 +180,7 @@ def _configure(owner, herdr_socket, runner, check, enable_audio):
     config_root = Path(os.environ.get("XDG_CONFIG_HOME", home / ".config")).resolve()
     config_path = config_root / "herdr-white-noise-bridge/config.toml"
     bridge = home / ".local/bin/herdr-white-noise-bridge"
+    manager = services.for_host(runner, private_write, config_root, error=SetupError)
     existing = tomllib.loads(config_path.read_text()) if config_path.exists() else None
     owner = owner or (existing["phone_npub"] if existing else None)
     if not owner:
@@ -202,9 +217,9 @@ def _configure(owner, herdr_socket, runner, check, enable_audio):
                     candidate.write_text(text)
                     runner([str(bridge), "--config", str(candidate), "status"])
                 private_write(config_path, text)
-                runner(["systemctl", "--user", "restart", "herdr-white-noise-bridge.service"])
+                manager.restart("herdr-white-noise-bridge")
         if not check:
-            runner(["systemctl", "--user", "start", "herdr-white-noise-bridge.service"])
+            manager.start("herdr-white-noise-bridge")
         report = {"configuration": str(config_path), "existing_configuration_preserved": True,
                   "bridge_account_id": existing["account_id_hex"], "phone_round_trip": "requires user confirmation"}
         bootstrap_file = Path(existing["wn_agent_socket"]).parent.parent / "codr-bootstrap.json"
@@ -217,9 +232,10 @@ def _configure(owner, herdr_socket, runner, check, enable_audio):
     if check:
         raise SetupError("No existing codr configuration to check")
 
-    find_executable("systemctl")
+    if manager.backend == services.SYSTEMD:
+        find_executable("systemctl")
+    manager.require_tools()
     find_executable("git")
-    runner(["systemctl", "--user", "show-environment"])
     herdr_socket = Path(herdr_socket or os.environ.get("HERDR_SOCKET_PATH", home / ".config/herdr/herdr.sock")).resolve()
     snapshot = read_snapshot(herdr_socket)
     executables = {}
@@ -243,25 +259,14 @@ def _configure(owner, herdr_socket, runner, check, enable_audio):
     mdk_home = home / ".marmot-agents/herdr"
     mdk_socket = mdk_home / "dev/wn-agent.sock"
     state_path = Path(os.environ.get("XDG_STATE_HOME", home / ".local/state")) / "herdr-white-noise-bridge/state.json"
-    unit_root = config_root / "systemd/user"
-    transport = (ROOT / "systemd/wn-agent-herdr.service").read_text()
-    transport = transport.replace(next(line for line in transport.splitlines() if line.startswith("ExecStart=")),
-        "ExecStart=" + " ".join(unit_argument(arg) for arg in [mdk, "--home", mdk_home, "--socket", mdk_socket,
-            "--relay", "wss://relay.eu.whitenoise.chat", "--relay", "wss://relay.us.whitenoise.chat"]))
-    worker = (ROOT / "systemd/herdr-white-noise-bridge.service").read_text().replace(
-        "ExecStart=%h/.local/bin/herdr-white-noise-bridge run",
-        "ExecStart=" + " ".join(unit_argument(arg) for arg in [bridge, "--config", config_path, "run"]))
-    units = {"wn-agent-herdr.service": transport, "herdr-white-noise-bridge.service": worker}
-    for name, text in units.items():
-        target = unit_root / name
-        if target.exists() and target.read_text() != text:
-            raise SetupError(f"Existing service differs from the proposed configuration: {name}; nothing was overwritten")
-    for name, text in units.items():
-        if not (unit_root / name).exists():
-            private_write(unit_root / name, text)
+    manager.install(services.Service("wn-agent-herdr", "MDK transport for HERDR White Noise remote",
+        [mdk, "--home", mdk_home, "--socket", mdk_socket,
+         "--relay", "wss://relay.eu.whitenoise.chat", "--relay", "wss://relay.us.whitenoise.chat"]))
+    manager.install(services.Service("herdr-white-noise-bridge", "HERDR White Noise remote plugin worker",
+        [bridge, "--config", config_path, "run"], environment={"PATH": services.worker_path()}))
     mdk_home.mkdir(mode=0o700, parents=True, exist_ok=True)
-    runner(["systemctl", "--user", "daemon-reload"])
-    runner(["systemctl", "--user", "start", "wn-agent-herdr.service"])
+    manager.reload()
+    manager.start("wn-agent-herdr")
     accounts = local_accounts(mdk_socket)
     candidates = [account for account in accounts if account.get("local_signing") and account.get("label") == "herdr-bridge"]
     if len(candidates) > 1 or (accounts and not candidates):
@@ -284,8 +289,8 @@ def _configure(owner, herdr_socket, runner, check, enable_audio):
         runner([str(bridge), "--config", str(candidate), "status"])
     private_write(mdk_home / "codr-bootstrap.json", json.dumps(result, indent=2) + "\n")
     private_write(config_path, toml_text(values))
-    runner(["systemctl", "--user", "start", "herdr-white-noise-bridge.service"])
-    runner(["systemctl", "--user", "is-active", "wn-agent-herdr.service", "herdr-white-noise-bridge.service"])
+    manager.start("herdr-white-noise-bridge")
+    manager.is_active(["wn-agent-herdr", "herdr-white-noise-bridge"])
     return {"configuration": str(config_path), "bridge_npub": result["npub"], "herdr_socket": str(herdr_socket),
             "detected_sessions": len(snapshot["agents"]), "supported_agents": sorted(available),
             "phone_round_trip": "requires user confirmation"}

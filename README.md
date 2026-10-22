@@ -2,7 +2,7 @@
 
 **codr** connects coding agent sessions in [HERDR](https://github.com/herdrdev/herdr) to [White Noise](https://github.com/marmot-protocol/whitenoise-android), with one encrypted chat per session. It forwards prompts to the mapped agent and returns completed replies to the same chat.
 
-Supported agents: OpenCode, Codex, and Claude Code on Linux.
+Supported agents: OpenCode, Codex, and Claude Code on Linux and macOS.
 
 <img src="docs/screenshots/herdr-phone-progress.png" width="1280" alt="HERDR with the Garden planner task checklist beside matching working status and editable tasks in White Noise">
 
@@ -18,10 +18,10 @@ Supported agents: OpenCode, Codex, and Claude Code on Linux.
 
 ## Install
 
-Needs Linux x86_64 or aarch64, systemd user services, Python 3.11+, Git, and HERDR 0.9.1+. No Rust toolchain required.
+Needs Linux x86_64 or aarch64 or macOS on Apple silicon or Intel, a per-user service manager (systemd or launchd), Python 3.11+, Git, and HERDR 0.9.1+. No Rust toolchain required.
 
 ```sh
-herdr plugin install tidley/codr --ref v0.5.0
+herdr plugin install tidley/codr --ref v0.6.0
 herdr plugin action invoke local.white-noise.setup
 ```
 
