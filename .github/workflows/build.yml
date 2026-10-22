@@ -91,12 +91,20 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions/setup-python@v5
+        if: runner.os == 'macOS'
         with:
           python-version: '3.11'
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
           components: rustfmt, clippy
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
+        if: runner.os == 'Linux'
+      - name: Install portable Python for the Linux container
+        if: runner.os == 'Linux'
+        run: |
+          uv python install 3.11
+          dirname "$(uv python find --managed-python 3.11)" >> "$GITHUB_PATH"
       - name: Build and package
         env:
           TARGET: ${{ matrix.target }}
@@ -141,7 +149,7 @@ jobs:
         if: matrix.os == 'linux' && matrix.arch == 'x86_64'
         uses: taiki-e/install-action@b18fb392e1a1b90971f7c7572c92790fa54f23d5
         with:
-          tool: just,uv
+          tool: just
       - name: Check upstream workspace
         if: matrix.os == 'linux' && matrix.arch == 'x86_64'
         working-directory: mdk
