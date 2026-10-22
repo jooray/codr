@@ -22,7 +22,7 @@ pub struct Bridge {
     pub marmot: Socket,
     pub herdr_available: bool,
     phone: String,
-    media_job: Option<tokio::task::JoinHandle<Result<String>>>,
+    media_job: Option<tokio::task::JoinHandle<Result<crate::media::Prepared>>>,
     reads: crate::reads::Reads,
     last_snapshot: Vec<Agent>,
 }
@@ -308,7 +308,7 @@ impl Bridge {
                 continue;
             }
             if let Some(delivery) = &item.response {
-                if delivery.finished && delivery.target.is_none() {
+                if delivery.finished && delivery.target.is_none() && !delivery.durable {
                     self.state.outbox.retain(|m| m.id != item.id);
                     self.save()?;
                     continue;
@@ -394,7 +394,7 @@ impl Bridge {
                         self.save()?;
                     }
                     _ => {
-                        if delivery.finished {
+                        if delivery.finished && !delivery.durable {
                             // A failed terminal progress edit must not hold durable answers.
                             self.state.outbox.retain(|m| m.id != item.id);
                             self.save()?;
@@ -1037,15 +1037,21 @@ impl Bridge {
                     || (agent.agent_status == "blocked" && crate::media::audio(msg))
             })
         {
-            self.state.media_pending.push(event.clone());
-            self.state.enqueue(
-                group,
-                if crate::media::audio(msg) {
-                    "> transcribing"
-                } else {
-                    "> downloading"
-                },
-            );
+            let mut pending = event.clone();
+            if crate::media::audio(msg) && self.config.edit_responses {
+                pending["_codr_transcription_notice"] =
+                    json!(self.state.begin_transcription(group));
+            } else {
+                self.state.enqueue(
+                    group,
+                    if crate::media::audio(msg) {
+                        "> transcribing"
+                    } else {
+                        "> downloading"
+                    },
+                );
+            }
+            self.state.media_pending.push(pending);
             return self.save();
         }
         // Persist consumption before terminal input: uncertain prompts must not run twice.
@@ -1127,13 +1133,21 @@ impl Bridge {
                 }
             } else {
                 match result {
-                    Ok(Ok(text)) => {
+                    Ok(Ok(prepared)) => {
                         // Retain references and prepared text until inbound consumption.
-                        self.state.media_pending[0]["_codr_prepared_text"] = json!(text);
+                        self.state.media_pending[0]["_codr_prepared_text"] = json!(prepared.prompt);
+                        if let Some(transcript) = prepared.transcript {
+                            let event = self.state.media_pending[0].clone();
+                            self.finish_transcription_notice(
+                                &event,
+                                &crate::media::transcript_notice(&transcript),
+                            );
+                        }
                         self.save()?;
                     }
                     _ => {
                         let event = self.state.media_pending.remove(0);
+                        self.finish_transcription_notice(&event, "> transcription failed");
                         let group = event["group_id_hex"].as_str().unwrap_or("");
                         if let Some(mapping) = self
                             .state
@@ -1202,6 +1216,23 @@ impl Bridge {
             }));
         }
         routing_result
+    }
+
+    fn finish_transcription_notice(&mut self, event: &Value, text: &str) {
+        if !crate::media::audio(&event["message"]) {
+            return;
+        }
+        if let Some(id) = event["_codr_transcription_notice"].as_str() {
+            if let Some(item) = self.state.outbox.iter_mut().find(|item| item.id == id)
+                && let Some(delivery) = item.response.as_mut()
+            {
+                item.text = text.into();
+                delivery.finished = true;
+            }
+        } else {
+            self.state
+                .enqueue(event["group_id_hex"].as_str().unwrap_or(""), text);
+        }
     }
 
     fn announce_decision(

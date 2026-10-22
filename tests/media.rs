@@ -64,6 +64,8 @@ async fn downloaded_image_is_preserved_privately_and_forwarded_with_its_caption(
     )
     .await
     .unwrap();
+    assert!(text.transcript.is_none());
+    let text = text.prompt;
     assert!(text.starts_with("Inspect this layout.\n\nAttached image: "));
     let path: String =
         serde_json::from_str(text.split_once("Attached image: ").unwrap().1).unwrap();
@@ -91,12 +93,25 @@ async fn audio_becomes_the_prompt_text_without_a_confirmation_round_trip() {
             path: config.wn_agent_socket.clone(),
         },
         "bb",
-        &json!({"text":"", "media":[reference("audio/ogg")]}),
+        &json!({"text":"Caption", "media":[reference("audio/ogg")]}),
     )
     .await
     .unwrap();
-    assert_eq!(text, "Use the blue button.");
+    assert_eq!(text.prompt, "Caption\n\nUse the blue button.");
+    assert_eq!(text.transcript.as_deref(), Some("Use the blue button."));
     server.await.unwrap();
+}
+
+#[test]
+fn transcript_notices_quote_every_line_and_bound_long_unicode_text() {
+    assert_eq!(
+        media::transcript_notice("First line\n\nSecond line"),
+        "> transcribed\n\n> First line\n> \n> Second line"
+    );
+    let text = "😀\n".repeat(5000);
+    let notice = media::transcript_notice(&text);
+    assert!(notice.len() <= 30000);
+    assert!(notice.ends_with("Transcript shortened for display."));
 }
 
 #[tokio::test]

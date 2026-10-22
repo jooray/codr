@@ -45,6 +45,10 @@ async fn timeline_summaries_are_resolved_to_complete_refs_before_download() {
     });
     let prompt = media::prepare(&config, &Socket{path}, "bb", &json!({"message_id_hex":"one","text":"Look at this.",
         "sender":{"account_id_hex":"11".repeat(32)},"media":[{"media_type":"image/png","file_name":"test.png"}]})).await.unwrap();
-    assert!(prompt.starts_with("Look at this.\n\nAttached image:"));
+    assert!(
+        prompt
+            .prompt
+            .starts_with("Look at this.\n\nAttached image:")
+    );
     server.await.unwrap();
 }

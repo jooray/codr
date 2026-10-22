@@ -3064,9 +3064,105 @@ async fn prepared_audio_survives_a_herdr_outage_and_restart() {
 }
 
 #[tokio::test]
+async fn a_transcript_notice_survives_lost_send_and_edit_responses_across_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let listener = UnixListener::bind(&config.wn_agent_socket).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let captured = calls.clone();
+    let server = tokio::spawn(async move {
+        for attempt in 0..4 {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = tokio::io::BufReader::new(stream);
+            let request = read_line(&mut reader).await.unwrap();
+            captured.lock().unwrap().push(request.clone());
+            if attempt == 0 || attempt == 2 {
+                continue; // The send/edit may have succeeded, but its reply was lost.
+            }
+            let response = json!({"marmot_agent_control":"marmot.agent-control.v2","id":request["id"],"type":"final_sent","message_ids_hex":["cc".repeat(32)]});
+            reader
+                .get_mut()
+                .write_all((response.to_string() + "\n").as_bytes())
+                .await
+                .unwrap();
+        }
+    });
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    let id = bridge.state.begin_transcription("bb").unwrap();
+    assert!(bridge.flush().await.is_err());
+    let item = bridge
+        .state
+        .outbox
+        .iter_mut()
+        .find(|item| item.id == id)
+        .unwrap();
+    item.text = "> transcribed\n\n> A spoken request.".into();
+    item.response.as_mut().unwrap().finished = true;
+    item.response.as_mut().unwrap().last_attempt_at = 0;
+    bridge.save().unwrap();
+    drop(bridge);
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge.flush().await.unwrap();
+    let delivery = bridge.state.outbox[0].response.as_mut().unwrap();
+    assert_eq!(delivery.target.as_deref(), Some("cc".repeat(32).as_str()));
+    delivery.last_attempt_at = 0;
+    assert!(bridge.flush().await.is_err());
+    assert_eq!(bridge.state.outbox.len(), 1);
+    bridge.state.outbox[0]
+        .response
+        .as_mut()
+        .unwrap()
+        .last_attempt_at = 0;
+    bridge.save().unwrap();
+    drop(bridge);
+    let mut bridge = Bridge::open(config).unwrap();
+    bridge.flush().await.unwrap();
+    assert!(bridge.state.outbox.is_empty());
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 4);
+    assert_eq!(calls[0]["type"], "send_final");
+    assert_eq!(calls[1]["type"], "send_final");
+    assert_eq!(calls[0]["idempotency_key"], calls[1]["idempotency_key"]);
+    assert_eq!(calls[0]["text"], "> transcribing");
+    assert_eq!(calls[1]["text"], "> transcribing");
+    for call in &calls[2..] {
+        assert_eq!(call["type"], "edit_message");
+        assert_eq!(call["target_message_id_hex"], "cc".repeat(32));
+        assert_eq!(call["text"], "> transcribed\n\n> A spoken request.");
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_transcript_ready_before_its_first_send_uses_one_completed_bubble() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let calls = Arc::new(Mutex::new(vec![]));
+    let server = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let mut bridge = Bridge::open(config).unwrap();
+    let id = bridge.state.begin_transcription("bb").unwrap();
+    let item = bridge
+        .state
+        .outbox
+        .iter_mut()
+        .find(|item| item.id == id)
+        .unwrap();
+    item.text = "> transcribed\n\n> Already prepared.".into();
+    item.response.as_mut().unwrap().finished = true;
+    bridge.flush().await.unwrap();
+    assert!(bridge.state.outbox.is_empty());
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["type"], "send_final");
+    assert_eq!(calls[0]["text"], "> transcribed\n\n> Already prepared.");
+    server.abort();
+}
+
+#[tokio::test]
 async fn audio_queue_survives_restart_and_submits_the_transcript_once_without_confirmation() {
     let root = tempfile::tempdir().unwrap();
     let mut config = config(root.path());
+    config.edit_responses = true;
     export_script(&config.opencode_bin, "Historical answer", "old");
     let command = root.path().join("transcribe");
     std::fs::write(
@@ -3102,8 +3198,9 @@ async fn audio_queue_survives_restart_and_submits_the_transcript_once_without_co
             .seen_messages
             .contains(&"audio-one".into())
     );
+    bridge.flush().await.unwrap();
     drop(bridge);
-    let mut bridge = Bridge::open(config).unwrap();
+    let mut bridge = Bridge::open(config.clone()).unwrap();
     bridge.reconcile(vec![agent()]).await.unwrap();
     for _ in 0..2 {
         for _ in 0..100 {
@@ -3162,6 +3259,16 @@ async fn audio_queue_survives_restart_and_submits_the_transcript_once_without_co
             .contains(&"audio-one".into())
     );
     bridge.inbound(&event).await.unwrap();
+    // The original bubble target and completed transcript edit survive restart.
+    for item in &mut bridge.state.outbox {
+        if let Some(delivery) = &mut item.response {
+            delivery.last_attempt_at = 0;
+        }
+    }
+    bridge.save().unwrap();
+    drop(bridge);
+    let mut bridge = Bridge::open(config).unwrap();
+    bridge.flush().await.unwrap();
     let requests = calls.lock().unwrap();
     let prompts: Vec<_> = requests
         .iter()
@@ -3169,6 +3276,28 @@ async fn audio_queue_survives_restart_and_submits_the_transcript_once_without_co
         .collect();
     assert_eq!(prompts.len(), 1);
     assert_eq!(prompts[0]["params"]["text"], "Inspect the blue button.");
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|call| call["type"] == "send_final" && call["text"] == "> transcribing")
+            .count(),
+        1
+    );
+    let edits: Vec<_> = requests
+        .iter()
+        .filter(|call| {
+            call["type"] == "edit_message"
+                && call["text"]
+                    .as_str()
+                    .is_some_and(|text| text.starts_with("> transcribed"))
+        })
+        .collect();
+    assert_eq!(edits.len(), 1);
+    assert_eq!(
+        edits[0]["text"],
+        "> transcribed\n\n> Inspect the blue button."
+    );
+    assert_eq!(edits[0]["target_message_id_hex"], "cc".repeat(32));
     assert_eq!(
         requests
             .iter()

@@ -14,6 +14,7 @@ The [agent section](#instructions-for-coding-agents) provides the non-interactiv
 
 - Linux x86_64 or aarch64.
 - Python 3.11 or newer and Git.
+- FFmpeg for voice prompts. Use `--no-audio` for a text/image-only installation.
 - A working systemd user manager under the account that runs HERDR.
 - HERDR 0.9.1 or newer, with a running local server.
 - A working, authenticated OpenCode, Codex, or Claude Code installation.
@@ -30,7 +31,7 @@ The phone account must publish a compatible Marmot KeyPackage before the bridge 
 Run these commands as your normal user, not root:
 
 ```bash
-herdr plugin install tidley/codr --ref v0.4.0
+herdr plugin install tidley/codr --ref v0.5.0
 herdr plugin action invoke local.white-noise.setup
 ```
 
@@ -77,7 +78,7 @@ HERDR refuses a GitHub install over a locally linked copy of the same plugin. To
 ```bash
 herdr plugin list
 herdr plugin unlink local.white-noise
-herdr plugin install tidley/codr --ref v0.4.0
+herdr plugin install tidley/codr --ref v0.5.0
 ```
 
 Unlinking leaves the local checkout and account state in place. Do not delete the MDK home or reset the bridge to perform an upgrade.
@@ -111,7 +112,7 @@ journalctl --user -u wn-agent-herdr.service -u herdr-white-noise-bridge.service 
 
 Configuration lives under `${XDG_CONFIG_HOME:-~/.config}/herdr-white-noise-bridge/config.toml`. The worker unit specifies that path explicitly. State uses `${XDG_STATE_HOME:-~/.local/state}/herdr-white-noise-bridge/state.json`.
 
-Current source builds support `opencode_db` for incremental, read-only OpenCode database reads. Select the database for the mapped sessions explicitly. See [reader configuration](REFERENCE.md#incremental-opencode-database-reads). The v0.4.0 binary does not support this setting.
+Set `opencode_db` to select incremental, read-only OpenCode database reads. Select the database for the mapped sessions explicitly. See [reader configuration](REFERENCE.md#incremental-opencode-database-reads).
 
 For Codex profiles, `codex_home` selects the directory containing `sessions` and `archived_sessions`. It defaults to `CODEX_HOME` or `~/.codex`. For Claude Code, `claude_home` selects the directory containing `projects`; it defaults to `CLAUDE_CONFIG_DIR` or `~/.claude`. Use absolute paths. Setup saves the installing shell's roots for new configurations, and preserves existing configurations during upgrades.
 
@@ -139,7 +140,7 @@ Before changing the host:
 Set `OWNER_NPUB` to the public key supplied by the user. Export the selected `HERDR_SOCKET_PATH` before running HERDR commands.
 
 ```bash
-herdr plugin install tidley/codr --ref v0.4.0 --yes
+herdr plugin install tidley/codr --ref v0.5.0 --yes
 PLUGIN_ROOT="$(herdr plugin list --plugin local.white-noise --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["plugins"][0]["plugin_root"])')"
 python3 "$PLUGIN_ROOT/scripts/setup.py" --npub "$OWNER_NPUB" --herdr-socket "$HERDR_SOCKET_PATH"
 ```
@@ -164,7 +165,7 @@ If a prerequisite or release asset is unavailable, report that blocker precisely
 
 ## Build from source
 
-This path requires Rust and Cargo. Use the target host's build/storage policy. Current source adds `[cd] session` chat names, image downloads, and local Phonon-2 transcription. Audio setup needs FFmpeg and downloads the CPU runtime plus the approximately 164 MB model. Its service is capped at 1 GiB RAM.
+This path requires Rust and Cargo. Use the target host's build/storage policy. Audio setup needs FFmpeg and downloads the CPU runtime plus the approximately 164 MB model. Its service is capped at 1 GiB RAM.
 
 ```bash
 git clone https://github.com/tidley/codr.git

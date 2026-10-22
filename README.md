@@ -4,8 +4,6 @@
 
 Supported agents: OpenCode, Codex, and Claude Code on Linux.
 
-*Source builds add `[cd]` names, `> status` notices, images, local voice prompts, and incremental OpenCode reads. These changes postdate v0.4.0.*
-
 <img src="docs/screenshots/herdr-phone-progress.png" width="1280" alt="HERDR with the Garden planner task checklist beside matching working status and editable tasks in White Noise">
 
 *Real interfaces, encrypted messages, and local speech-to-text. Fictional participants and scripted agent replies. Editable checklists need an edit-capable MDK build. [Capture details](docs/REFERENCE.md#screenshot-provenance).*
@@ -23,7 +21,7 @@ Supported agents: OpenCode, Codex, and Claude Code on Linux.
 Needs Linux x86_64 or aarch64, systemd user services, Python 3.11+, Git, and HERDR 0.9.1+. No Rust toolchain required.
 
 ```sh
-herdr plugin install tidley/codr --ref v0.4.0
+herdr plugin install tidley/codr --ref v0.5.0
 herdr plugin action invoke local.white-noise.setup
 ```
 
@@ -92,6 +90,6 @@ Alex invited Sam to the Garden planner chat. Sam can discuss the project, but on
 
 ---
 
-[Operating reference](docs/REFERENCE.md) · [Roadmap](docs/REFERENCE.md#roadmap) · [Releases](https://github.com/tidley/codr/releases)
+[Operating reference](docs/REFERENCE.md) · [Changelog](CHANGELOG.md) · [Roadmap](docs/REFERENCE.md#roadmap) · [Releases](https://github.com/tidley/codr/releases)
 
 Built on [HERDR](https://github.com/herdrdev/herdr), [White Noise](https://github.com/marmot-protocol/whitenoise-android), [MDK](https://github.com/marmot-protocol/mdk), and the [Marmot protocol](https://github.com/marmot-protocol/marmot). [Full credits](docs/REFERENCE.md#acknowledgements).

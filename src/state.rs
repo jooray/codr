@@ -55,6 +55,9 @@ pub struct ResponseDelivery {
     pub sent_text: Option<String>,
     pub last_attempt_at: u64,
     pub finished: bool,
+    /// Keep completed notices until delivery succeeds, unlike best-effort progress.
+    #[serde(default)]
+    pub durable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -173,6 +176,23 @@ impl BridgeState {
             response: Some(ResponseDelivery::default()),
         });
         self.mappings.get_mut(key).unwrap().response_id = Some(id);
+    }
+
+    pub fn begin_transcription(&mut self, group: &str) -> Option<String> {
+        if !self.forwarding_enabled {
+            return None;
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        self.outbox.push(Outgoing {
+            id: id.clone(),
+            group: group.into(),
+            text: "> transcribing".into(),
+            response: Some(ResponseDelivery {
+                durable: true,
+                ..ResponseDelivery::default()
+            }),
+        });
+        Some(id)
     }
 
     pub fn update_response(&mut self, key: &str, group: &str, text: &str, finished: bool) {

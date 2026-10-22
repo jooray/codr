@@ -46,12 +46,37 @@ pub fn audio(message: &Value) -> bool {
     })
 }
 
+#[derive(Debug)]
+pub struct Prepared {
+    pub prompt: String,
+    pub transcript: Option<String>,
+}
+
+pub fn transcript_notice(text: &str) -> String {
+    let quote = text
+        .lines()
+        .map(|line| format!("> {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut notice = format!("> transcribed\n\n{quote}");
+    const SUFFIX: &str = "\n\n> … Transcript shortened for display.";
+    if notice.len() > 30000 {
+        let mut end = 30000 - SUFFIX.len();
+        while !notice.is_char_boundary(end) {
+            end -= 1;
+        }
+        notice.truncate(end);
+        notice.push_str(SUFFIX);
+    }
+    notice
+}
+
 pub async fn prepare(
     config: &BridgeConfig,
     socket: &Socket,
     group: &str,
     message: &Value,
-) -> Result<String> {
+) -> Result<Prepared> {
     let mut attachments = message["media"]
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("Missing media"))?
@@ -61,6 +86,7 @@ pub async fn prepare(
         "Send at most four attachments"
     );
     let mut parts = Vec::new();
+    let mut transcripts = Vec::new();
     let caption = message["text"].as_str().unwrap_or("").trim();
     if !caption.is_empty() {
         parts.push(caption.to_owned());
@@ -207,6 +233,7 @@ pub async fn prepare(
                 Ok::<_, anyhow::Error>(text.trim().to_owned())
             })
             .await??;
+            transcripts.push(text.clone());
             parts.push(text);
         }
     }
@@ -215,5 +242,8 @@ pub async fn prepare(
         !text.is_empty() && text.len() <= 30000,
         "Media prompt is empty or too large"
     );
-    Ok(text)
+    Ok(Prepared {
+        prompt: text,
+        transcript: (!transcripts.is_empty()).then(|| transcripts.join("\n\n")),
+    })
 }

@@ -113,11 +113,13 @@ The gallery uses an owner-created group, bound to an isolated demo session. Alex
 
 ## Images and voice messages
 
-These features require the current source build. The published v0.4.0 binary predates them.
+Images and audio are available in **codr** 0.5.0. Voice prompts require the local transcription worker described below.
 
 **codr** asks MDK's `download_media` API to fetch and decrypt each attachment. Keys stay in MDK. PNG, JPEG, WebP, and GIF images are copied into a private `media` directory beside bridge state. The prompt includes the local file paths and the original caption. The agent needs its normal local-file access to inspect them. Files remain there for later conversation access until you remove them.
 
-Audio goes through FFmpeg to 16 kHz mono WAV, then to a local Phonon-2 worker. Its transcript enters the same prompt route as typed text. There is no confirmation step or transcript echo. Supported question answers also use that route. The phone sees `> downloading` or `> transcribing` while preparation runs. Download and local transcription add time before the agent starts.
+Audio goes through FFmpeg to 16 kHz mono WAV, then to a local Phonon-2 worker. Its transcript enters the same prompt route as typed text, without a confirmation step. Supported question answers also use that route. Download and local transcription add time before the agent starts.
+
+The phone sees `> transcribing` while audio processing runs. With `edit_responses = true` and an edit-capable MDK build, **codr** edits that bubble to `> transcribed` with the transcript quoted underneath. The edit survives restarts and retries independently of agent submission. Without edit support, the transcript arrives as a separate message. Images use `> downloading`. Long transcript displays are shortened with a notice; the agent receives the full prepared prompt.
 
 Downloads and transcription run separately from session updates, one media message at a time. Pending messages survive bridge restarts. Sender checks and session checks still apply. A preparation failure sends no agent prompt. An uncertain terminal submission is not repeated automatically.
 
@@ -127,11 +129,11 @@ Limits are four attachments per message, 25 MiB per file, and five minutes per a
 
 ### Local speech worker
 
-Source setup installs `fermion-research` 0.2.12 with CPU-only PyTorch and downloads Phonon-2, approximately 164 MB plus runtime dependencies. FFmpeg is required. The worker uses an owner-only Unix socket under `$XDG_RUNTIME_DIR/codr-phonon` and processes recordings locally.
+Setup installs `fermion-research` 0.2.12 with CPU-only PyTorch and downloads Phonon-2, approximately 164 MB plus runtime dependencies. FFmpeg is required. The worker uses an owner-only Unix socket under `$XDG_RUNTIME_DIR/codr-phonon` and processes recordings locally.
 
 `codr-phonon.service` has a 1 GiB memory limit and no swap allowance. The bridge starts it as a dependency. A healthy existing **codr** worker is reused. If the worker cannot start within the limit, setup reports failure rather than raising the limit.
 
-Fresh source setup includes audio by default. Use `--no-audio` for a text/image-only installation. To add Phonon to an existing source installation:
+Fresh setup includes audio by default. Use `--no-audio` for a text/image-only installation. To add Phonon to an existing installation:
 
 ```sh
 python3 scripts/setup.py --phonon
@@ -209,7 +211,7 @@ Use the [installation guide](INSTALL.md) for complete commands, including the pi
 Install a pinned release through HERDR, then open its guided setup tab:
 
 ```sh
-herdr plugin install tidley/codr --ref v0.4.0
+herdr plugin install tidley/codr --ref v0.5.0
 herdr plugin action invoke local.white-noise.setup
 ```
 
