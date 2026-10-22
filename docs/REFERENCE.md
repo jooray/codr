@@ -9,7 +9,7 @@ The bridge uses one dedicated MDK identity across all mapped groups. Setup keeps
 ## Behaviour
 
 - New sessions create groups and invite the configured phone `npub`.
-- Group names use the HERDR tab label: `[cd] <tab name>`, for example `[cd] review`. Workspace and agent details appear in the group description. Repository names and agent-generated conversation topics do not determine the chat name.
+- Group names pair the HERDR tab label and workspace: `[cd] <tab name> (<workspace>)`, for example `[cd] review (Acme)`. A workspace without a label leaves `[cd] <tab name>`. Workspace and agent details also appear in the group description. Repository names and agent-generated conversation topics do not determine the chat name.
 - A phone message prompts only the agent mapped to that group.
 - Final replies come from completed stored agent messages. They exclude reasoning and tool output.
 - Working, idle, blocked, and ended notices appear in the group. Blocked notices can include a labelled terminal excerpt. Unsupported OpenCode blockers use a short notice. Separate `done` notices are suppressed; the final reply signals completion.
@@ -291,7 +291,7 @@ To update existing group names without changing their session mappings, stop the
 
 Then start the worker again. This refreshes names and descriptions without changing group IDs. Ended sessions without a stored tab label use their existing title, replacing earlier **codr** prefixes or suffixes. Unavailable historical workspace details appear as `unknown`.
 
-Tab renames do not automatically rewrite White Noise titles; run `rename-groups` to apply them. Sessions in tabs with identical labels can share a display name, while their routing remains separate.
+Tab renames do not automatically rewrite White Noise titles; run `rename-groups` to apply them. Sessions in tabs with identical labels and workspaces can share a display name, while their routing remains separate.
 
 ### Completion notice
 

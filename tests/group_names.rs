@@ -20,6 +20,53 @@ fn group_name_uses_the_herdr_tab_label_instead_of_repository_or_topic() {
 }
 
 #[test]
+fn group_name_appends_the_workspace_label() {
+    let agent: Agent = serde_json::from_value(json!({
+        "pane_id":"w1:p1", "terminal_id":"term1", "agent":"opencode", "agent_status":"idle",
+        "tab_id":"w1:t1", "tab_label":"review", "workspace_id":"w1", "workspace_label":"Acme"
+    }))
+    .unwrap();
+    assert_eq!(agent.group_name(), "[cd] review (Acme)");
+}
+
+#[test]
+fn empty_workspace_labels_leave_the_name_unchanged() {
+    for workspace in [json!(null), json!(""), json!("   \n\t")] {
+        let agent: Agent = serde_json::from_value(json!({
+            "pane_id":"w1:p1", "terminal_id":"term1", "agent":"opencode", "agent_status":"idle",
+            "tab_id":"w1:t1", "tab_label":"review", "workspace_label": workspace
+        }))
+        .unwrap();
+        assert_eq!(agent.group_name(), "[cd] review");
+    }
+}
+
+#[test]
+fn a_long_workspace_is_shortened_before_the_tab_label() {
+    let agent: Agent = serde_json::from_value(json!({
+        "pane_id":"w1:p1", "terminal_id":"term1", "agent":"opencode", "agent_status":"idle",
+        "tab_id":"w1:t1", "tab_label":"review", "workspace_label": "W".repeat(400)
+    }))
+    .unwrap();
+    let name = agent.group_name();
+    assert!(name.starts_with("[cd] review ("));
+    assert!(name.ends_with(')'));
+    assert!(name.len() <= 256);
+}
+
+#[test]
+fn workspace_control_characters_are_removed() {
+    let agent: Agent = serde_json::from_value(json!({
+        "pane_id":"w1:p1", "terminal_id":"term1", "agent":"opencode", "agent_status":"idle",
+        "tab_id":"w1:t1", "tab_label":"review\n", "workspace_label": "Acme\tTeam"
+    }))
+    .unwrap();
+    let name = agent.group_name();
+    assert_eq!(name, "[cd] review (AcmeTeam)");
+    assert!(!name.chars().any(char::is_control));
+}
+
+#[test]
 fn old_agent_records_without_labels_fall_back_to_the_tab_id() {
     let agent: Agent = serde_json::from_value(json!({
         "pane_id":"w1:p1", "terminal_id":"term1", "agent":"opencode", "agent_status":"idle",
@@ -61,7 +108,7 @@ async fn snapshot_joins_each_agent_with_its_own_tab_label() {
         reader.get_mut().write_all(&bytes).await.unwrap();
     });
     let agents = herdr::snapshot(&Socket { path }).await.unwrap();
-    assert_eq!(agents[0].group_name(), "[cd] Build");
+    assert_eq!(agents[0].group_name(), "[cd] Build (Workbench)");
     assert!(
         agents[0]
             .group_description()

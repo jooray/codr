@@ -10,7 +10,7 @@ Supported agents: OpenCode, Codex, and Claude Code on Linux.
 
 ## Behaviour
 
-- Chat names follow HERDR tab labels: `[cd] review`. Descriptions contain workspace and agent details.
+- Chat names pair the HERDR tab and workspace: `[cd] review (Acme)`. Descriptions contain workspace and agent details.
 - Status notices, optional editable checklists, and final replies appear as separate messages.
 - Supported OpenCode questions accept a number or option label as a reply.
 - A group admin can invite other participants. Only the configured owner account can prompt the agent. [Group setup](docs/REFERENCE.md#shared-chats-and-owner-only-control)
