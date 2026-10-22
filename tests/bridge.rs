@@ -3320,6 +3320,7 @@ async fn group_profile_peer(
     path: &std::path::Path,
     profile: Arc<Mutex<GroupProfile>>,
     calls: Arc<Mutex<Vec<Value>>>,
+    state_path: std::path::PathBuf,
 ) -> tokio::task::JoinHandle<()> {
     let listener = UnixListener::bind(path).unwrap();
     tokio::spawn(async move {
@@ -3334,6 +3335,14 @@ async fn group_profile_peer(
                     json!({"type":"group_info","subject":profile.subject,"description":profile.description})
                 }
                 "group_profile_update" => {
+                    let saved: BridgeState =
+                        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+                    assert!(
+                        saved
+                            .mappings
+                            .values()
+                            .any(|mapping| mapping.rename_uncertain)
+                    );
                     let mut profile = profile.lock().unwrap();
                     if profile.reject_updates {
                         json!({"type":"error","error":"uncertain"})
@@ -3386,7 +3395,13 @@ async fn a_tab_rename_updates_the_group_once() {
         reject_updates: false,
     }));
     let calls = Arc::new(Mutex::new(vec![]));
-    let mdk = group_profile_peer(&config.wn_agent_socket, profile, calls.clone()).await;
+    let mdk = group_profile_peer(
+        &config.wn_agent_socket,
+        profile,
+        calls.clone(),
+        config.state_path.clone(),
+    )
+    .await;
     let mut bridge = mapped_bridge(config, &observed);
     let mut renamed = observed.clone();
     renamed.tab_label = Some("Renamed".into());
@@ -3420,7 +3435,13 @@ async fn a_group_renamed_by_the_user_is_not_overwritten() {
         reject_updates: false,
     }));
     let calls = Arc::new(Mutex::new(vec![]));
-    let mdk = group_profile_peer(&config.wn_agent_socket, profile, calls.clone()).await;
+    let mdk = group_profile_peer(
+        &config.wn_agent_socket,
+        profile,
+        calls.clone(),
+        config.state_path.clone(),
+    )
+    .await;
     let mut bridge = mapped_bridge(config, &observed);
     let mut renamed = observed.clone();
     renamed.tab_label = Some("Renamed".into());
@@ -3448,11 +3469,19 @@ async fn an_unconfirmed_profile_update_is_not_retried() {
         reject_updates: true,
     }));
     let calls = Arc::new(Mutex::new(vec![]));
-    let mdk = group_profile_peer(&config.wn_agent_socket, profile, calls.clone()).await;
-    let mut bridge = mapped_bridge(config, &observed);
+    let mdk = group_profile_peer(
+        &config.wn_agent_socket,
+        profile,
+        calls.clone(),
+        config.state_path.clone(),
+    )
+    .await;
+    let mut bridge = mapped_bridge(config.clone(), &observed);
     let mut renamed = observed.clone();
     renamed.tab_label = Some("Renamed".into());
     bridge.reconcile(vec![renamed.clone()]).await.unwrap();
+    drop(bridge);
+    let mut bridge = Bridge::open(config).unwrap();
     bridge.reconcile(vec![renamed]).await.unwrap();
     assert_eq!(
         calls

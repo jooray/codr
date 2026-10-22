@@ -1488,6 +1488,8 @@ impl Bridge {
                 continue;
             }
             // Profile updates have no idempotency key. Never retry an uncertain mutation.
+            self.state.mappings.get_mut(&key).unwrap().rename_uncertain = true;
+            self.save()?;
             let result = self.marmot.marmot(json!({"type":"group_profile_update","account_id_hex":self.config.account_id_hex,"group_id_hex":group,"name":name,"description":description})).await?;
             ensure!(
                 result["type"] == "group_profile_updated"
@@ -1563,6 +1565,11 @@ impl Bridge {
             let _ = self.save();
             return;
         }
+        self.state.mappings.get_mut(key).unwrap().rename_uncertain = true;
+        if self.save().is_err() {
+            eprintln!("Group rename intent could not be saved; no update was submitted.");
+            return;
+        }
         let update = self
             .marmot
             .marmot(json!({
@@ -1606,6 +1613,10 @@ impl Bridge {
             }
             Err(error) => {
                 if error.downcast_ref::<crate::wire::NotSubmitted>().is_some() {
+                    self.state.mappings.get_mut(key).unwrap().rename_uncertain = false;
+                    if self.save().is_err() {
+                        self.state.mappings.get_mut(key).unwrap().rename_uncertain = true;
+                    }
                     return;
                 }
                 let mapping = self.state.mappings.get_mut(key).unwrap();
