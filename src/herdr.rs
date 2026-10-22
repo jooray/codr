@@ -69,7 +69,7 @@ impl Agent {
             .as_deref()
             .filter(|label| !label.trim().is_empty())
             .unwrap_or(fallback);
-        group_name(raw)
+        group_name_with_workspace(raw, self.workspace_label.as_deref())
     }
 
     pub fn group_description(&self) -> String {
@@ -102,16 +102,43 @@ impl Agent {
 }
 
 pub fn group_name(label: &str) -> String {
-    const PREFIX: &str = "[cd] ";
-    let mut label: String = label.chars().filter(|c| !c.is_control()).collect();
-    label = label.trim().to_owned();
+    group_name_with_workspace(label, None)
+}
+
+/// `[cd] <tab> (<workspace>)`, trimmed to MDK's 256-byte title limit.
+fn group_name_with_workspace(label: &str, workspace: Option<&str>) -> String {
+    const LIMIT: usize = 256;
+    let clean = |text: &str| -> String { text.chars().filter(|c| !c.is_control()).collect() };
+    let mut label = clean(label).trim().to_owned();
     if label.is_empty() {
         label = "session".into();
     }
-    while label.len() + PREFIX.len() > 256 {
-        label.pop();
+    let mut workspace = workspace
+        .map(|value| clean(value).trim().to_owned())
+        .filter(|value| !value.is_empty());
+    let mut name = group_title(&label, workspace.as_deref());
+    // Keep the tab label primary: shorten the workspace before the tab.
+    while name.len() > LIMIT {
+        if let Some(value) = workspace.as_mut().filter(|value| !value.is_empty()) {
+            value.pop();
+            *value = value.trim_end().to_owned();
+            name = group_title(&label, Some(value.as_str()));
+        } else if !label.is_empty() {
+            label.pop();
+            name = group_title(&label, None);
+        } else {
+            break;
+        }
     }
-    format!("{PREFIX}{}", label.trim_end())
+    name
+}
+
+fn group_title(label: &str, workspace: Option<&str>) -> String {
+    const PREFIX: &str = "[cd] ";
+    match workspace.filter(|value| !value.is_empty()) {
+        Some(workspace) => format!("{PREFIX}{label} ({workspace})"),
+        None => format!("{PREFIX}{}", label.trim_end()),
+    }
 }
 
 pub async fn snapshot(socket: &Socket) -> Result<Vec<Agent>> {

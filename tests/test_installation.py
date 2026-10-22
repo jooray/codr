@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import plistlib
 import sys
 import tarfile
 import tempfile
@@ -13,6 +14,7 @@ from unittest.mock import patch
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 import install as installer
+import services
 
 spec = importlib.util.spec_from_file_location("codr_setup", SCRIPTS / "setup.py")
 setup = importlib.util.module_from_spec(spec)
@@ -20,11 +22,26 @@ spec.loader.exec_module(setup)
 
 
 class InstallerTests(unittest.TestCase):
+    def test_release_installs_its_dedicated_connector_before_the_bridge(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.dict(os.environ, {"HOME": temporary}), patch.object(installer, "version", return_value="0.6.0"), patch.object(installer, "platform_name", return_value="linux-x86_64"), patch.object(installer, "install_bundle") as install:
+                self.assertEqual(installer.main(), 0)
+            self.assertEqual(len(install.call_args_list), 2)
+            connector, bridge = [call.args for call in install.call_args_list]
+            self.assertIn("codr-wn-agent-v0.6.0-linux-x86_64.tar.gz", connector[0])
+            self.assertEqual(connector[1], "wn-agent")
+            self.assertEqual(connector[2], Path(temporary) / ".local/share/codr/bin/wn-agent-codr-v0.6.0")
+            self.assertIn("codr-v0.6.0-linux-x86_64.tar.gz", bridge[0])
+            self.assertEqual(bridge[1], "herdr-white-noise-bridge")
+
     def test_supported_architectures_and_rejection(self):
         self.assertEqual(installer.platform_name("Linux", "x86_64"), "linux-x86_64")
         self.assertEqual(installer.platform_name("Linux", "arm64"), "linux-aarch64")
+        self.assertEqual(installer.platform_name("Darwin", "arm64"), "macos-aarch64")
+        self.assertEqual(installer.platform_name("Darwin", "x86_64"), "macos-x86_64")
+        self.assertEqual(installer.mdk_platform_name("Darwin", "arm64"), "darwin-aarch64")
         with self.assertRaises(installer.InstallError):
-            installer.platform_name("Darwin", "arm64")
+            installer.platform_name("Windows", "x86_64")
 
     def test_downloaded_archive_is_checked_before_installation(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -72,11 +89,19 @@ class InstallerTests(unittest.TestCase):
             self.assertFalse((root / "installed").exists())
 
 
+class ManifestTests(unittest.TestCase):
+    def test_manifest_declares_both_host_platforms(self):
+        manifest = setup.tomllib.loads((SCRIPTS.parent / "herdr-plugin.toml").read_text())
+        self.assertIn("linux", manifest["platforms"])
+        self.assertIn("macos", manifest["platforms"])
+        self.assertEqual(manifest["version"], setup.tomllib.loads((SCRIPTS.parent / "Cargo.toml").read_text())["package"]["version"])
+
+
 class SetupTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.home = Path(self.temporary.name)
-        self.environment = patch.dict(os.environ, {"HOME": str(self.home), "XDG_CONFIG_HOME": str(self.home / "config space %"), "XDG_STATE_HOME": str(self.home / "state"), "CODR_OWNER_NPUB": ""}, clear=True)
+        self.environment = patch.dict(os.environ, {"HOME": str(self.home), "XDG_CONFIG_HOME": str(self.home / "config space %"), "XDG_STATE_HOME": str(self.home / "state"), "CODR_OWNER_NPUB": "", "CODR_SERVICE_MANAGER": "systemd"}, clear=True)
         self.environment.start()
         self.addCleanup(self.environment.stop)
         self.addCleanup(self.temporary.cleanup)
@@ -94,7 +119,7 @@ class SetupTests(unittest.TestCase):
             self.bootstrap_count += 1
             return json.dumps({"account_id_hex": "ab" * 32, "npub": "npub1bridge", "label": "herdr-bridge", "key_package_published": True})
         if "--version" in argv:
-            return "fixture version"
+            return f"wn-agent {setup.MDK_VERSION}"
         return ""
 
     def mocks(self):
@@ -105,6 +130,163 @@ class SetupTests(unittest.TestCase):
             local_accounts=lambda path: [],
             configure_phonon=lambda *args: ["/usr/bin/python3", "/example/transcribe.py", "--socket", "/example/phonon.sock"])
 
+    def test_connector_selection_uses_the_release_owned_path_not_a_shared_executable(self):
+        dedicated = installer.connector_path(installer.version())
+        def install(release):
+            self.assertEqual(release, installer.version())
+            dedicated.parent.mkdir(parents=True, exist_ok=True)
+            dedicated.write_text("fixture")
+        with patch.object(setup, "install_connector", side_effect=install) as download:
+            self.assertEqual(setup.ensure_mdk(lambda argv: "wn-agent 0.13.0"), dedicated)
+            self.assertEqual(setup.ensure_mdk(lambda argv: "wn-agent 0.13.0"), dedicated)
+            self.assertEqual(download.call_count, 1)
+
+    def test_managed_transport_upgrade_changes_only_the_executable(self):
+        with self.mocks():
+            setup.configure("npub1fixture", self.socket, self.runner)
+        existing = setup.tomllib.loads(self.config.read_text())
+        unit = self.config.parents[1] / "systemd/user/wn-agent-herdr.service"
+        original = unit.read_text()
+        binary = installer.connector_path(installer.version())
+        before_config = self.config.read_bytes()
+        with patch.object(setup, "ensure_mdk", return_value=binary):
+            self.assertTrue(setup.upgrade_transport(existing, self.config.parents[1], self.runner))
+        self.assertEqual(unit.read_text(), original.replace(setup.unit_argument("/usr/bin/wn-agent"), setup.unit_argument(binary), 1))
+        self.assertEqual(self.config.read_bytes(), before_config)
+        self.assertIn(["systemctl", "--user", "stop", "herdr-white-noise-bridge.service"], self.calls)
+        self.assertIn(["systemctl", "--user", "start", "wn-agent-herdr.service"], self.calls)
+
+    def test_failed_transport_upgrade_restores_the_unit_and_attempts_both_services(self):
+        with self.mocks():
+            setup.configure("npub1fixture", self.socket, self.runner)
+        existing = setup.tomllib.loads(self.config.read_text())
+        unit = self.config.parents[1] / "systemd/user/wn-agent-herdr.service"
+        original = unit.read_bytes()
+        failed = False
+        def runner(argv):
+            nonlocal failed
+            self.calls.append(argv)
+            if "--version" in argv:
+                return f"wn-agent {setup.MDK_VERSION}"
+            if argv == ["systemctl", "--user", "start", "wn-agent-herdr.service"] and not failed:
+                failed = True
+                raise setup.SetupError("fixture startup failure")
+            return ""
+        with patch.object(setup, "ensure_mdk", return_value=installer.connector_path(installer.version())):
+            with self.assertRaises(setup.SetupError):
+                setup.upgrade_transport(existing, self.config.parents[1], runner)
+        self.assertEqual(unit.read_bytes(), original)
+        self.assertEqual(self.calls[-2:], [["systemctl", "--user", "start", "wn-agent-herdr.service"], ["systemctl", "--user", "start", "herdr-white-noise-bridge.service"]])
+
+    def test_custom_transport_overrides_are_not_replaced(self):
+        with self.mocks():
+            setup.configure("npub1fixture", self.socket, self.runner)
+        unit = self.config.parents[1] / "systemd/user/wn-agent-herdr.service"
+        overrides = unit.with_name(unit.name + ".d")
+        overrides.mkdir()
+        override = overrides / "custom.conf"
+        override.write_text("[Service]\nEnvironment=KEEP_ME=1\n")
+        self.calls.clear()
+        with patch.object(setup, "ensure_mdk", return_value=installer.connector_path(installer.version())):
+            with self.assertRaises(setup.SetupError):
+                setup.upgrade_transport(setup.tomllib.loads(self.config.read_text()), self.config.parents[1], self.runner)
+        self.assertEqual(override.read_text(), "[Service]\nEnvironment=KEEP_ME=1\n")
+        self.assertFalse(self.calls)
+
+    def test_inactive_services_after_successful_start_trigger_systemd_rollback(self):
+        with self.mocks():
+            setup.configure("npub1fixture", self.socket, self.runner)
+        unit = self.config.parents[1] / "systemd/user/wn-agent-herdr.service"
+        original = unit.read_bytes()
+        def runner(argv):
+            if "is-active" in argv:
+                raise setup.SetupError("fixture activation failure")
+            return self.runner(argv)
+        with patch.object(setup, "ensure_mdk", return_value=installer.connector_path(installer.version())):
+            with self.assertRaises(setup.SetupError):
+                setup.upgrade_transport(setup.tomllib.loads(self.config.read_text()), self.config.parents[1], runner)
+        self.assertEqual(unit.read_bytes(), original)
+        self.assertEqual(self.calls[-2:], [["systemctl", "--user", "start", "wn-agent-herdr.service"], ["systemctl", "--user", "start", "herdr-white-noise-bridge.service"]])
+
+    def test_failed_bridge_start_rolls_back_the_running_connector_not_just_its_unit(self):
+        with self.mocks():
+            setup.configure("npub1fixture", self.socket, self.runner)
+        unit = self.config.parents[1] / "systemd/user/wn-agent-herdr.service"
+        original = unit.read_bytes()
+        running = {"transport": original}
+        failed = False
+        def runner(argv):
+            nonlocal failed
+            if "--version" in argv:
+                return f"wn-agent {setup.MDK_VERSION}"
+            if argv == ["systemctl", "--user", "stop", "wn-agent-herdr.service"]:
+                running["transport"] = None
+            elif argv == ["systemctl", "--user", "start", "wn-agent-herdr.service"] and running["transport"] is None:
+                running["transport"] = unit.read_bytes()
+            elif argv == ["systemctl", "--user", "start", "herdr-white-noise-bridge.service"] and not failed:
+                failed = True
+                self.assertNotEqual(running["transport"], original)
+                raise setup.SetupError("bridge startup failed after transport activation")
+            return ""
+        with patch.object(setup, "ensure_mdk", return_value=installer.connector_path(installer.version())):
+            with self.assertRaises(setup.SetupError):
+                setup.upgrade_transport(setup.tomllib.loads(self.config.read_text()), self.config.parents[1], runner)
+        self.assertEqual(unit.read_bytes(), original)
+        self.assertEqual(running["transport"], original)
+
+    def test_effective_runtime_and_system_dropins_are_refused_before_stopping_services(self):
+        with self.mocks():
+            setup.configure("npub1fixture", self.socket, self.runner)
+        unit = self.config.parents[1] / "systemd/user/wn-agent-herdr.service"
+        original = unit.read_bytes()
+        for external in ("/run/user/123/systemd/user/wn-agent-herdr.service.d/runtime.conf", "/etc/systemd/user/wn-agent-herdr.service.d/system.conf"):
+            calls = []
+            def runner(argv):
+                calls.append(argv)
+                return external if "DropInPaths" in argv else ""
+            with self.subTest(external=external), patch.object(setup, "ensure_mdk", return_value=installer.connector_path(installer.version())):
+                with self.assertRaises(setup.SetupError):
+                    setup.upgrade_transport(setup.tomllib.loads(self.config.read_text()), self.config.parents[1], runner)
+                self.assertEqual(unit.read_bytes(), original)
+                self.assertFalse(any("stop" in argv for argv in calls))
+
+    def test_unknown_existing_connector_cohorts_are_not_downgraded(self):
+        with self.mocks():
+            setup.configure("npub1fixture", self.socket, self.runner)
+        unit = self.config.parents[1] / "systemd/user/wn-agent-herdr.service"
+        original = unit.read_bytes()
+        calls = []
+        def runner(argv):
+            calls.append(argv)
+            return "wn-agent 0.14.0" if "--version" in argv else ""
+        with patch.object(setup, "ensure_mdk", return_value=installer.connector_path(installer.version())):
+            with self.assertRaisesRegex(setup.SetupError, "supported MDK cohort"):
+                setup.upgrade_transport(setup.tomllib.loads(self.config.read_text()), self.config.parents[1], runner)
+        self.assertEqual(unit.read_bytes(), original)
+        self.assertFalse(any("stop" in argv for argv in calls))
+
+    def test_interrupted_upgrade_restores_services_before_propagating_interrupt(self):
+        with self.mocks():
+            setup.configure("npub1fixture", self.socket, self.runner)
+        unit = self.config.parents[1] / "systemd/user/wn-agent-herdr.service"
+        original = unit.read_bytes()
+        calls = []
+        interrupted = False
+        def runner(argv):
+            nonlocal interrupted
+            calls.append(argv)
+            if "--version" in argv:
+                return f"wn-agent {setup.MDK_VERSION}"
+            if argv == ["systemctl", "--user", "stop", "wn-agent-herdr.service"] and not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt()
+            return ""
+        with patch.object(setup, "ensure_mdk", return_value=installer.connector_path(installer.version())):
+            with self.assertRaises(KeyboardInterrupt):
+                setup.upgrade_transport(setup.tomllib.loads(self.config.read_text()), self.config.parents[1], runner)
+        self.assertEqual(unit.read_bytes(), original)
+        self.assertEqual(calls[-2:], [["systemctl", "--user", "start", "wn-agent-herdr.service"], ["systemctl", "--user", "start", "herdr-white-noise-bridge.service"]])
+
     def test_fresh_setup_generates_private_portable_config_and_preserves_on_repeat(self):
         with self.mocks():
             result = setup.configure("npub1fixture", self.socket, self.runner)
@@ -112,7 +294,7 @@ class SetupTests(unittest.TestCase):
             self.assertEqual(self.config.stat().st_mode & 0o777, 0o600)
             config = setup.tomllib.loads(self.config.read_text())
             self.assertEqual(config["phone_npub"], "npub1fixture")
-            self.assertEqual(config["herdr_socket"], str(self.socket))
+            self.assertEqual(config["herdr_socket"], str(self.socket.resolve()))
             self.assertEqual(config["account_id_hex"], "ab" * 32)
             unit = self.config.parents[1] / "systemd/user/herdr-white-noise-bridge.service"
             self.assertIn("%%", unit.read_text())
@@ -195,7 +377,7 @@ class SetupTests(unittest.TestCase):
             setup.configure("npub1fixture", self.socket, self.runner)
         config = setup.tomllib.loads(self.config.read_text())
         self.assertEqual(config["opencode_bin"], "opencode")
-        self.assertEqual(config["codex_home"], str(self.home / ".codex"))
+        self.assertEqual(config["codex_home"], str((self.home / ".codex").resolve()))
 
     def test_claude_only_install_does_not_require_opencode_or_codex(self):
         def find(name, candidates=()):
@@ -205,8 +387,23 @@ class SetupTests(unittest.TestCase):
         with self.mocks(), patch.object(setup, "find_executable", side_effect=find):
             result = setup.configure("npub1fixture", self.socket, self.runner)
         config = setup.tomllib.loads(self.config.read_text())
-        self.assertEqual(config["claude_home"], str(self.home / ".claude"))
+        self.assertEqual(config["claude_home"], str((self.home / ".claude").resolve()))
         self.assertEqual(result["supported_agents"], ["claude"])
+
+    def test_macos_setup_writes_launch_agents_and_uses_launchctl(self):
+        agents = self.home / "LaunchAgents"
+        with self.mocks(), patch.dict(os.environ, {"CODR_SERVICE_MANAGER": "launchd", "CODR_LAUNCH_AGENTS_DIR": str(agents)}), \
+                patch.object(services, "_capture", return_value="state = running"):
+            result = setup.configure("npub1fixture", self.socket, self.runner)
+        self.assertEqual(result["bridge_npub"], "npub1bridge")
+        self.assertTrue((agents / "io.github.tidley.codr.wn-agent-herdr.plist").exists())
+        self.assertTrue((agents / "io.github.tidley.codr.herdr-white-noise-bridge.plist").exists())
+        self.assertFalse((self.config.parents[1] / "systemd").exists())
+        self.assertTrue(all("systemctl" not in " ".join(call) for call in self.calls))
+        self.assertIn(["launchctl", "kickstart", f"gui/{os.getuid()}/io.github.tidley.codr.herdr-white-noise-bridge"], self.calls)
+        plist = plistlib.loads((agents / "io.github.tidley.codr.herdr-white-noise-bridge.plist").read_bytes())
+        self.assertIn("--config", plist["ProgramArguments"])
+        self.assertEqual(plist["KeepAlive"], {"SuccessfulExit": False})
 
     def test_broken_unrelated_cli_does_not_block_an_observed_native_agent(self):
         def find(name, candidates=()):
@@ -220,6 +417,52 @@ class SetupTests(unittest.TestCase):
         with self.mocks(), patch.object(setup, "find_executable", side_effect=find), patch.object(setup,"read_snapshot", return_value={"agents":[{"agent":"claude","agent_session":{"agent":"claude"}}]}):
             result=setup.configure("npub1fixture", self.socket, runner)
         self.assertEqual(result["supported_agents"],["claude"])
+
+    def test_launchd_transport_upgrade_preserves_arguments_and_rolls_back_running_jobs(self):
+        for failure in (None, setup.SetupError, KeyboardInterrupt, "activation"):
+            with self.subTest(failure=failure), patch.dict(os.environ, {"CODR_SERVICE_MANAGER": "launchd", "CODR_LAUNCH_AGENTS_DIR": str(self.home / "LaunchAgents")}):
+                manager = services.LaunchdServices(self.runner, setup.private_write, self.config.parents[1])
+                home = self.home / ".marmot-agents/herdr"
+                argv = ["/usr/bin/wn-agent", "--home", str(home), "--socket", str(home / "dev/wn-agent.sock"), "--relay", "wss://fixture.invalid"]
+                unit = manager.path("wn-agent-herdr")
+                original = plistlib.dumps(manager.payload(services.Service("wn-agent-herdr", "fixture", argv, {"KEEP_ME": "yes"}))).decode()
+                setup.private_write(unit, original)
+                existing = {"wn_agent_socket": argv[4], "state_path": str(self.home / "state.json")}
+                loaded = {"wn-agent-herdr": True, "herdr-white-noise-bridge": True}
+                running = {"transport": original}
+                failed = False
+                def runner(args):
+                    if "--version" in args:
+                        return f"wn-agent {setup.MDK_VERSION}"
+                    self.assertEqual(args[:2], ["launchctl", "bootout"])
+                    name = args[2].split(services.LABEL_PREFIX + ".", 1)[1]
+                    loaded[name] = False
+                    if name == "wn-agent-herdr":
+                        running["transport"] = None
+                    return ""
+                def start(name):
+                    nonlocal failed
+                    self.assertFalse(loaded[name])
+                    loaded[name] = True
+                    if name == "wn-agent-herdr":
+                        running["transport"] = unit.read_text()
+                    elif failure and failure != "activation" and not failed:
+                        failed = True
+                        raise failure("fixture interruption")
+                binary = installer.connector_path(installer.version())
+                with patch.object(setup, "ensure_mdk", return_value=binary), patch.object(setup.services, "for_host", return_value=manager), patch.object(manager, "loaded", side_effect=lambda name: loaded[name]), patch.object(manager, "domain", return_value="gui/123"), patch.object(manager, "start", side_effect=start), patch.object(manager, "is_active", side_effect=setup.SetupError("fixture activation failure") if failure == "activation" else None):
+                    if failure:
+                        with self.assertRaises(setup.SetupError if failure == "activation" else failure):
+                            setup.upgrade_transport(existing, self.config.parents[1], runner)
+                        self.assertEqual(unit.read_text(), original)
+                        self.assertEqual(running["transport"], original)
+                    else:
+                        self.assertTrue(setup.upgrade_transport(existing, self.config.parents[1], runner))
+                        payload = plistlib.loads(unit.read_bytes())
+                        self.assertEqual(payload["ProgramArguments"], [str(binary), *argv[1:]])
+                        self.assertEqual(payload["EnvironmentVariables"]["KEEP_ME"], "yes")
+                        self.assertEqual(running["transport"], unit.read_text())
+                    self.assertTrue(all(loaded.values()))
 
 
 if __name__ == "__main__":

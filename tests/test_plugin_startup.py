@@ -25,7 +25,8 @@ class PluginStartupTests(unittest.TestCase):
                                 PATH=str(self.bin) + os.pathsep + os.environ.get("PATH", ""),
                                 HERDR_BIN_PATH=str(self.herdr), STARTUP_LOG=str(self.log),
                                 XDG_RUNTIME_DIR=str(self.home / "runtime"),
-                                DBUS_SESSION_BUS_ADDRESS="unix:path=fixture")
+                                DBUS_SESSION_BUS_ADDRESS="unix:path=fixture",
+                                CODR_SERVICE_MANAGER="systemd")
 
     def fake(self, path, failure_flag):
         path.write_text(
@@ -70,6 +71,37 @@ class PluginStartupTests(unittest.TestCase):
         result, calls = self.run_start("--show-menu", WORKER_FAIL="1")
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(len(calls), 1)
+
+    def fake_launchctl(self):
+        path = self.bin / "launchctl"
+        path.write_text(
+            "#!/usr/bin/env python3\nimport json,os,sys\n"
+            "from pathlib import Path\n"
+            "with open(os.environ['STARTUP_LOG'],'a') as log:\n"
+            "    log.write(json.dumps([Path(sys.argv[0]).name,*sys.argv[1:]])+'\\n')\n"
+            "if sys.argv[1] == 'print':\n"
+            "    missing = os.environ.get('MISSING_AGENT') and 'io.github.tidley.codr.herdr-white-noise-bridge' in sys.argv[-1]\n"
+            "    if not missing:\n"
+            "        print('state = running')\n"
+            "sys.exit(0)\n"
+        )
+        path.chmod(0o700)
+
+    def test_macos_startup_kickstarts_a_loaded_agent(self):
+        self.fake_launchctl()
+        result, calls = self.run_start(CODR_SERVICE_MANAGER="launchd")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        domain = f"gui/{os.getuid()}"
+        self.assertEqual(calls[-1], ["launchctl", "kickstart", f"{domain}/io.github.tidley.codr.herdr-white-noise-bridge"])
+
+    def test_macos_startup_bootstraps_a_missing_agent(self):
+        self.fake_launchctl()
+        result, calls = self.run_start(CODR_SERVICE_MANAGER="launchd", MISSING_AGENT="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        domain = f"gui/{os.getuid()}"
+        plist = self.home / "Library/LaunchAgents/io.github.tidley.codr.herdr-white-noise-bridge.plist"
+        self.assertEqual(calls[-1], ["launchctl", "bootstrap", domain, str(plist)])
+        self.assertNotIn(["launchctl", "kickstart", f"{domain}/io.github.tidley.codr.herdr-white-noise-bridge"], calls)
 
 
 if __name__ == "__main__":

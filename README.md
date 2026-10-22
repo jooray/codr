@@ -2,26 +2,26 @@
 
 **codr** connects coding agent sessions in [HERDR](https://github.com/herdrdev/herdr) to [White Noise](https://github.com/marmot-protocol/whitenoise-android), with one encrypted chat per session. It forwards prompts to the mapped agent and returns completed replies to the same chat.
 
-Supported agents: OpenCode, Codex, and Claude Code on Linux.
+Supported agents: OpenCode, Codex, and Claude Code on Linux and macOS.
 
 <img src="docs/screenshots/herdr-phone-progress.png" width="1280" alt="HERDR with the Garden planner task checklist beside matching working status and editable tasks in White Noise">
 
-*Real interfaces, encrypted messages, and local speech-to-text. Fictional participants and scripted agent replies. Editable checklists need an edit-capable MDK build. [Capture details](docs/REFERENCE.md#screenshot-provenance).*
+*Real interfaces, encrypted messages, and local speech-to-text. Fictional participants and scripted agent replies. Editable checklists require `edit_responses = true`. [Capture details](docs/REFERENCE.md#screenshot-provenance).*
 
 ## Behaviour
 
-- Chat names follow HERDR tab labels: `[cd] review`. Descriptions contain workspace and agent details.
+- Chat names pair the HERDR tab and workspace: `[cd] review (Acme)`. Descriptions contain workspace and agent details.
 - Status notices, optional editable checklists, and final replies appear as separate messages.
 - Supported OpenCode questions accept a number or option label as a reply.
-- A group admin can invite other participants. Only the configured owner account can prompt the agent. [Group setup](docs/REFERENCE.md#shared-chats-and-owner-only-control)
+- New groups make your configured account an admin, so you can invite participants and rename the group. Only the owner can prompt the agent. [Group setup](docs/REFERENCE.md#shared-chats-and-owner-only-control)
 - At desk mutes forwarding for all sessions. Away enables it. A new owner message switches all sessions to Away.
 
 ## Install
 
-Needs Linux x86_64 or aarch64, systemd user services, Python 3.11+, Git, and HERDR 0.9.1+. No Rust toolchain required.
+Needs Linux x86_64 or aarch64 or macOS on Apple silicon or Intel, a per-user service manager (systemd or launchd), Python 3.11+, Git, and HERDR 0.9.1+. No Rust toolchain required.
 
 ```sh
-herdr plugin install tidley/codr --ref v0.5.0
+herdr plugin install tidley/codr --ref v0.6.0
 herdr plugin action invoke local.white-noise.setup
 ```
 

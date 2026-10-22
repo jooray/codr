@@ -1,0 +1,4 @@
+repository = "https://github.com/marmot-protocol/mdk.git"
+revision = "1d2b40dbd9bea1f7e9beb4ecab04482647a9e5a6"
+version = "0.13.0"
+patch = "patches/mdk-codr.patch"

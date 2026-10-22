@@ -1,6 +1,6 @@
 # Install codr
 
-**codr** is a Linux HERDR plugin backed by two systemd user services: the Rust bridge and its MDK transport.
+**codr** is a HERDR plugin backed by two per-user services: the Rust bridge and its MDK transport. Linux uses systemd; macOS uses launchd LaunchAgents.
 
 ## One-prompt installation
 
@@ -12,10 +12,11 @@ The [agent section](#instructions-for-coding-agents) provides the non-interactiv
 
 ## Requirements
 
-- Linux x86_64 or aarch64.
-- Python 3.11 or newer and Git.
+- Linux x86_64 or aarch64, or macOS on Apple silicon or Intel.
+- glibc 2.35 or newer for the dedicated Linux connector.
+- Python 3.11 or newer and Git. On macOS, setup re-executes through a newer Homebrew interpreter when `/usr/bin/python3` is 3.9.
 - FFmpeg for voice prompts. Use `--no-audio` for a text/image-only installation.
-- A working systemd user manager under the account that runs HERDR.
+- A working systemd user manager under the account that runs HERDR, or a logged-in launchd session on macOS.
 - HERDR 0.9.1 or newer, with a running local server.
 - A working, authenticated OpenCode, Codex, or Claude Code installation.
 - HERDR native session IDs and access to the selected agent's local transcripts.
@@ -31,22 +32,22 @@ The phone account must publish a compatible Marmot KeyPackage before the bridge 
 Run these commands as your normal user, not root:
 
 ```bash
-herdr plugin install tidley/codr --ref v0.5.0
+herdr plugin install tidley/codr --ref v0.6.0
 herdr plugin action invoke local.white-noise.setup
 ```
 
-HERDR previews and runs the manifest's installation hook, then registers the plugin. The hook downloads the binary for the host architecture and checks its SHA-256 checksum before installation. Users do not need Rust or Cargo.
+HERDR previews and runs the manifest's installation hook, then registers the plugin. The hook downloads the bridge and dedicated connector for the host architecture and checks their SHA-256 checksums. Users do not need Rust or Cargo.
 
 The Setup action opens a HERDR tab. Enter your own White Noise public `npub` there. Setup:
 
 1. Validates the key through **codr**'s configuration parser before changing accounts or services.
-2. Checks the HERDR socket, available supported agents, Git, and systemd user manager. Codex-only and Claude-only installations do not need OpenCode.
-3. Reuses a compatible `wn-agent` 0.13.0 binary or downloads a verified upstream binary into **codr**'s own binary directory.
+2. Checks the HERDR socket, available supported agents, Git, and the host service manager. Codex-only and Claude-only installations do not need OpenCode.
+3. Selects the release-matched connector in **codr**'s own binary directory.
 4. Creates or reuses the dedicated `herdr-bridge` identity under `~/.marmot-agents/herdr`.
-5. Writes owner-only configuration and dedicated user units.
+5. Writes owner-only configuration and dedicated systemd units or launchd agents.
 6. Starts the transport and bridge, then prints the bridge's public `npub` and local result.
 
-The MDK release is pinned independently at `wn-agent-v0.13.0`. Setup never replaces a shared MDK binary with a different version.
+The dedicated connector uses a pinned MDK revision with **codr**'s founding-admin and media-recovery patch. See [connector source and provenance](../patches/README.md). Setup does not replace a shared `wn-agent` executable.
 
 The binary installer selects the **codr** version from the installed plugin checkout. A pinned installation uses that exact version's assets and checksums. A missing release asset or checksum stops installation rather than falling back to unverified code.
 
@@ -63,14 +64,17 @@ herdr api snapshot
 
 ### Existing installations and upgrades
 
-Setup preserves existing configuration, identities, mappings, and customised units. A supplied owner that differs from the configured phone account is rejected.
+Setup preserves existing configuration, identities, mappings, and customised service definitions. A supplied owner that differs from the configured phone account is rejected.
 
-For an existing installation, setup validates the configuration and starts its worker if needed. It does not recreate the MDK account or restart a running worker. `--check` performs configuration validation without changing services.
+For an existing installation, setup validates the configuration and selects the release-matched connector. A managed transport upgrade pauses the bridge and transport, replaces only the transport executable in its unit, then restarts both services. Configuration, identities, and mappings are preserved. Custom transport overrides require inspection before an upgrade. `--check` validates without changing services.
 
-The binary installer replaces **codr**'s executable atomically. A running worker continues with its previous executable until restarted. After an authorised upgrade, wait for work and group creation to settle before restarting only the **codr** worker:
+The binary installer replaces **codr**'s executable atomically. A running worker continues with its previous executable until restarted. Run setup first to select the matching connector. After that, a separately replaced bridge executable can be applied by restarting only the **codr** worker when work and group creation have settled:
 
 ```bash
+# Linux
 systemctl --user restart herdr-white-noise-bridge.service
+# macOS; this reloads the agent and its configuration
+launchctl kickstart -k "gui/$(id -u)/io.github.tidley.codr.herdr-white-noise-bridge"
 ```
 
 HERDR refuses a GitHub install over a locally linked copy of the same plugin. To switch from a local checkout to managed releases, inspect the current installation, then unregister the local plugin before installing the release:
@@ -78,7 +82,7 @@ HERDR refuses a GitHub install over a locally linked copy of the same plugin. To
 ```bash
 herdr plugin list
 herdr plugin unlink local.white-noise
-herdr plugin install tidley/codr --ref v0.5.0
+herdr plugin install tidley/codr --ref v0.6.0
 ```
 
 Unlinking leaves the local checkout and account state in place. Do not delete the MDK home or reset the bridge to perform an upgrade.
@@ -105,12 +109,17 @@ An extra completion notice is optional. If requested, follow the [completion-not
 
 ```bash
 herdr plugin list
-systemctl --user status wn-agent-herdr.service herdr-white-noise-bridge.service
 herdr-white-noise-bridge status
+# Linux
+systemctl --user status wn-agent-herdr.service herdr-white-noise-bridge.service
 journalctl --user -u wn-agent-herdr.service -u herdr-white-noise-bridge.service --no-pager -n 50
+# macOS
+launchctl print "gui/$(id -u)/io.github.tidley.codr.herdr-white-noise-bridge"
+launchctl print "gui/$(id -u)/io.github.tidley.codr.wn-agent-herdr"
+tail -n 50 ~/Library/Logs/codr/wn-agent-herdr.err.log ~/Library/Logs/codr/herdr-white-noise-bridge.err.log
 ```
 
-Configuration lives under `${XDG_CONFIG_HOME:-~/.config}/herdr-white-noise-bridge/config.toml`. The worker unit specifies that path explicitly. State uses `${XDG_STATE_HOME:-~/.local/state}/herdr-white-noise-bridge/state.json`.
+Configuration lives under `${XDG_CONFIG_HOME:-~/.config}/herdr-white-noise-bridge/config.toml`. The worker's service definition specifies that path explicitly. State uses `${XDG_STATE_HOME:-~/.local/state}/herdr-white-noise-bridge/state.json`.
 
 Set `opencode_db` to select incremental, read-only OpenCode database reads. Select the database for the mapped sessions explicitly. See [reader configuration](REFERENCE.md#incremental-opencode-database-reads).
 
@@ -130,7 +139,7 @@ Get the user's own complete White Noise **public** `npub`. Never use a test fixt
 
 Before changing the host:
 
-1. Verify Linux architecture, Python 3.11+, Git, the systemd user bus, and executable paths.
+1. Verify the OS and architecture, Python 3.11+, Git, the systemd user bus or launchd session, and executable paths.
 2. Inspect existing **codr** configuration, services, identities, and plugin registration.
 3. Resolve the intended HERDR socket and verify it with `session.snapshot`. Ask which server to use if several are plausible.
 4. Check that at least one supported agent already works under this user and reports a native HERDR session reference. Do not change model authentication or execution permissions.
@@ -140,7 +149,7 @@ Before changing the host:
 Set `OWNER_NPUB` to the public key supplied by the user. Export the selected `HERDR_SOCKET_PATH` before running HERDR commands.
 
 ```bash
-herdr plugin install tidley/codr --ref v0.5.0 --yes
+herdr plugin install tidley/codr --ref v0.6.0 --yes
 PLUGIN_ROOT="$(herdr plugin list --plugin local.white-noise --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["plugins"][0]["plugin_root"])')"
 python3 "$PLUGIN_ROOT/scripts/setup.py" --npub "$OWNER_NPUB" --herdr-socket "$HERDR_SOCKET_PATH"
 ```
@@ -153,7 +162,7 @@ For a passive check of an existing configuration:
 python3 "$PLUGIN_ROOT/scripts/setup.py" --check
 ```
 
-Do not overwrite customised configuration or units, broaden sender permissions, share another harness's account home, or restart unrelated agents to make checks pass.
+Do not overwrite customised configuration or service definitions, broaden sender permissions, share another harness's account home, or restart unrelated agents to make checks pass.
 
 ### Completion report
 
@@ -165,7 +174,7 @@ If a prerequisite or release asset is unavailable, report that blocker precisely
 
 ## Build from source
 
-This path requires Rust and Cargo. Use the target host's build/storage policy. Audio setup needs FFmpeg and downloads the CPU runtime plus the approximately 164 MB model. Its service is capped at 1 GiB RAM.
+This path requires Rust and Cargo. Use the target host's build/storage policy. Audio setup needs FFmpeg and downloads the CPU or MLX runtime plus the approximately 164 MB model. On Linux its service is capped at 1 GiB RAM; launchd on macOS has no equivalent cap.
 
 ```bash
 git clone https://github.com/tidley/codr.git

@@ -6,22 +6,33 @@ from contextlib import contextmanager
 import fcntl
 import json
 import os
-import re
+import plistlib
+import shlex
 from pathlib import Path
+import re
 import shutil
 import socket
 import subprocess
 import sys
 import tempfile
 import time
-import tomllib
 import uuid
 
-from install import InstallError, install_bundle, platform_name
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+if __name__ == "__main__":
+    import services as _services
+    # macOS still ships Python 3.9 as /usr/bin/python3 and tomllib needs 3.11.
+    _services.ensure_python((3, 11), __file__)
+
+import tomllib
+
+import services
+from install import InstallError, connector_path, install_connector, platform_name, version
 from phonon import configure_phonon
 
 ROOT = Path(__file__).resolve().parents[1]
-MDK_VERSION = "0.13.0"
+MDK_VERSION = tomllib.loads((ROOT / "connector.toml").read_text())["version"]
 
 
 class SetupError(Exception):
@@ -30,8 +41,9 @@ class SetupError(Exception):
 
 def run(argv):
     environment = dict(os.environ)
-    environment.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-    environment.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path={environment['XDG_RUNTIME_DIR']}/bus")
+    if sys.platform != "darwin":
+        environment.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+        environment.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path={environment['XDG_RUNTIME_DIR']}/bus")
     try:
         result = subprocess.run([str(arg) for arg in argv], capture_output=True, text=True, timeout=180, env=environment)
     except (OSError, subprocess.TimeoutExpired) as error:
@@ -45,6 +57,9 @@ def find_executable(name, candidates=()):
     found = shutil.which(name)
     if found:
         return str(Path(found).resolve())
+    candidates = [Path(candidate) for candidate in candidates]
+    if sys.platform == "darwin":
+        candidates.extend([Path("/opt/homebrew/bin") / name, Path("/usr/local/bin") / name])
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return str(candidate.resolve())
@@ -90,26 +105,145 @@ def local_accounts(path):
 
 
 def ensure_mdk(runner):
-    home = Path.home()
-    candidates = [home / ".local/bin/wn-agent"]
-    found = shutil.which("wn-agent")
-    if found:
-        candidates.append(Path(found))
-    dedicated = home / f".local/share/codr/bin/wn-agent-{MDK_VERSION}"
-    candidates.append(dedicated)
-    for binary in candidates:
-        if binary.is_file() and os.access(binary, os.X_OK):
-            if runner([str(binary), "--version"]).strip() == f"wn-agent {MDK_VERSION}":
-                return binary.resolve()
-    if dedicated.exists():
-        raise SetupError("The dedicated MDK executable does not match the required version")
-    platform = platform_name()
-    asset = f"wn-agent-{platform}-{MDK_VERSION}.tar.gz"
-    url = f"https://github.com/marmot-protocol/mdk/releases/download/wn-agent-v{MDK_VERSION}/{asset}"
-    install_bundle(url, f"wn-agent-{platform}/wn-agent", dedicated)
+    dedicated = connector_path(version())
+    if not dedicated.exists():
+        install_connector(version())
     if runner([str(dedicated), "--version"]).strip() != f"wn-agent {MDK_VERSION}":
-        raise SetupError("Downloaded MDK binary could not be verified on this host")
+        raise SetupError("The dedicated codr connector could not be verified on this host")
     return dedicated
+
+
+def upgrade_transport(existing, config_root, runner):
+    binary = ensure_mdk(runner)
+    manager = services.for_host(runner, private_write, config_root, error=SetupError)
+    if manager.backend == services.LAUNCHD:
+        return upgrade_launchd_transport(existing, binary, manager, runner)
+    unit = config_root / "systemd/user/wn-agent-herdr.service"
+    if not unit.is_file():
+        raise SetupError("The existing transport unit is missing; inspect the installation")
+    if any(unit.with_name(unit.name + ".d").glob("*.conf")):
+        raise SetupError(f"Custom transport overrides need inspection; select the dedicated connector at {binary}")
+    if unit.is_symlink():
+        raise SetupError("The transport unit is linked to a custom file; inspect it before upgrading")
+    dropins = runner(["systemctl", "--user", "show", "wn-agent-herdr.service", "-p", "DropInPaths", "--value"]).strip()
+    fragment = runner(["systemctl", "--user", "show", "wn-agent-herdr.service", "-p", "FragmentPath", "--value"]).strip()
+    if dropins or (fragment and Path(fragment).resolve() != unit.resolve()):
+        raise SetupError(f"Effective transport overrides need inspection; select the dedicated connector at {binary}")
+    original = unit.read_text()
+    matches = list(re.finditer(r'(?m)^ExecStart=("(?:[^"\\]|\\.)*"|\S+)([^\n]*)$', original))
+    if len(matches) != 1:
+        raise SetupError("The transport unit has an unexpected command; nothing was replaced")
+    command = matches[0]
+    if command.group(1) == unit_argument(binary):
+        return False
+    executable = command.group(1).strip('"')
+    if not (Path(executable).name in ("wn-agent", f"wn-agent-{MDK_VERSION}") or re.fullmatch(r"wn-agent-codr-v\d+\.\d+\.\d+", Path(executable).name)):
+        raise SetupError("The transport unit is customised; inspect its executable before upgrading")
+    old_binary = shlex.split(command.group(1))[0].replace("%%", "\0").replace("%h", str(Path.home()))
+    if "%" in old_binary:
+        raise SetupError("The transport executable uses custom systemd specifiers; inspect it before upgrading")
+    old_binary = old_binary.replace("\0", "%")
+    if runner([old_binary, "--version"]).strip() != f"wn-agent {MDK_VERSION}":
+        raise SetupError("The existing connector is outside the supported MDK cohort; inspect it before upgrading")
+    expected_socket = Path.home() / ".marmot-agents/herdr/dev/wn-agent.sock"
+    if Path(existing["wn_agent_socket"]) != expected_socket:
+        raise SetupError("The configured transport socket is customised; inspect it before upgrading")
+    proposed = original[:command.start(1)] + unit_argument(binary) + original[command.end(1):]
+    state_path = Path(existing["state_path"])
+    def settled():
+        state = json.loads(state_path.read_text()) if state_path.exists() else {}
+        if state.get("media_pending") or any(m.get("creating") for m in state.get("mappings", {}).values()):
+            raise SetupError("Wait for media preparation and group creation before upgrading the connector")
+    settled()
+    backup = unit.with_name(unit.name + f".before-codr-v{version()}")
+    if not backup.exists():
+        private_write(backup, original)
+    try:
+        runner(["systemctl", "--user", "stop", "herdr-white-noise-bridge.service"])
+        settled()
+        runner(["systemctl", "--user", "stop", "wn-agent-herdr.service"])
+        private_write(unit, proposed)
+        runner(["systemctl", "--user", "daemon-reload"])
+        runner(["systemctl", "--user", "start", "wn-agent-herdr.service"])
+        runner(["systemctl", "--user", "start", "herdr-white-noise-bridge.service"])
+        manager.is_active(["wn-agent-herdr", "herdr-white-noise-bridge"])
+    except BaseException as error:
+        failures = []
+        for action in (lambda: runner(["systemctl", "--user", "stop", "herdr-white-noise-bridge.service"]),
+                       lambda: runner(["systemctl", "--user", "stop", "wn-agent-herdr.service"]),
+                       lambda: private_write(unit, original),
+                       lambda: runner(["systemctl", "--user", "daemon-reload"]),
+                       lambda: runner(["systemctl", "--user", "start", "wn-agent-herdr.service"]),
+                       lambda: runner(["systemctl", "--user", "start", "herdr-white-noise-bridge.service"])):
+            try:
+                action()
+            except Exception:
+                failures.append("restoration failed")
+        if not isinstance(error, Exception):
+            raise
+        raise SetupError("Connector upgrade failed; inspect the service logs" + ("; service restoration also needs inspection" if failures else "")) from error
+    return True
+
+
+def upgrade_launchd_transport(existing, binary, manager, runner):
+    unit = manager.path("wn-agent-herdr")
+    if not unit.is_file() or unit.is_symlink():
+        raise SetupError("The transport agent is missing or linked; inspect it before upgrading")
+    original = unit.read_text()
+    payload = plistlib.loads(original.encode())
+    argv = payload.get("ProgramArguments")
+    label = f"{services.LABEL_PREFIX}.wn-agent-herdr"
+    if payload.get("Label") != label or "Program" in payload or not isinstance(argv, list) or not argv or not all(isinstance(arg, str) for arg in argv):
+        raise SetupError("The transport agent has a custom command; nothing was replaced")
+    if argv[0] == str(binary):
+        return False
+    if not (Path(argv[0]).name in ("wn-agent", f"wn-agent-{MDK_VERSION}") or re.fullmatch(r"wn-agent-codr-v\d+\.\d+\.\d+", Path(argv[0]).name)):
+        raise SetupError("The transport agent is customised; inspect its executable before upgrading")
+    if runner([argv[0], "--version"]).strip() != f"wn-agent {MDK_VERSION}":
+        raise SetupError("The existing connector is outside the supported MDK cohort; inspect it before upgrading")
+    home = Path.home() / ".marmot-agents/herdr"
+    expected_socket = home / "dev/wn-agent.sock"
+    if Path(existing["wn_agent_socket"]) != expected_socket or argv.count("--home") != 1 or argv.count("--socket") != 1:
+        raise SetupError("The transport home or socket is customised; inspect it before upgrading")
+    for flag, value in (("--home", home), ("--socket", expected_socket)):
+        index = argv.index(flag) + 1
+        if index >= len(argv) or argv[index] != str(value):
+            raise SetupError("The transport home or socket is customised; inspect it before upgrading")
+    payload["ProgramArguments"] = [str(binary), *argv[1:]]
+    proposed = plistlib.dumps(payload, fmt=plistlib.FMT_XML, sort_keys=True).decode()
+    state_path = Path(existing["state_path"])
+    def settled():
+        state = json.loads(state_path.read_text()) if state_path.exists() else {}
+        if state.get("media_pending") or any(m.get("creating") for m in state.get("mappings", {}).values()):
+            raise SetupError("Wait for media preparation and group creation before upgrading the connector")
+    def stop(name):
+        if manager.loaded(name):
+            runner(["launchctl", "bootout", f"{manager.domain()}/{services.LABEL_PREFIX}.{name}"])
+    settled()
+    backup = unit.with_name(unit.name + f".before-codr-v{version()}")
+    if not backup.exists():
+        private_write(backup, original)
+    try:
+        stop("herdr-white-noise-bridge")
+        settled()
+        stop("wn-agent-herdr")
+        private_write(unit, proposed)
+        manager.start("wn-agent-herdr")
+        manager.start("herdr-white-noise-bridge")
+        manager.is_active(["wn-agent-herdr", "herdr-white-noise-bridge"])
+    except BaseException as error:
+        failures = []
+        for action in (lambda: stop("herdr-white-noise-bridge"), lambda: stop("wn-agent-herdr"),
+                       lambda: private_write(unit, original), lambda: manager.start("wn-agent-herdr"),
+                       lambda: manager.start("herdr-white-noise-bridge")):
+            try:
+                action()
+            except Exception:
+                failures.append("restoration failed")
+        if not isinstance(error, Exception):
+            raise
+        raise SetupError("Connector upgrade failed; inspect the service logs" + ("; service restoration also needs inspection" if failures else "")) from error
+    return True
 
 
 def toml_text(values):
@@ -131,10 +265,11 @@ def private_write(path, text):
 
 
 def unit_argument(value):
-    value = str(value)
-    if any(ord(char) < 32 or ord(char) == 127 for char in value):
-        raise SetupError("A service path contains control characters")
-    return json.dumps(value, ensure_ascii=False).replace("%", "%%").replace("$", "$$")
+    """Kept for callers and tests; systemd quoting now lives in services.py."""
+    try:
+        return services.systemd_argument(value)
+    except services.ServiceError as error:
+        raise SetupError(str(error)) from error
 
 
 @contextmanager
@@ -166,6 +301,7 @@ def _configure(owner, herdr_socket, runner, check, enable_audio):
     config_root = Path(os.environ.get("XDG_CONFIG_HOME", home / ".config")).resolve()
     config_path = config_root / "herdr-white-noise-bridge/config.toml"
     bridge = home / ".local/bin/herdr-white-noise-bridge"
+    manager = services.for_host(runner, private_write, config_root, error=SetupError)
     existing = tomllib.loads(config_path.read_text()) if config_path.exists() else None
     owner = owner or (existing["phone_npub"] if existing else None)
     if not owner:
@@ -184,6 +320,8 @@ def _configure(owner, herdr_socket, runner, check, enable_audio):
         if selected and Path(selected).resolve() != Path(existing["herdr_socket"]).resolve():
             raise SetupError("Existing configuration targets another HERDR server; nothing was replaced")
         runner([str(bridge), "--config", str(config_path), "status"])
+        if not check:
+            upgrade_transport(existing, config_root, runner)
         if not check and enable_audio:
             command = configure_phonon(runner, private_write, unit_argument)
             if existing.get("transcribe_command") and existing["transcribe_command"] != command:
@@ -202,9 +340,9 @@ def _configure(owner, herdr_socket, runner, check, enable_audio):
                     candidate.write_text(text)
                     runner([str(bridge), "--config", str(candidate), "status"])
                 private_write(config_path, text)
-                runner(["systemctl", "--user", "restart", "herdr-white-noise-bridge.service"])
+                manager.restart("herdr-white-noise-bridge")
         if not check:
-            runner(["systemctl", "--user", "start", "herdr-white-noise-bridge.service"])
+            manager.start("herdr-white-noise-bridge")
         report = {"configuration": str(config_path), "existing_configuration_preserved": True,
                   "bridge_account_id": existing["account_id_hex"], "phone_round_trip": "requires user confirmation"}
         bootstrap_file = Path(existing["wn_agent_socket"]).parent.parent / "codr-bootstrap.json"
@@ -217,9 +355,10 @@ def _configure(owner, herdr_socket, runner, check, enable_audio):
     if check:
         raise SetupError("No existing codr configuration to check")
 
-    find_executable("systemctl")
+    if manager.backend == services.SYSTEMD:
+        find_executable("systemctl")
+    manager.require_tools()
     find_executable("git")
-    runner(["systemctl", "--user", "show-environment"])
     herdr_socket = Path(herdr_socket or os.environ.get("HERDR_SOCKET_PATH", home / ".config/herdr/herdr.sock")).resolve()
     snapshot = read_snapshot(herdr_socket)
     executables = {}
@@ -243,25 +382,14 @@ def _configure(owner, herdr_socket, runner, check, enable_audio):
     mdk_home = home / ".marmot-agents/herdr"
     mdk_socket = mdk_home / "dev/wn-agent.sock"
     state_path = Path(os.environ.get("XDG_STATE_HOME", home / ".local/state")) / "herdr-white-noise-bridge/state.json"
-    unit_root = config_root / "systemd/user"
-    transport = (ROOT / "systemd/wn-agent-herdr.service").read_text()
-    transport = transport.replace(next(line for line in transport.splitlines() if line.startswith("ExecStart=")),
-        "ExecStart=" + " ".join(unit_argument(arg) for arg in [mdk, "--home", mdk_home, "--socket", mdk_socket,
-            "--relay", "wss://relay.eu.whitenoise.chat", "--relay", "wss://relay.us.whitenoise.chat"]))
-    worker = (ROOT / "systemd/herdr-white-noise-bridge.service").read_text().replace(
-        "ExecStart=%h/.local/bin/herdr-white-noise-bridge run",
-        "ExecStart=" + " ".join(unit_argument(arg) for arg in [bridge, "--config", config_path, "run"]))
-    units = {"wn-agent-herdr.service": transport, "herdr-white-noise-bridge.service": worker}
-    for name, text in units.items():
-        target = unit_root / name
-        if target.exists() and target.read_text() != text:
-            raise SetupError(f"Existing service differs from the proposed configuration: {name}; nothing was overwritten")
-    for name, text in units.items():
-        if not (unit_root / name).exists():
-            private_write(unit_root / name, text)
+    manager.install(services.Service("wn-agent-herdr", "MDK transport for HERDR White Noise remote",
+        [mdk, "--home", mdk_home, "--socket", mdk_socket,
+         "--relay", "wss://relay.eu.whitenoise.chat", "--relay", "wss://relay.us.whitenoise.chat"]))
+    manager.install(services.Service("herdr-white-noise-bridge", "HERDR White Noise remote plugin worker",
+        [bridge, "--config", config_path, "run"], environment={"PATH": services.worker_path()}))
     mdk_home.mkdir(mode=0o700, parents=True, exist_ok=True)
-    runner(["systemctl", "--user", "daemon-reload"])
-    runner(["systemctl", "--user", "start", "wn-agent-herdr.service"])
+    manager.reload()
+    manager.start("wn-agent-herdr")
     accounts = local_accounts(mdk_socket)
     candidates = [account for account in accounts if account.get("local_signing") and account.get("label") == "herdr-bridge"]
     if len(candidates) > 1 or (accounts and not candidates):
@@ -284,8 +412,8 @@ def _configure(owner, herdr_socket, runner, check, enable_audio):
         runner([str(bridge), "--config", str(candidate), "status"])
     private_write(mdk_home / "codr-bootstrap.json", json.dumps(result, indent=2) + "\n")
     private_write(config_path, toml_text(values))
-    runner(["systemctl", "--user", "start", "herdr-white-noise-bridge.service"])
-    runner(["systemctl", "--user", "is-active", "wn-agent-herdr.service", "herdr-white-noise-bridge.service"])
+    manager.start("herdr-white-noise-bridge")
+    manager.is_active(["wn-agent-herdr", "herdr-white-noise-bridge"])
     return {"configuration": str(config_path), "bridge_npub": result["npub"], "herdr_socket": str(herdr_socket),
             "detected_sessions": len(snapshot["agents"]), "supported_agents": sorted(available),
             "phone_round_trip": "requires user confirmation"}

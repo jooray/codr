@@ -1,0 +1,631 @@
+diff --git a/crates/agent-connector/src/account.rs b/crates/agent-connector/src/account.rs
+--- a/crates/agent-connector/src/account.rs
++++ b/crates/agent-connector/src/account.rs
+@@ -77,10 +77,59 @@ impl AgentConnector {
+         members: Vec<String>,
+         description: Option<String>,
+         relays: Option<Vec<String>>,
++    ) -> Result<AgentControlResponse, ConnectorError> {
++        self.create_group_with_admins_response(
++            account_id_hex,
++            name,
++            members,
++            Vec::new(),
++            description,
++            relays,
++        )
++        .await
++    }
++
++    pub(crate) async fn create_group_with_admins_response(
++        &self,
++        account_id_hex: &str,
++        name: String,
++        members: Vec<String>,
++        admins: Vec<String>,
++        description: Option<String>,
++        relays: Option<Vec<String>>,
+     ) -> Result<AgentControlResponse, ConnectorError> {
+         let account_id_hex = crate::validation::normalize_hex(account_id_hex)?;
+         let account = self.local_account_for_account_id(&account_id_hex)?;
+         crate::validation::validate_group_create(&name, &members, description.as_deref())?;
++        if admins.len() > members.len() {
++            return Err(ConnectorError::InvalidGroupCreate(
++                "admins must be invited members",
++            ));
++        }
++        let resolve = |reference: &str| {
++            self.account_home
++                .account(reference)
++                .map(|account| account.account_id_hex)
++                .or_else(|_| AccountHome::account_id_for_public_key(reference))
++        };
++        let admins = if admins.is_empty() {
++            Vec::new()
++        } else {
++            let member_ids = members
++                .iter()
++                .map(|member| resolve(member))
++                .collect::<Result<std::collections::HashSet<_>, _>>()?;
++            let admins = admins
++                .iter()
++                .map(|admin| resolve(admin))
++                .collect::<Result<Vec<_>, _>>()?;
++            if admins.iter().any(|admin| !member_ids.contains(admin)) {
++                return Err(ConnectorError::InvalidGroupCreate(
++                    "admins must be invited members",
++                ));
++            }
++            admins
++        };
+         let group_id = self
+             .runtime
+             .create_group_with_options(
+@@ -90,6 +139,7 @@ impl AgentConnector {
+                 marmot_app::AppCreateGroupOptions {
+                     description: description.unwrap_or_default(),
+                     relays,
++                    initial_admins: admins,
+                     ..Default::default()
+                 },
+             )
+diff --git a/crates/agent-connector/src/connection.rs b/crates/agent-connector/src/connection.rs
+--- a/crates/agent-connector/src/connection.rs
++++ b/crates/agent-connector/src/connection.rs
+@@ -186,6 +186,7 @@ impl AgentConnector {
+             | AgentControlRequest::AccountRelayLists { .. }
+             | AgentControlRequest::DiagnosticStatus { .. }
+             | AgentControlRequest::GroupInfo { .. }
++            | AgentControlRequest::GroupCreateCapabilities
+             | AgentControlRequest::MaintenanceStatus { .. }
+             | AgentControlRequest::KeyPackageMaintenanceStatus { .. }
+             | AgentControlRequest::MaintenanceGetPolicy { .. }
+@@ -242,7 +243,13 @@ impl AgentConnector {
+                 account_id_hex,
+                 group_id_hex,
+                 message_id_hex,
+-            } => self.timeline_message_response(&account_id_hex, &group_id_hex, &message_id_hex),
++                include_media,
++            } => self.timeline_message_response(
++                &account_id_hex,
++                &group_id_hex,
++                &message_id_hex,
++                include_media.unwrap_or(false),
++            ),
+             AgentControlRequest::TimelineList {
+                 account_id_hex,
+                 group_id_hex,
+@@ -287,6 +294,11 @@ impl AgentConnector {
+                 )
+                 .await
+             }
++            AgentControlRequest::GroupCreateCapabilities => {
++                Ok(AgentControlResponse::GroupCreateCapabilities {
++                    initial_admins: true,
++                })
++            }
+             AgentControlRequest::GroupCreate {
+                 account_id_hex,
+                 name,
+@@ -304,6 +316,24 @@ impl AgentConnector {
+                 self.leave_group_response(&account_id_hex, &group_id_hex)
+                     .await
+             }
++            AgentControlRequest::GroupCreateWithAdmins {
++                account_id_hex,
++                name,
++                members,
++                admins,
++                description,
++                relays,
++            } => {
++                self.create_group_with_admins_response(
++                    &account_id_hex,
++                    name,
++                    members,
++                    admins,
++                    description,
++                    relays,
++                )
++                .await
++            }
+             AgentControlRequest::GroupInfo {
+                 account_id_hex,
+                 group_id_hex,
+diff --git a/crates/agent-connector/src/tests.rs b/crates/agent-connector/src/tests.rs
+--- a/crates/agent-connector/src/tests.rs
++++ b/crates/agent-connector/src/tests.rs
+@@ -1864,6 +1864,7 @@ async fn connector_edit_message_replaces_own_text_and_reports_refusals() {
+             account_id_hex: account_id_hex.clone(),
+             group_id_hex: group_id_hex.clone(),
+             message_id_hex: status_id.clone(),
++            include_media: None,
+         },
+     )
+     .await;
+@@ -7263,6 +7264,123 @@ async fn optional_management_socket_cannot_interrupt_regular_control() {
+     }
+ }
+ 
++#[tokio::test]
++async fn connector_creates_owner_admin_in_the_founding_group_state() {
++    let dir = tempfile::tempdir().unwrap();
++    let relay = MockRelay::run().await.unwrap();
++    let socket = dir.path().join("dev/wn-agent.sock");
++    let connector = AgentConnector::open(test_config(
++        dir.path(),
++        socket.clone(),
++        vec![relay.url().await.to_string()],
++        false,
++        false,
++    ))
++    .unwrap();
++    let agent = connector.account_home.create_account("agent").unwrap();
++    let owner = connector.account_home.create_account("owner").unwrap();
++    let outsider = connector.account_home.create_account("outsider").unwrap();
++    connector
++        .runtime
++        .publish_key_package(&owner.label)
++        .await
++        .unwrap();
++    let listener = bind_connector_socket(&socket).unwrap();
++    let capabilities = serve_control_request_once(
++        &connector,
++        &listener,
++        &socket,
++        "creation-capabilities",
++        AgentControlRequest::GroupCreateCapabilities,
++    )
++    .await;
++    assert!(matches!(
++        capabilities.payload,
++        AgentControlResponse::GroupCreateCapabilities {
++            initial_admins: true
++        }
++    ));
++    assert!(connector.app.groups(&agent.label).unwrap().is_empty());
++    for (index, admins) in [
++        vec![outsider.account_id_hex.clone()],
++        vec![marmot_app::npub_for_account_id(&owner.account_id_hex).unwrap()],
++    ]
++    .into_iter()
++    .enumerate()
++    {
++        let before = connector.app.groups(&agent.label).unwrap().len();
++        let request: AgentControlRequest = serde_json::from_value(serde_json::json!({
++            "type":"group_create_with_admins","account_id_hex":agent.account_id_hex,
++            "name":"Owner-admin group","members":[owner.account_id_hex],"admins":admins
++        }))
++        .expect("owner-admin creation must be a supported, explicit control operation");
++        let response = serve_control_request_once(
++            &connector,
++            &listener,
++            &socket,
++            "owner-admin-create",
++            request,
++        )
++        .await;
++        if index == 0 {
++            assert!(matches!(
++                response.payload,
++                AgentControlResponse::Error { .. }
++            ));
++            assert_eq!(
++                connector.app.groups(&agent.label).unwrap().len(),
++                before,
++                "A non-member admin must be rejected before creation"
++            );
++            continue;
++        }
++        let AgentControlResponse::GroupCreated { group_id_hex, .. } = response.payload else {
++            panic!("Expected canonical owner-admin creation");
++        };
++        let group = connector
++            .app
++            .group(&agent.label, &group_id_hex)
++            .unwrap()
++            .unwrap();
++        assert_eq!(
++            group
++                .admin_policy
++                .admins
++                .iter()
++                .cloned()
++                .collect::<HashSet<_>>(),
++            HashSet::from([agent.account_id_hex.clone(), owner.account_id_hex.clone()])
++        );
++        let group_id = GroupId::new(hex::decode(&group_id_hex).unwrap());
++        timeout(Duration::from_secs(10), async {
++            loop {
++                if connector
++                    .app
++                    .group(&owner.label, &group_id_hex)
++                    .unwrap()
++                    .is_some()
++                {
++                    break;
++                }
++                sleep(Duration::from_millis(10)).await;
++            }
++        })
++        .await
++        .unwrap();
++        accept_group_invite_retrying_busy(&connector.runtime, &owner.label, &group_id).await;
++        let joined = connector
++            .app
++            .group(&owner.label, &group_id_hex)
++            .unwrap()
++            .unwrap();
++        assert!(
++            joined.admin_policy.admins.contains(&owner.account_id_hex),
++            "The owner must receive admin rights in its initial Welcome state"
++        );
++    }
++    connector.runtime.shutdown().await;
++}
++
+ #[tokio::test]
+ async fn connector_socket_creates_group_with_member_refs_and_relay_override() {
+     let dir = tempfile::tempdir().unwrap();
+@@ -7337,6 +7455,11 @@ async fn connector_socket_creates_group_with_member_refs_and_relay_override() {
+             .find(|group| group.group_id_hex == group_id_hex)
+             .unwrap();
+         assert_eq!(group.profile.name, "Agent group");
++        assert_eq!(
++            group.admin_policy.admins,
++            vec![agent.account_id_hex.clone()],
++            "Legacy creation must retain creator-only admins"
++        );
+         assert_eq!(
+             group.profile.description,
+             "Created through the control socket"
+diff --git a/crates/agent-connector/src/timeline.rs b/crates/agent-connector/src/timeline.rs
+--- a/crates/agent-connector/src/timeline.rs
++++ b/crates/agent-connector/src/timeline.rs
+@@ -3,7 +3,7 @@
+ use agent_control::{
+     AGENT_CONTROL_TIMELINE_DEFAULT_LIMIT, AGENT_CONTROL_TIMELINE_MAX_LIMIT,
+     AGENT_CONTROL_TIMELINE_REACTIONS_MAX, AGENT_CONTROL_TIMELINE_TEXT_MAX_CHARS,
+-    AgentControlEnvelope, AgentControlResponse, AgentControlTimelineCursor,
++    AgentControlEnvelope, AgentControlMediaRef, AgentControlResponse, AgentControlTimelineCursor,
+     AgentControlTimelineMessage, AgentControlTimelineMessageAvailability,
+     AgentControlTimelineReaction, MAX_AGENT_CONTROL_FRAME_BYTES,
+ };
+@@ -11,7 +11,9 @@ use marmot_app::{TimelineMessageQuery, TimelineMessageRecord, TimelinePagination
+ 
+ use crate::AgentConnector;
+ use crate::error::ConnectorError;
+-use crate::event_projection::{attachment_summaries_from_tags, control_actor};
++use crate::event_projection::{
++    attachment_summaries_from_tags, control_actor, media_refs_from_tags,
++};
+ use crate::validation::normalize_hex;
+ 
+ const TIMELINE_ATTACHMENT_FIELD_MAX_CHARS: usize = 512;
+@@ -23,19 +25,25 @@ impl AgentConnector {
+         account_id_hex: &str,
+         group_id_hex: &str,
+         message_id_hex: &str,
++        include_media: bool,
+     ) -> Result<AgentControlResponse, ConnectorError> {
+         let account = self.local_account_for_account_id(account_id_hex)?;
+         let group_id_hex = normalize_hex(group_id_hex)?;
+         let message_id_hex = normalize_hex(message_id_hex)?;
+-        let message = self
+-            .runtime
+-            .timeline_message(&account.label, &group_id_hex, &message_id_hex)?
+-            .map(|record| timeline_message(record, &account.account_id_hex));
++        let record =
++            self.runtime
++                .timeline_message(&account.label, &group_id_hex, &message_id_hex)?;
++        let media = record
++            .as_ref()
++            .map(|record| timeline_media(record, include_media))
++            .unwrap_or_default();
++        let message = record.map(|record| timeline_message(record, &account.account_id_hex));
+         Ok(AgentControlResponse::TimelineMessage {
+             account_id_hex: account.account_id_hex,
+             group_id_hex,
+             message_id_hex,
+             message,
++            media,
+         })
+     }
+ 
+@@ -137,6 +145,13 @@ fn normalize_cursor(
+     Ok(cursor)
+ }
+ 
++fn timeline_media(record: &TimelineMessageRecord, include: bool) -> Vec<AgentControlMediaRef> {
++    if !include || record.deleted || record.invalidation_status.is_some() || record.kind != 9 {
++        return Vec::new();
++    }
++    media_refs_from_tags(&record.tags, record.source_epoch.unwrap_or_default())
++}
++
+ fn timeline_message(
+     record: TimelineMessageRecord,
+     self_account_id_hex: &str,
+@@ -290,6 +305,35 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn full_media_recovery_is_opt_in_and_excludes_deleted_or_invalidated_records() {
++        let mut stored = record();
++        stored.source_epoch = Some(7);
++        stored.tags = vec![vec![
++            "imeta".into(),
++            "v encrypted-media-v1".into(),
++            format!(
++                "locator blossom-v1 https://blossom.example.com/{}.bin",
++                "cd".repeat(32)
++            ),
++            format!("ciphertext_sha256 {}", "cd".repeat(32)),
++            format!("plaintext_sha256 {}", "ab".repeat(32)),
++            format!("nonce {}", "0".repeat(24)),
++            "m image/png".into(),
++            "filename example.png".into(),
++        ]];
++        assert!(timeline_media(&stored, false).is_empty());
++        let media = timeline_media(&stored, true);
++        assert_eq!(media.len(), 1);
++        assert_eq!(media[0].source_epoch, 7);
++        assert_eq!(media[0].plaintext_sha256, "ab".repeat(32));
++        stored.deleted = true;
++        assert!(timeline_media(&stored, true).is_empty());
++        stored.deleted = false;
++        stored.invalidation_status = Some("LosingBranch".into());
++        assert!(timeline_media(&stored, true).is_empty());
++    }
++
+     #[test]
+     fn deleted_and_invalidated_timeline_messages_never_expose_content() {
+         let mut deleted = record();
+diff --git a/crates/agent-connector/src/validation.rs b/crates/agent-connector/src/validation.rs
+--- a/crates/agent-connector/src/validation.rs
++++ b/crates/agent-connector/src/validation.rs
+@@ -168,6 +168,8 @@ pub(crate) fn agent_control_request_type(request: &AgentControlRequest) -> &'sta
+         AgentControlRequest::SendGroupSystemEvent { .. } => "send_group_system_event",
+         AgentControlRequest::DiagnosticStatus { .. } => "diagnostic_status",
+         AgentControlRequest::GroupCreate { .. } => "group_create",
++        AgentControlRequest::GroupCreateCapabilities => "group_create_capabilities",
++        AgentControlRequest::GroupCreateWithAdmins { .. } => "group_create_with_admins",
+         AgentControlRequest::GroupInfo { .. } => "group_info",
+         AgentControlRequest::GroupProfileUpdate { .. } => "group_profile_update",
+         AgentControlRequest::GroupLeave { .. } => "group_leave",
+diff --git a/crates/agent-control/README.md b/crates/agent-control/README.md
+--- a/crates/agent-control/README.md
++++ b/crates/agent-control/README.md
+@@ -30,6 +30,16 @@ Invite-policy values serialize on the wire as `deny`, `allowlist`, `any_authenti
+ `any_authenticated`. Deserialization also accepts the CLI spellings `any-authenticated-direct` and
+ `any-authenticated`.
+ 
++## Group creation
++
++`group_create_capabilities` reports founding-admin support before creation is submitted.
++
++`group_create_with_admins` accepts the same fields as `group_create`, plus an `admins` list of invited member references.
++The creator remains an admin. Selected invitees receive admin rights in the founding state and initial Welcome.
++Non-member admins are rejected before creation. The response is `group_created`; creation remains non-idempotent.
++Older connectors reject this distinct operation rather than silently dropping admin rights. Legacy `group_create`
++keeps its creator-only admin policy.
++
+ ## Stream sessions
+ 
+ A successful `StreamBegin` returns a random 32-byte `stream_capability` encoded as 64 lowercase hex characters. Every
+@@ -89,6 +99,13 @@ Connectors use the same API both to attach a recent ID-bearing chat window to an
+ on-demand history tool. This is also the recovery path after `resync_required`; clients should re-page the
+ materialized timeline rather than attempting to reconstruct history from the lossy event stream.
+ 
++For media recovery, `timeline_message_get` accepts optional `include_media: true`.
++The response adds a `media` array with the same non-secret download references as
++live inbound events. Pass each reference to `download_media`; content keys stay
++inside MDK. Missing, deleted, invalidated, and non-chat records return no media.
++The existing frame-size limit still applies. Without this flag, lookups and
++timeline pages retain their summary-only projection.
++
+ ## Run the tests
+ 
+ ```sh
+diff --git a/crates/agent-control/src/lib.rs b/crates/agent-control/src/lib.rs
+--- a/crates/agent-control/src/lib.rs
++++ b/crates/agent-control/src/lib.rs
+@@ -212,6 +212,10 @@ pub enum AgentControlRequest {
+         account_id_hex: String,
+         group_id_hex: String,
+         message_id_hex: String,
++        /// Include non-secret download references for an available message.
++        /// Legacy lookups retain the bounded summary-only projection.
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        include_media: Option<bool>,
+     },
+     /// Page through the materialized, user-visible timeline in stable
+     /// `(recorded_at, message_id_hex)` order. `before` and `after` are mutually
+@@ -461,6 +465,20 @@ pub enum AgentControlRequest {
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         relays: Option<Vec<String>>,
+     },
++    /// Read creation support before submitting a non-idempotent create.
++    GroupCreateCapabilities,
++    /// Create a group with selected invited members as founding admins. This
++    /// distinct operation prevents older connectors silently ignoring admin rights.
++    GroupCreateWithAdmins {
++        account_id_hex: String,
++        name: String,
++        members: Vec<String>,
++        admins: Vec<String>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        description: Option<String>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        relays: Option<Vec<String>>,
++    },
+     /// Leave a group using the account runtime; returns Ack after success.
+     GroupLeave {
+         account_id_hex: String,
+@@ -617,6 +635,9 @@ pub enum AgentControlResponse {
+         message_id_hex: String,
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         message: Option<AgentControlTimelineMessage>,
++        /// Opt-in references for download_media. Content keys never leave MDK.
++        #[serde(default, skip_serializing_if = "Vec::is_empty")]
++        media: Vec<AgentControlMediaRef>,
+     },
+     TimelinePage {
+         account_id_hex: String,
+@@ -667,6 +688,9 @@ pub enum AgentControlResponse {
+     DiagnosticStatus {
+         report: AgentControlDiagnosticStatus,
+     },
++    GroupCreateCapabilities {
++        initial_admins: bool,
++    },
+     GroupCreated {
+         group_id_hex: String,
+         /// Whether this account's connector recorded creating the group. Defaults
+@@ -1288,6 +1312,29 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn group_creation_with_admins_round_trips_without_changing_legacy_defaults() {
++        let value = serde_json::json!({"type":"group_create_with_admins","account_id_hex":"11".repeat(32),"name":"Team","members":["22".repeat(32)],"admins":["22".repeat(32)]});
++        let request: AgentControlRequest = serde_json::from_value(value).unwrap();
++        let encoded = encode_frame(&AgentControlEnvelope::request(
++            Some("admin-create".into()),
++            request.clone(),
++        ))
++        .unwrap();
++        assert_eq!(
++            decode_envelope::<AgentControlRequest>(&encoded)
++                .unwrap()
++                .payload,
++            request
++        );
++        assert_eq!(
++            serde_json::from_slice::<Value>(&encoded).unwrap()["type"],
++            "group_create_with_admins"
++        );
++        let legacy: AgentControlRequest=serde_json::from_value(serde_json::json!({"type":"group_create","account_id_hex":"11".repeat(32),"name":"Team","members":[]})).unwrap();
++        assert!(matches!(legacy, AgentControlRequest::GroupCreate { .. }));
++    }
++
+     #[test]
+     fn group_create_frames_round_trip_with_optional_fields() {
+         for optional in [false, true] {
+@@ -1907,6 +1954,7 @@ mod tests {
+                     account_id_hex: account(),
+                     group_id_hex: group(),
+                     message_id_hex: message(),
++                    include_media: None,
+                 },
+                 "timeline_message_get",
+             ),
+@@ -2265,6 +2313,26 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn legacy_timeline_lookup_keeps_media_opt_in_and_decodes_summary_only_responses() {
++        let request: AgentControlRequest = serde_json::from_value(serde_json::json!({
++            "type":"timeline_message_get", "account_id_hex":account(), "group_id_hex":group(), "message_id_hex":message()
++        })).unwrap();
++        assert!(matches!(
++            request,
++            AgentControlRequest::TimelineMessageGet {
++                include_media: None,
++                ..
++            }
++        ));
++        let response: AgentControlResponse = serde_json::from_value(serde_json::json!({
++            "type":"timeline_message", "account_id_hex":account(), "group_id_hex":group(), "message_id_hex":message(), "message":null
++        })).unwrap();
++        assert!(
++            matches!(response, AgentControlResponse::TimelineMessage { media, .. } if media.is_empty())
++        );
++    }
++
+     #[test]
+     fn account_profile_lookup_has_typed_found_absent_and_indeterminate_outcomes() {
+         let request = AgentControlRequest::AccountProfileLookup {
+diff --git a/crates/cli/src/commands/groups.rs b/crates/cli/src/commands/groups.rs
+--- a/crates/cli/src/commands/groups.rs
++++ b/crates/cli/src/commands/groups.rs
+@@ -481,6 +481,7 @@ async fn groups_command_once(
+                         initial_image,
+                         disappearing_message_secs,
+                         relays: None,
++                        ..Default::default()
+                     },
+                 )
+                 .await?;
+diff --git a/crates/marmot-app/README.md b/crates/marmot-app/README.md
+--- a/crates/marmot-app/README.md
++++ b/crates/marmot-app/README.md
+@@ -235,6 +235,9 @@ membership, provider response, profile hydration, and network completion, withou
+ 
+ ## Groups and invitations
+ 
++`AppCreateGroupOptions::initial_admins` names invited account references to grant admin in the founding group state.
++The creator remains an admin. Omitting this option preserves creator-only admin authority.
++
+ **Creating and inviting.** Group creation and invites take pubkeys at the action boundary. The app canonicalizes and
+ deduplicates the requested roster and fetches current KeyPackages in bounded multi-author relay batches before building
+ the MLS add.
+diff --git a/crates/marmot-app/src/client/mod.rs b/crates/marmot-app/src/client/mod.rs
+--- a/crates/marmot-app/src/client/mod.rs
++++ b/crates/marmot-app/src/client/mod.rs
+@@ -2095,6 +2095,7 @@ impl AppClient {
+     ) -> Result<CanonicalCreatedGroup, AppError> {
+         let AppCreateGroupOptions {
+             description,
++            initial_admins,
+             disappearing_message_secs,
+             relays,
+             ..
+@@ -2136,7 +2137,10 @@ impl AppClient {
+             members: Vec::new(),
+             required_features: Vec::new(),
+             app_components,
+-            initial_admins: Vec::new(),
++            initial_admins: initial_admins
++                .iter()
++                .map(|admin| self.app.member_id(admin))
++                .collect::<Result<Vec<_>, _>>()?,
+         };
+         let requirements = self
+             .runtime
+diff --git a/crates/marmot-app/src/groups.rs b/crates/marmot-app/src/groups.rs
+--- a/crates/marmot-app/src/groups.rs
++++ b/crates/marmot-app/src/groups.rs
+@@ -115,6 +115,8 @@ pub struct AppCreateGroupOptions {
+     /// Initial group routing relays. Omitted uses the app configuration.
+     pub relays: Option<Vec<String>>,
+     pub description: String,
++    /// Invited account references granted admin in the founding group state.
++    pub initial_admins: Vec<String>,
+     pub initial_image: Option<AppInitialGroupImage>,
+     pub disappearing_message_secs: u64,
+ }
+diff --git a/crates/agent-connector/src/bootstrap.rs b/crates/agent-connector/src/bootstrap.rs
+--- a/crates/agent-connector/src/bootstrap.rs
++++ b/crates/agent-connector/src/bootstrap.rs
+@@ -519,6 +519,7 @@ fn response_type_name(response: &AgentControlResponse) -> &'static str {
+         AgentControlResponse::Allowlist { .. } => "allowlist",
+         AgentControlResponse::InvitePolicy { .. } => "invite_policy",
+         AgentControlResponse::DiagnosticStatus { .. } => "diagnostic_status",
++        AgentControlResponse::GroupCreateCapabilities { .. } => "group_create_capabilities",
+         AgentControlResponse::GroupCreated { .. } => "group_created",
+         AgentControlResponse::GroupInfo { .. } => "group_info",
+         AgentControlResponse::GroupProfileUpdated { .. } => "group_profile_updated",
+diff --git a/integrations/terminal-harness/src/control.rs b/integrations/terminal-harness/src/control.rs
+--- a/integrations/terminal-harness/src/control.rs
++++ b/integrations/terminal-harness/src/control.rs
+@@ -467,6 +467,7 @@ fn response_name(response: &AgentControlResponse) -> &'static str {
+         AgentControlResponse::Allowlist { .. } => "allowlist",
+         AgentControlResponse::InvitePolicy { .. } => "invite_policy",
+         AgentControlResponse::DiagnosticStatus { .. } => "diagnostic_status",
++        AgentControlResponse::GroupCreateCapabilities { .. } => "group_create_capabilities",
+         AgentControlResponse::GroupCreated { .. } => "group_created",
+         AgentControlResponse::GroupInfo { .. } => "group_info",
+         AgentControlResponse::GroupProfileUpdated { .. } => "group_profile_updated",
