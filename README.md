@@ -6,14 +6,14 @@ Supported agents: OpenCode, Codex, and Claude Code on Linux and macOS.
 
 <img src="docs/screenshots/herdr-phone-progress.png" width="1280" alt="HERDR with the Garden planner task checklist beside matching working status and editable tasks in White Noise">
 
-*Real interfaces, encrypted messages, and local speech-to-text. Fictional participants and scripted agent replies. Editable checklists need an edit-capable MDK build. [Capture details](docs/REFERENCE.md#screenshot-provenance).*
+*Real interfaces, encrypted messages, and local speech-to-text. Fictional participants and scripted agent replies. Editable checklists require `edit_responses = true`. [Capture details](docs/REFERENCE.md#screenshot-provenance).*
 
 ## Behaviour
 
 - Chat names pair the HERDR tab and workspace: `[cd] review (Acme)`. Descriptions contain workspace and agent details.
 - Status notices, optional editable checklists, and final replies appear as separate messages.
 - Supported OpenCode questions accept a number or option label as a reply.
-- A group admin can invite other participants. Only the configured owner account can prompt the agent. [Group setup](docs/REFERENCE.md#shared-chats-and-owner-only-control)
+- New groups make your configured account an admin, so you can invite participants and rename the group. Only the owner can prompt the agent. [Group setup](docs/REFERENCE.md#shared-chats-and-owner-only-control)
 - At desk mutes forwarding for all sessions. Away enables it. A new owner message switches all sessions to Away.
 
 ## Install

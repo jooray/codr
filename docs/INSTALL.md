@@ -13,6 +13,7 @@ The [agent section](#instructions-for-coding-agents) provides the non-interactiv
 ## Requirements
 
 - Linux x86_64 or aarch64, or macOS on Apple silicon or Intel.
+- glibc 2.35 or newer for the dedicated Linux connector.
 - Python 3.11 or newer and Git. On macOS, setup re-executes through a newer Homebrew interpreter when `/usr/bin/python3` is 3.9.
 - FFmpeg for voice prompts. Use `--no-audio` for a text/image-only installation.
 - A working systemd user manager under the account that runs HERDR, or a logged-in launchd session on macOS.
@@ -35,18 +36,18 @@ herdr plugin install tidley/codr --ref v0.6.0
 herdr plugin action invoke local.white-noise.setup
 ```
 
-HERDR previews and runs the manifest's installation hook, then registers the plugin. The hook downloads the binary for the host architecture and checks its SHA-256 checksum before installation. Users do not need Rust or Cargo.
+HERDR previews and runs the manifest's installation hook, then registers the plugin. The hook downloads the bridge and dedicated connector for the host architecture and checks their SHA-256 checksums. Users do not need Rust or Cargo.
 
 The Setup action opens a HERDR tab. Enter your own White Noise public `npub` there. Setup:
 
 1. Validates the key through **codr**'s configuration parser before changing accounts or services.
 2. Checks the HERDR socket, available supported agents, Git, and the host service manager. Codex-only and Claude-only installations do not need OpenCode.
-3. Reuses a compatible `wn-agent` 0.13.0 binary or downloads a verified upstream binary into **codr**'s own binary directory.
+3. Selects the release-matched connector in **codr**'s own binary directory.
 4. Creates or reuses the dedicated `herdr-bridge` identity under `~/.marmot-agents/herdr`.
 5. Writes owner-only configuration and dedicated systemd units or launchd agents.
 6. Starts the transport and bridge, then prints the bridge's public `npub` and local result.
 
-The MDK release is pinned independently at `wn-agent-v0.13.0`. Setup never replaces a shared MDK binary with a different version.
+The dedicated connector uses a pinned MDK revision with **codr**'s founding-admin and media-recovery patch. See [connector source and provenance](../patches/README.md). Setup does not replace a shared `wn-agent` executable.
 
 The binary installer selects the **codr** version from the installed plugin checkout. A pinned installation uses that exact version's assets and checksums. A missing release asset or checksum stops installation rather than falling back to unverified code.
 
@@ -65,9 +66,9 @@ herdr api snapshot
 
 Setup preserves existing configuration, identities, mappings, and customised service definitions. A supplied owner that differs from the configured phone account is rejected.
 
-For an existing installation, setup validates the configuration and starts its worker if needed. It does not recreate the MDK account or restart a running worker. `--check` performs configuration validation without changing services.
+For an existing installation, setup validates the configuration and selects the release-matched connector. A managed transport upgrade pauses the bridge and transport, replaces only the transport executable in its unit, then restarts both services. Configuration, identities, and mappings are preserved. Custom transport overrides require inspection before an upgrade. `--check` validates without changing services.
 
-The binary installer replaces **codr**'s executable atomically. A running worker continues with its previous executable until restarted. After an authorised upgrade, wait for work and group creation to settle before restarting only the **codr** worker:
+The binary installer replaces **codr**'s executable atomically. A running worker continues with its previous executable until restarted. Run setup first to select the matching connector. After that, a separately replaced bridge executable can be applied by restarting only the **codr** worker when work and group creation have settled:
 
 ```bash
 # Linux

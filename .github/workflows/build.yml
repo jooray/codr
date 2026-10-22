@@ -81,16 +81,22 @@ jobs:
             target: x86_64-apple-darwin
             rustflags: ''
     runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.os == 'linux' && 'ubuntu:22.04' || '' }}
+    timeout-minutes: 60
     steps:
+      - name: Install native build tools
+        if: runner.os == 'Linux'
+        run: apt-get update && apt-get install -y build-essential musl-tools pkg-config libssl-dev git curl ca-certificates python3
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - name: Install native musl linker
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+          components: rustfmt, clippy
       - name: Build and package
         env:
           TARGET: ${{ matrix.target }}
@@ -113,6 +119,65 @@ jobs:
           else
             sha256sum "dist/$asset" > "dist/$asset.sha256"
           fi
+      - name: Read connector source pin
+        id: connector
+        run: python3 -c 'import os,tomllib; from pathlib import Path; m=tomllib.loads(Path("connector.toml").read_text()); open(os.environ["GITHUB_OUTPUT"],"a").write("revision="+m["revision"]+"\n")'
+      - uses: actions/checkout@v4
+        with:
+          repository: marmot-protocol/mdk
+          ref: ${{ steps.connector.outputs.revision }}
+          path: mdk
+          persist-credentials: false
+      - name: Apply connector patch
+        run: python3 scripts/connector_source.py mdk
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mdk -> target
+          shared-key: codr-connector-${{ matrix.os }}-${{ matrix.arch }}
+      - name: Test connector protocol and compatibility
+        working-directory: mdk
+        run: cargo test --locked -p agent-control -p agent-connector -j 2 -- --test-threads=1
+      - name: Install upstream verification tools
+        if: matrix.os == 'linux' && matrix.arch == 'x86_64'
+        uses: taiki-e/install-action@b18fb392e1a1b90971f7c7572c92790fa54f23d5
+        with:
+          tool: just,uv
+      - name: Check upstream workspace
+        if: matrix.os == 'linux' && matrix.arch == 'x86_64'
+        working-directory: mdk
+        env:
+          CARGO_BUILD_JOBS: '2'
+        run: just fast-ci
+      - name: Build dedicated connector
+        working-directory: mdk
+        run: cargo build --locked --release -p agent-connector --bin wn-agent -j 2
+      - name: Package dedicated connector
+        env:
+          ARCH: ${{ matrix.arch }}
+          OS_NAME: ${{ matrix.os }}
+        run: |
+          if [ "$OS_NAME" = macos ]; then
+            codesign --force --sign - mdk/target/release/wn-agent
+            codesign --verify --strict mdk/target/release/wn-agent
+          fi
+          mdk/target/release/wn-agent --version
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          asset="codr-wn-agent-v$version-$OS_NAME-$ARCH.tar.gz"
+          tar -czf "dist/$asset" -C mdk/target/release wn-agent -C ../.. LICENSE CODR-CONNECTOR.json
+          if [ "$OS_NAME" = macos ]; then
+            shasum -a 256 "dist/$asset" > "dist/$asset.sha256"
+          else
+            sha256sum "dist/$asset" > "dist/$asset.sha256"
+          fi
+          python3 - "$asset" "$version" <<'PY'
+          import hashlib, json, sys, tarfile
+          from pathlib import Path
+          with tarfile.open(Path("dist") / sys.argv[1]) as bundle:
+              assert sorted(bundle.getnames()) == ["CODR-CONNECTOR.json", "LICENSE", "wn-agent"]
+              provenance = json.load(bundle.extractfile("CODR-CONNECTOR.json"))
+          assert provenance["codr_version"] == sys.argv[2]
+          assert provenance["patch_sha256"] == hashlib.sha256(Path("patches/mdk-codr.patch").read_bytes()).hexdigest()
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: codr-${{ matrix.os }}-${{ matrix.arch }}

@@ -1,4 +1,5 @@
 /target/
+/mdk/
 /AGENTS.md
 /config.toml
 /.env

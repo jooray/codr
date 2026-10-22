@@ -6,6 +6,8 @@ from contextlib import contextmanager
 import fcntl
 import json
 import os
+import plistlib
+import shlex
 from pathlib import Path
 import re
 import shutil
@@ -26,11 +28,11 @@ if __name__ == "__main__":
 import tomllib
 
 import services
-from install import InstallError, install_bundle, mdk_platform_name, platform_name
+from install import InstallError, connector_path, install_connector, platform_name, version
 from phonon import configure_phonon
 
 ROOT = Path(__file__).resolve().parents[1]
-MDK_VERSION = "0.13.0"
+MDK_VERSION = tomllib.loads((ROOT / "connector.toml").read_text())["version"]
 
 
 class SetupError(Exception):
@@ -103,26 +105,145 @@ def local_accounts(path):
 
 
 def ensure_mdk(runner):
-    home = Path.home()
-    candidates = [home / ".local/bin/wn-agent"]
-    found = shutil.which("wn-agent")
-    if found:
-        candidates.append(Path(found))
-    dedicated = home / f".local/share/codr/bin/wn-agent-{MDK_VERSION}"
-    candidates.append(dedicated)
-    for binary in candidates:
-        if binary.is_file() and os.access(binary, os.X_OK):
-            if runner([str(binary), "--version"]).strip() == f"wn-agent {MDK_VERSION}":
-                return binary.resolve()
-    if dedicated.exists():
-        raise SetupError("The dedicated MDK executable does not match the required version")
-    platform = mdk_platform_name()
-    asset = f"wn-agent-{platform}-{MDK_VERSION}.tar.gz"
-    url = f"https://github.com/marmot-protocol/mdk/releases/download/wn-agent-v{MDK_VERSION}/{asset}"
-    install_bundle(url, f"wn-agent-{platform}/wn-agent", dedicated)
+    dedicated = connector_path(version())
+    if not dedicated.exists():
+        install_connector(version())
     if runner([str(dedicated), "--version"]).strip() != f"wn-agent {MDK_VERSION}":
-        raise SetupError("Downloaded MDK binary could not be verified on this host")
+        raise SetupError("The dedicated codr connector could not be verified on this host")
     return dedicated
+
+
+def upgrade_transport(existing, config_root, runner):
+    binary = ensure_mdk(runner)
+    manager = services.for_host(runner, private_write, config_root, error=SetupError)
+    if manager.backend == services.LAUNCHD:
+        return upgrade_launchd_transport(existing, binary, manager, runner)
+    unit = config_root / "systemd/user/wn-agent-herdr.service"
+    if not unit.is_file():
+        raise SetupError("The existing transport unit is missing; inspect the installation")
+    if any(unit.with_name(unit.name + ".d").glob("*.conf")):
+        raise SetupError(f"Custom transport overrides need inspection; select the dedicated connector at {binary}")
+    if unit.is_symlink():
+        raise SetupError("The transport unit is linked to a custom file; inspect it before upgrading")
+    dropins = runner(["systemctl", "--user", "show", "wn-agent-herdr.service", "-p", "DropInPaths", "--value"]).strip()
+    fragment = runner(["systemctl", "--user", "show", "wn-agent-herdr.service", "-p", "FragmentPath", "--value"]).strip()
+    if dropins or (fragment and Path(fragment).resolve() != unit.resolve()):
+        raise SetupError(f"Effective transport overrides need inspection; select the dedicated connector at {binary}")
+    original = unit.read_text()
+    matches = list(re.finditer(r'(?m)^ExecStart=("(?:[^"\\]|\\.)*"|\S+)([^\n]*)$', original))
+    if len(matches) != 1:
+        raise SetupError("The transport unit has an unexpected command; nothing was replaced")
+    command = matches[0]
+    if command.group(1) == unit_argument(binary):
+        return False
+    executable = command.group(1).strip('"')
+    if not (Path(executable).name in ("wn-agent", f"wn-agent-{MDK_VERSION}") or re.fullmatch(r"wn-agent-codr-v\d+\.\d+\.\d+", Path(executable).name)):
+        raise SetupError("The transport unit is customised; inspect its executable before upgrading")
+    old_binary = shlex.split(command.group(1))[0].replace("%%", "\0").replace("%h", str(Path.home()))
+    if "%" in old_binary:
+        raise SetupError("The transport executable uses custom systemd specifiers; inspect it before upgrading")
+    old_binary = old_binary.replace("\0", "%")
+    if runner([old_binary, "--version"]).strip() != f"wn-agent {MDK_VERSION}":
+        raise SetupError("The existing connector is outside the supported MDK cohort; inspect it before upgrading")
+    expected_socket = Path.home() / ".marmot-agents/herdr/dev/wn-agent.sock"
+    if Path(existing["wn_agent_socket"]) != expected_socket:
+        raise SetupError("The configured transport socket is customised; inspect it before upgrading")
+    proposed = original[:command.start(1)] + unit_argument(binary) + original[command.end(1):]
+    state_path = Path(existing["state_path"])
+    def settled():
+        state = json.loads(state_path.read_text()) if state_path.exists() else {}
+        if state.get("media_pending") or any(m.get("creating") for m in state.get("mappings", {}).values()):
+            raise SetupError("Wait for media preparation and group creation before upgrading the connector")
+    settled()
+    backup = unit.with_name(unit.name + f".before-codr-v{version()}")
+    if not backup.exists():
+        private_write(backup, original)
+    try:
+        runner(["systemctl", "--user", "stop", "herdr-white-noise-bridge.service"])
+        settled()
+        runner(["systemctl", "--user", "stop", "wn-agent-herdr.service"])
+        private_write(unit, proposed)
+        runner(["systemctl", "--user", "daemon-reload"])
+        runner(["systemctl", "--user", "start", "wn-agent-herdr.service"])
+        runner(["systemctl", "--user", "start", "herdr-white-noise-bridge.service"])
+        manager.is_active(["wn-agent-herdr", "herdr-white-noise-bridge"])
+    except BaseException as error:
+        failures = []
+        for action in (lambda: runner(["systemctl", "--user", "stop", "herdr-white-noise-bridge.service"]),
+                       lambda: runner(["systemctl", "--user", "stop", "wn-agent-herdr.service"]),
+                       lambda: private_write(unit, original),
+                       lambda: runner(["systemctl", "--user", "daemon-reload"]),
+                       lambda: runner(["systemctl", "--user", "start", "wn-agent-herdr.service"]),
+                       lambda: runner(["systemctl", "--user", "start", "herdr-white-noise-bridge.service"])):
+            try:
+                action()
+            except Exception:
+                failures.append("restoration failed")
+        if not isinstance(error, Exception):
+            raise
+        raise SetupError("Connector upgrade failed; inspect the service logs" + ("; service restoration also needs inspection" if failures else "")) from error
+    return True
+
+
+def upgrade_launchd_transport(existing, binary, manager, runner):
+    unit = manager.path("wn-agent-herdr")
+    if not unit.is_file() or unit.is_symlink():
+        raise SetupError("The transport agent is missing or linked; inspect it before upgrading")
+    original = unit.read_text()
+    payload = plistlib.loads(original.encode())
+    argv = payload.get("ProgramArguments")
+    label = f"{services.LABEL_PREFIX}.wn-agent-herdr"
+    if payload.get("Label") != label or "Program" in payload or not isinstance(argv, list) or not argv or not all(isinstance(arg, str) for arg in argv):
+        raise SetupError("The transport agent has a custom command; nothing was replaced")
+    if argv[0] == str(binary):
+        return False
+    if not (Path(argv[0]).name in ("wn-agent", f"wn-agent-{MDK_VERSION}") or re.fullmatch(r"wn-agent-codr-v\d+\.\d+\.\d+", Path(argv[0]).name)):
+        raise SetupError("The transport agent is customised; inspect its executable before upgrading")
+    if runner([argv[0], "--version"]).strip() != f"wn-agent {MDK_VERSION}":
+        raise SetupError("The existing connector is outside the supported MDK cohort; inspect it before upgrading")
+    home = Path.home() / ".marmot-agents/herdr"
+    expected_socket = home / "dev/wn-agent.sock"
+    if Path(existing["wn_agent_socket"]) != expected_socket or argv.count("--home") != 1 or argv.count("--socket") != 1:
+        raise SetupError("The transport home or socket is customised; inspect it before upgrading")
+    for flag, value in (("--home", home), ("--socket", expected_socket)):
+        index = argv.index(flag) + 1
+        if index >= len(argv) or argv[index] != str(value):
+            raise SetupError("The transport home or socket is customised; inspect it before upgrading")
+    payload["ProgramArguments"] = [str(binary), *argv[1:]]
+    proposed = plistlib.dumps(payload, fmt=plistlib.FMT_XML, sort_keys=True).decode()
+    state_path = Path(existing["state_path"])
+    def settled():
+        state = json.loads(state_path.read_text()) if state_path.exists() else {}
+        if state.get("media_pending") or any(m.get("creating") for m in state.get("mappings", {}).values()):
+            raise SetupError("Wait for media preparation and group creation before upgrading the connector")
+    def stop(name):
+        if manager.loaded(name):
+            runner(["launchctl", "bootout", f"{manager.domain()}/{services.LABEL_PREFIX}.{name}"])
+    settled()
+    backup = unit.with_name(unit.name + f".before-codr-v{version()}")
+    if not backup.exists():
+        private_write(backup, original)
+    try:
+        stop("herdr-white-noise-bridge")
+        settled()
+        stop("wn-agent-herdr")
+        private_write(unit, proposed)
+        manager.start("wn-agent-herdr")
+        manager.start("herdr-white-noise-bridge")
+        manager.is_active(["wn-agent-herdr", "herdr-white-noise-bridge"])
+    except BaseException as error:
+        failures = []
+        for action in (lambda: stop("herdr-white-noise-bridge"), lambda: stop("wn-agent-herdr"),
+                       lambda: private_write(unit, original), lambda: manager.start("wn-agent-herdr"),
+                       lambda: manager.start("herdr-white-noise-bridge")):
+            try:
+                action()
+            except Exception:
+                failures.append("restoration failed")
+        if not isinstance(error, Exception):
+            raise
+        raise SetupError("Connector upgrade failed; inspect the service logs" + ("; service restoration also needs inspection" if failures else "")) from error
+    return True
 
 
 def toml_text(values):
@@ -199,6 +320,8 @@ def _configure(owner, herdr_socket, runner, check, enable_audio):
         if selected and Path(selected).resolve() != Path(existing["herdr_socket"]).resolve():
             raise SetupError("Existing configuration targets another HERDR server; nothing was replaced")
         runner([str(bridge), "--config", str(config_path), "status"])
+        if not check:
+            upgrade_transport(existing, config_root, runner)
         if not check and enable_audio:
             command = configure_phonon(runner, private_write, unit_argument)
             if existing.get("transcribe_command") and existing["transcribe_command"] != command:

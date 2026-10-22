@@ -79,7 +79,7 @@ Forwarding defaults to Away on an existing installation. The control file is pri
 
 ### Editable progress and separate final replies
 
-Set `edit_responses = true` in the bridge configuration to enable editable progress. This requires an MDK build with the `edit_message` API, such as upstream commit `1d2b40dbd9bea1f7e9beb4ecab04482647a9e5a6`. The published `wn-agent` 0.13.0 binaries do not include that API. With those binaries, leave this mode disabled.
+Set `edit_responses = true` in the bridge configuration to enable editable progress. The release-matched connector includes the required `edit_message` API.
 
 Each response starts as one `> working` progress message. The bridge edits that message with the current task list, when available. It sends the final answer as a separate message through the normal durable send path, with its own retry key. The bridge never edits that final answer. When possible, it marks the progress message `> done`.
 
@@ -89,7 +89,7 @@ Progress is best effort. Final replies take priority over progress updates, and 
 
 If HERDR becomes idle before the agent stores its final reply, the bridge keeps that response pending and retries the transcript read. After inspection, `clear-prompt` can release a cancelled response that has no final record.
 
-The installer preserves the pinned MDK transport. Editable progress needs a separately installed MDK build with edit support; ordinary progress, decisions, and final replies work without it.
+Edit support is included in the dedicated connector; the flag controls whether **codr** uses it.
 
 ### Answer decisions from the phone
 
@@ -107,7 +107,9 @@ HERDR 0.9.1 cannot make the final identity check and terminal input atomic. Avoi
 
 Group members can discuss a project and read the agent's replies. Only messages from the phone public key in **codr**'s configuration become agent prompts. Other participants' messages are not added to the agent's context. The owner can relay a suggestion in a new prompt.
 
-Invitations require group admin authority in White Noise. Groups created by **codr** initially make the bridge identity an admin. The phone owner can also be promoted through MDK. Admin rights allow invitations and group profile edits. They do not grant other participants permission to prompt the agent.
+New groups make both the configured phone owner and the bridge identity admins in the founding group state. The owner can invite participants and edit the group profile as soon as the invitation is accepted. Admin rights do not grant other participants permission to prompt the agent.
+
+This requires the release-matched connector included with **codr**. The bridge checks support before recording creation intent, then uses an explicit owner-admin creation operation. An older connector cannot silently create a group without the requested rights. Existing groups keep their current admin policy.
 
 Renaming a White Noise group does not affect routing: **codr** uses its group ID, not its display name. The bridge does not automatically overwrite a renamed title. Running `rename-groups` explicitly resets titles to the HERDR tab labels.
 
@@ -125,7 +127,7 @@ The phone sees `> transcribing` while audio processing runs. With `edit_response
 
 Downloads and transcription run separately from session updates, one media message at a time. Pending messages survive bridge restarts. Sender checks and session checks still apply. A preparation failure sends no agent prompt. An uncertain terminal submission is not repeated automatically.
 
-Offline media recovery also needs `timeline_message_get` with opt-in `include_media` download references. The local MDK source extension provides this. Older connectors return only attachment summaries. **codr** defers these without consuming the message and can accept a complete live event later. This extension is not in the published MDK 0.13.0 binaries.
+Offline media recovery uses `timeline_message_get` with opt-in `include_media` download references. The release-matched connector includes this extension. Older connectors return only attachment summaries. **codr** defers those without consuming the message and can accept a complete live event later.
 
 Limits are four attachments per message, 25 MiB per file, and five minutes per audio file. Combined captions, transcripts, and image paths must fit within 30,000 UTF-8 bytes. Unsupported files, truncated messages, and empty transcripts do not reach the agent.
 
@@ -180,7 +182,7 @@ Existing history is baselined when a group is first attached or reply support is
 - [ ] Let the owner authorise additional people to prompt the same agent in a White Noise group.
   - Add owner-managed prompt permissions per group, including revocation.
   - Distinguish agent-directed requests from discussion between participants.
-- [ ] Make the configured phone owner an admin automatically when creating new groups.
+- [x] Make the configured phone owner an admin automatically when creating new groups.
 - [x] Download inbound images through MDK and pass their local paths and captions to the mapped agent.
 - [x] Convert White Noise voice messages and audio attachments directly into text prompts with a local Phonon-2 worker.
   - [ ] Add guided selection of other existing transcription services or local whisper.cpp.
@@ -192,7 +194,7 @@ Existing history is baselined when a group is first attached or reply support is
 - Linux x86_64 or aarch64 with a systemd user manager, or macOS on Apple silicon or Intel with a logged-in launchd session.
 - Python 3.11 or newer for setup, Git, and `launchctl` or `systemctl`. Setup finds a newer Homebrew interpreter when `/usr/bin/python3` is too old. Rust is only needed when building from source.
 - HERDR 0.9.1 or newer, with a running local server.
-- MDK `wn-agent` 0.13.0, including `group_create` and `timeline_list` in `marmot.agent-control.v2`.
+- The release-matched dedicated connector, including `group_create_with_admins` and `timeline_list` in `marmot.agent-control.v2`.
 - A supported agent: OpenCode, Codex, or Claude Code. OpenCode needs `--pure export SESSION_ID`; Codex and Claude Code need readable native transcripts.
 - HERDR native session references for the agents you want to control.
 - Your phone must publish a compatible Marmot KeyPackage. The phone and bridge need reachable relays.
@@ -213,7 +215,7 @@ cargo build --locked --release
 
 ## Install
 
-Use the [installation guide](INSTALL.md) for complete commands, including the pinned MDK download and checksum verification.
+Use the [installation guide](INSTALL.md) for complete commands and checksum verification.
 
 Install a pinned release through HERDR, then open its guided setup tab:
 
@@ -222,7 +224,7 @@ herdr plugin install tidley/codr --ref v0.6.0
 herdr plugin action invoke local.white-noise.setup
 ```
 
-The installation hook downloads and verifies the matching **codr** binary from GitHub Releases. Setup asks for your public `npub`, installs or reuses the pinned MDK transport, and configures dedicated user services. No Rust toolchain is required for this path.
+The installation hook downloads and verifies the matching **codr** bridge and connector from GitHub Releases. Setup asks for your public `npub` and configures dedicated user services. No Rust toolchain is required for this path.
 
 For a non-interactive installation by a coding agent, see the [agent instructions](INSTALL.md#instructions-for-coding-agents).
 
@@ -232,9 +234,9 @@ Do not share the existing `wn-opencode` connector home. That adapter can also an
 
 ## GitHub builds
 
-GitHub Actions runs Rust formatting, tests, Clippy, and isolated installer/setup tests on Linux, plus the Rust and Python test suites on macOS, for pushes and pull requests. A version tag builds native Linux x86_64 and aarch64 binaries with musl and native macOS aarch64 and x86_64 binaries, then publishes archives and SHA-256 checksums to [GitHub Releases](https://github.com/tidley/codr/releases). macOS binaries are ad-hoc signed.
+GitHub Actions runs Rust formatting, tests, Clippy, and isolated installer/setup tests on Linux, plus the Rust and Python test suites on macOS, for pushes and pull requests. Version tags build separate bridge and connector archives for Linux and macOS on x86_64 and aarch64. Linux bridges use musl; Linux connectors use native glibc. macOS binaries are ad-hoc signed. Archives and SHA-256 checksums are published to [GitHub Releases](https://github.com/tidley/codr/releases). See the [connector requirements](INSTALL.md#requirements).
 
-The installer selects the release version from the plugin checkout. It never silently substitutes a newer release. MDK uses its own pinned upstream release rather than a rebuilt or copied transport implementation.
+The installer selects the bridge and connector release from the plugin checkout. It never silently substitutes a newer release. The dedicated connector is built from the pinned upstream MDK revision and published patch in [connector source](../patches/README.md). Each connector archive includes source provenance and the upstream license.
 
 ## Verify on the phone
 

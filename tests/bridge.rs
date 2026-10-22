@@ -67,7 +67,13 @@ async fn peer_for_agent(
             calls.lock().unwrap().push(req.clone());
             let mut response = if marmot {
                 match req["type"].as_str().unwrap() {
-                    "group_create" => {
+                    "group_create_capabilities" => {
+                        json!({"type":"group_create_capabilities","initial_admins":true})
+                    }
+                    "group_create" | "group_create_with_admins" => {
+                        assert_eq!(req["type"], "group_create_with_admins");
+                        assert_eq!(req["members"], json!([phone_npub()]));
+                        assert_eq!(req["admins"], json!([phone_npub()]));
                         json!({"type":"group_created","group_id_hex":"bb".repeat(16)})
                     }
                     "send_final" => {
@@ -2079,7 +2085,7 @@ async fn real_socket_round_trip_routes_one_group_and_only_new_final_answers() {
             .lock()
             .unwrap()
             .iter()
-            .filter(|r| r["type"] == "group_create")
+            .filter(|r| r["type"] == "group_create_with_admins")
             .count(),
         1
     );
@@ -2311,7 +2317,11 @@ async fn native_round_trip(provider: &str, legacy_mapping: bool) {
             .any(|call| call["text"] == "Native old final" || call["text"] == "> done")
     );
     if legacy_mapping {
-        assert!(!calls.iter().any(|call| call["type"] == "group_create"));
+        assert!(
+            !calls
+                .iter()
+                .any(|call| call["type"] == "group_create_with_admins")
+        );
     }
     mdk.abort();
     herdr.abort();
@@ -2381,6 +2391,87 @@ async fn legacy_native_session_that_exited_before_upgrade_does_not_replay_histor
 }
 
 #[tokio::test]
+async fn desk_selection_during_the_capability_probe_prevents_a_new_invitation() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    export_script(&config.opencode_bin, "Historical answer", "old");
+    let listener = UnixListener::bind(&config.wn_agent_socket).unwrap();
+    let captured = Arc::new(Mutex::new(vec![]));
+    let calls = captured.clone();
+    let control = config.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = tokio::io::BufReader::new(stream);
+            let request = read_line(&mut reader).await.unwrap();
+            calls.lock().unwrap().push(request.clone());
+            let mut response = if request["type"] == "group_create_capabilities" {
+                assert!(forwarding_command(&control, "desk").await.status.success());
+                json!({"type":"group_create_capabilities","initial_admins":true})
+            } else {
+                json!({"type":"group_created","group_id_hex":"bb".repeat(16)})
+            };
+            response["id"] = request["id"].clone();
+            response["marmot_agent_control"] = json!("marmot.agent-control.v2");
+            reader
+                .get_mut()
+                .write_all((response.to_string() + "\n").as_bytes())
+                .await
+                .unwrap();
+        }
+    });
+    let mut bridge = Bridge::open(config).unwrap();
+    bridge.reconcile(vec![agent()]).await.unwrap();
+    assert!(bridge.state.mappings[&agent().key()].group_id_hex.is_none());
+    assert!(!bridge.state.mappings[&agent().key()].creating);
+    assert_eq!(captured.lock().unwrap().len(), 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn an_old_connector_cannot_leave_creation_intent_that_blocks_its_upgrade() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    export_script(&config.opencode_bin, "Historical answer", "old");
+    let listener = UnixListener::bind(&config.wn_agent_socket).unwrap();
+    let requests = Arc::new(Mutex::new(vec![]));
+    let captured = requests.clone();
+    let server = tokio::spawn(async move {
+        for _ in 0..2 {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = tokio::io::BufReader::new(stream);
+            let request = read_line(&mut reader).await.unwrap();
+            captured.lock().unwrap().push(request.clone());
+            let response = json!({"marmot_agent_control":"marmot.agent-control.v2","id":request["id"],"type":"error","code":"control_error","message":"Unsupported request","retryable":false});
+            reader
+                .get_mut()
+                .write_all((response.to_string() + "\n").as_bytes())
+                .await
+                .unwrap();
+        }
+    });
+    let mut bridge = Bridge::open(config).unwrap();
+    for _ in 0..2 {
+        bridge.reconcile(vec![agent()]).await.unwrap();
+        let mapping = &bridge.state.mappings[&agent().key()];
+        assert!(
+            !mapping.creating,
+            "An unsupported read-only capability probe is not an uncertain create"
+        );
+        assert!(mapping.group_id_hex.is_none());
+    }
+    assert_eq!(requests.lock().unwrap().len(), 2);
+    assert!(
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request["type"] == "group_create_capabilities")
+    );
+    server.abort();
+}
+
+#[tokio::test]
 async fn uncertain_group_creation_is_journalled_and_never_retried_on_restart() {
     let dir = tempfile::tempdir().unwrap();
     let config = config(dir.path());
@@ -2388,10 +2479,20 @@ async fn uncertain_group_creation_is_journalled_and_never_retried_on_restart() {
     let listener = UnixListener::bind(&config.wn_agent_socket).unwrap();
     let first = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
+        let mut reader = tokio::io::BufReader::new(stream);
+        let capabilities = read_line(&mut reader).await.unwrap();
+        assert_eq!(capabilities["type"], "group_create_capabilities");
+        let response = json!({"marmot_agent_control":"marmot.agent-control.v2","id":capabilities["id"],"type":"group_create_capabilities","initial_admins":true});
+        reader
+            .get_mut()
+            .write_all((response.to_string() + "\n").as_bytes())
+            .await
+            .unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
         let req = read_line(&mut tokio::io::BufReader::new(stream))
             .await
             .unwrap();
-        assert_eq!(req["type"], "group_create");
+        assert_eq!(req["type"], "group_create_with_admins");
     });
     let mut bridge = Bridge::open(config.clone()).unwrap();
     bridge.reconcile(vec![agent()]).await.unwrap();
@@ -2481,7 +2582,15 @@ async fn a_missing_connector_before_submission_retries_when_it_appears() {
     let server = peer(&config.wn_agent_socket, true, calls.clone()).await;
     bridge.reconcile(vec![agent()]).await.unwrap();
     assert!(bridge.state.mappings[&agent().key()].group_id_hex.is_some());
-    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| call["type"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["group_create_capabilities", "group_create_with_admins"]
+    );
     server.abort();
 }
 

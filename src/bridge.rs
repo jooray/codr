@@ -660,10 +660,23 @@ impl Bridge {
         self.refresh_forwarding()?;
         let m = &self.state.mappings[key];
         if m.group_id_hex.is_none() && !m.creating && self.state.forwarding_enabled {
+            let capabilities = self
+                .marmot
+                .marmot(json!({"type":"group_create_capabilities"}))
+                .await?;
+            ensure!(
+                capabilities["type"] == "group_create_capabilities"
+                    && capabilities["initial_admins"] == true,
+                "The connector must support founding owner-admin rights before creating groups"
+            );
+            self.refresh_forwarding()?;
+            if !self.state.forwarding_enabled {
+                return Ok(());
+            }
             self.state.mappings.get_mut(key).unwrap().creating = true;
             self.save()?;
             // No blind retries: GroupCreate has no idempotency key, even after a timeout.
-            match self.marmot.marmot(json!({"type":"group_create", "account_id_hex":self.config.account_id_hex,"name":agent.group_name(),"members":[self.config.phone_npub],"description":agent.group_description()})).await {
+            match self.marmot.marmot(json!({"type":"group_create_with_admins", "account_id_hex":self.config.account_id_hex,"name":agent.group_name(),"members":[self.config.phone_npub],"admins":[self.config.phone_npub],"description":agent.group_description()})).await {
                     Ok(response) => {
                         ensure!(response["type"] == "group_created", "Unexpected group creation response");
                         let group = response["group_id_hex"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| anyhow::anyhow!("Missing group ID"))?.to_owned();

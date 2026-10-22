@@ -130,16 +130,29 @@ def install_bundle(url, member, destination):
                     temporary_binary.unlink(missing_ok=True)
 
 
+def connector_path(release):
+    return Path.home() / f".local/share/codr/bin/wn-agent-codr-v{release}"
+
+
+def install_connector(release):
+    asset = f"codr-wn-agent-v{release}-{platform_name()}.tar.gz"
+    destination = connector_path(release)
+    install_bundle(f"https://github.com/tidley/codr/releases/download/v{release}/{asset}", "wn-agent", destination)
+    return destination
+
+
 def main():
     try:
         release = version()
         asset = f"codr-v{release}-{platform_name()}.tar.gz"
         url = f"https://github.com/tidley/codr/releases/download/v{release}/{asset}"
         destination = Path.home() / ".local/bin/herdr-white-noise-bridge"
+        connector = install_connector(release)
         install_bundle(url, "herdr-white-noise-bridge", destination)
         print(f"Installed codr {release}: {destination}")
+        print(f"Dedicated connector: {connector}")
         print("Next: run the plugin's Setup action, or follow docs/INSTALL.md for non-interactive setup.")
-        print("For an existing installation, restart only the codr worker when it is safe to apply this binary update.")
+        print("For an existing installation, run Setup to select the matching connector and preserve account state.")
     except (InstallError, OSError, tarfile.TarError) as error:
         print(f"codr install: {error}", file=sys.stderr)
         return 1
