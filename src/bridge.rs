@@ -658,6 +658,8 @@ impl Bridge {
         // Seed their existing history once when enabling native reply support.
         self.seed_native_history(key, agent).await?;
         self.refresh_forwarding()?;
+        let name = agent.group_name();
+        let description = agent.group_description();
         let m = &self.state.mappings[key];
         if m.group_id_hex.is_none() && !m.creating && self.state.forwarding_enabled {
             let capabilities = self
@@ -676,11 +678,12 @@ impl Bridge {
             self.state.mappings.get_mut(key).unwrap().creating = true;
             self.save()?;
             // No blind retries: GroupCreate has no idempotency key, even after a timeout.
-            match self.marmot.marmot(json!({"type":"group_create_with_admins", "account_id_hex":self.config.account_id_hex,"name":agent.group_name(),"members":[self.config.phone_npub],"admins":[self.config.phone_npub],"description":agent.group_description()})).await {
+            match self.marmot.marmot(json!({"type":"group_create_with_admins", "account_id_hex":self.config.account_id_hex,"name":name,"members":[self.config.phone_npub],"admins":[self.config.phone_npub],"description":description})).await {
                     Ok(response) => {
                         ensure!(response["type"] == "group_created", "Unexpected group creation response");
                         let group = response["group_id_hex"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| anyhow::anyhow!("Missing group ID"))?.to_owned();
                         let m = self.state.mappings.get_mut(key).unwrap(); m.group_id_hex = Some(group.clone()); m.creating = false;
+                        m.group_name = Some(name.clone()); m.group_description = Some(description.clone());
                         self.state.enqueue(&group, &format!("Connected to HERDR: {}. Send a message here to prompt this session. Use /status for its state.", agent.title()));
                         self.save()?;
                     }
@@ -695,6 +698,7 @@ impl Bridge {
         let Some(group) = self.state.mappings[key].group_id_hex.clone() else {
             return Ok(());
         };
+        self.sync_group_profile(key, agent, &group).await;
         let previous = &self.state.mappings[key];
         let changed = previous.last_agent_status != agent.agent_status
             || previous.last_state_change_seq != agent.state_change_seq;
@@ -1488,9 +1492,17 @@ impl Bridge {
                     .or(mapping.group_description.as_deref())
                     == Some(description.as_str())
             {
+                let m = self.state.mappings.get_mut(&key).unwrap();
+                m.group_name = Some(name);
+                m.group_description = Some(description);
+                m.group_name_locked = false;
+                m.rename_uncertain = false;
+                self.save()?;
                 continue;
             }
             // Profile updates have no idempotency key. Never retry an uncertain mutation.
+            self.state.mappings.get_mut(&key).unwrap().rename_uncertain = true;
+            self.save()?;
             let result = self.marmot.marmot(json!({"type":"group_profile_update","account_id_hex":self.config.account_id_hex,"group_id_hex":group,"name":name,"description":description})).await?;
             ensure!(
                 result["type"] == "group_profile_updated"
@@ -1508,11 +1520,138 @@ impl Bridge {
                         .is_none_or(|actual| actual == description),
                 "Renamed group title could not be verified"
             );
-            self.state.mappings.get_mut(&key).unwrap().group_description = Some(description);
+            let m = self.state.mappings.get_mut(&key).unwrap();
+            m.group_name = Some(name.clone());
+            m.group_description = Some(description);
+            m.group_name_locked = false;
+            m.rename_uncertain = false;
             self.save()?;
             println!("Renamed: {name}");
         }
         Ok(())
+    }
+
+    /// Keep a live group's title and description in step with HERDR. A title the
+    /// user changed is never overwritten, and an uncertain profile update is never retried.
+    async fn sync_group_profile(&mut self, key: &str, agent: &Agent, group: &str) {
+        let desired_name = agent.group_name();
+        let desired_description = agent.group_description();
+        let (last_name, last_description) = {
+            let mapping = &self.state.mappings[key];
+            if mapping.group_name_locked || mapping.rename_uncertain {
+                return;
+            }
+            // Groups created before this field existed have no trusted title.
+            // The manual rename-groups command seeds it and enables automatic renames.
+            let Some(last_name) = mapping.group_name.clone() else {
+                return;
+            };
+            (last_name, mapping.group_description.clone())
+        };
+        let name_changed = last_name != desired_name;
+        let description_changed = last_description.as_deref() != Some(desired_description.as_str());
+        if !name_changed && !description_changed {
+            return;
+        }
+        let info = match self.group_info(group).await {
+            Ok(info) => info,
+            Err(error) => {
+                if error.downcast_ref::<crate::wire::NotSubmitted>().is_none() {
+                    eprintln!("Group profile check failed; keeping the current title.");
+                }
+                return;
+            }
+        };
+        let subject = info["subject"].as_str().unwrap_or("");
+        if subject != desired_name && subject != last_name {
+            let mapping = self.state.mappings.get_mut(key).unwrap();
+            mapping.group_name_locked = true;
+            let _ = self.save();
+            eprintln!("Group title was changed outside codr; leaving it unchanged.");
+            return;
+        }
+        let current_description = info["description"].as_str().or(last_description.as_deref());
+        if subject == desired_name && current_description == Some(desired_description.as_str()) {
+            let mapping = self.state.mappings.get_mut(key).unwrap();
+            mapping.group_name = Some(desired_name);
+            mapping.group_description = Some(desired_description);
+            let _ = self.save();
+            return;
+        }
+        self.state.mappings.get_mut(key).unwrap().rename_uncertain = true;
+        if self.save().is_err() {
+            eprintln!("Group rename intent could not be saved; no update was submitted.");
+            return;
+        }
+        let update = self
+            .marmot
+            .marmot(json!({
+                "type": "group_profile_update",
+                "account_id_hex": self.config.account_id_hex,
+                "group_id_hex": group,
+                "name": desired_name,
+                "description": desired_description,
+            }))
+            .await;
+        match update {
+            Ok(result) => {
+                let confirmed = result["type"] == "group_profile_updated"
+                    && result["message_ids_hex"]
+                        .as_array()
+                        .is_some_and(|ids| !ids.is_empty());
+                let verified = confirmed
+                    && match self.group_info(group).await {
+                        Ok(info) => {
+                            info["subject"] == desired_name
+                                && info["description"]
+                                    .as_str()
+                                    .is_none_or(|actual| actual == desired_description)
+                        }
+                        Err(_) => false,
+                    };
+                let mapping = self.state.mappings.get_mut(key).unwrap();
+                if verified {
+                    mapping.group_name = Some(desired_name.clone());
+                    mapping.group_description = Some(desired_description);
+                    mapping.rename_uncertain = false;
+                    let _ = self.save();
+                    eprintln!("Renamed group: {desired_name}");
+                } else {
+                    mapping.rename_uncertain = true;
+                    let _ = self.save();
+                    eprintln!(
+                        "Group profile update was not confirmed; automatic renames stopped until rename-groups runs."
+                    );
+                }
+            }
+            Err(error) => {
+                if error.downcast_ref::<crate::wire::NotSubmitted>().is_some() {
+                    self.state.mappings.get_mut(key).unwrap().rename_uncertain = false;
+                    if self.save().is_err() {
+                        self.state.mappings.get_mut(key).unwrap().rename_uncertain = true;
+                    }
+                    return;
+                }
+                let mapping = self.state.mappings.get_mut(key).unwrap();
+                mapping.rename_uncertain = true;
+                let _ = self.save();
+                eprintln!(
+                    "Group profile update is uncertain; automatic renames stopped until rename-groups runs."
+                );
+            }
+        }
+    }
+
+    async fn group_info(&self, group: &str) -> Result<Value> {
+        let info = self
+            .marmot
+            .marmot(json!({"type":"group_info","account_id_hex":self.config.account_id_hex,"group_id_hex":group}))
+            .await?;
+        ensure!(
+            info["type"] == "group_info",
+            "Unexpected MDK group response"
+        );
+        Ok(info)
     }
 
     pub async fn run(&mut self) -> Result<()> {

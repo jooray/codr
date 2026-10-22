@@ -111,7 +111,7 @@ New groups make both the configured phone owner and the bridge identity admins i
 
 This requires the release-matched connector included with **codr**. The bridge checks support before recording creation intent, then uses an explicit owner-admin creation operation. An older connector cannot silently create a group without the requested rights. Existing groups keep their current admin policy.
 
-Renaming a White Noise group does not affect routing: **codr** uses its group ID, not its display name. The bridge does not automatically overwrite a renamed title. Running `rename-groups` explicitly resets titles to the HERDR tab labels.
+Renaming a White Noise group does not affect routing: **codr** uses its group ID, not its display name. A title changed outside **codr** is left alone; running `rename-groups` explicitly resets titles to the HERDR tab labels.
 
 The gallery uses an owner-created group, bound to an isolated demo session. Alex creates the group and invites Sam through White Noise. Sam is a scripted second demo identity. Its message appears in the chat but produces no agent prompt. Alex's next message produces one prompt and a separate reply. This does not grant additional people agent control.
 
@@ -303,9 +303,9 @@ To update existing group names without changing their session mappings, stop the
 ~/.local/bin/herdr-white-noise-bridge rename-groups
 ```
 
-Then start the worker again. This refreshes names and descriptions without changing group IDs. Ended sessions without a stored tab label use their existing title, replacing earlier **codr** prefixes or suffixes. Unavailable historical workspace details appear as `unknown`.
+Then start the worker again. This refreshes names and descriptions without changing group IDs, clears a manual-rename lock, and enables automatic renames for groups created by older versions. Ended sessions without a stored tab label use their existing title, replacing earlier **codr** prefixes or suffixes. Unavailable historical workspace details appear as `unknown`.
 
-Tab renames do not automatically rewrite White Noise titles; run `rename-groups` to apply them. Sessions in tabs with identical labels and workspaces can share a display name, while their routing remains separate.
+Live sessions automatically update their group title and description when the HERDR tab or workspace changes. A title changed in White Noise is never overwritten automatically. If a profile update is not confirmed, automatic renames for that group stop; run `rename-groups` to re-apply the current titles and clear that state. Sessions in tabs with identical labels and workspaces can share a display name, while their routing remains separate.
 
 ### Completion notice
 

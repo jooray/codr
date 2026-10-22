@@ -19,6 +19,7 @@
 - The install hook and setup tolerate macOS's Python 3.9 when only stdlib parsing is needed.
 - Group names include the workspace, with UTF-8 byte limits.
 - OpenCode session exports support both 1.x and 2.x formats.
+- Live group titles follow HERDR label changes, with durable rename intent and protection for manually renamed groups.
 
 ### Known limits
 
