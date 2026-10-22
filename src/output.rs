@@ -13,6 +13,7 @@ pub mod claude;
 pub mod codex;
 pub mod decision;
 mod native;
+pub mod opencode;
 pub mod tasks;
 
 pub fn supported(agent: &str) -> bool {
@@ -26,7 +27,7 @@ pub async fn read_session(
     Ok(read_history(config, session).await?.finals)
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct SessionHistory {
     pub finals: Vec<FinalMessage>,
     pub latest_turn: Option<String>,
@@ -42,6 +43,9 @@ pub async fn read_history(
         "Unsupported native session reference kind"
     );
     match session.agent.as_str() {
+        "opencode" if config.opencode_db.is_some() => {
+            Ok(read_snapshot(config, session).await?.history)
+        }
         "opencode" => Ok(select_history(
             export_data(&config.opencode_bin, &session.value).await?,
         )),
@@ -67,7 +71,7 @@ pub async fn read_history(
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct FinalMessage {
     pub id: String,
     pub text: String,
@@ -80,13 +84,14 @@ pub struct FinalMessage {
 struct Export {
     messages: Vec<Message>,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct Message {
     info: Info,
     parts: Vec<Part>,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct Info {
+    #[serde(default)]
     id: String,
     role: String,
     #[serde(default)]
@@ -98,11 +103,11 @@ struct Info {
     #[serde(default, rename = "parentID")]
     parent_id: Option<String>,
 }
-#[derive(Default, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 struct MessageTime {
     completed: Option<u64>,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct Part {
     #[serde(rename = "type")]
     kind: String,
@@ -132,12 +137,16 @@ fn select_finals(export: Export) -> Result<Vec<FinalMessage>> {
 }
 
 fn select_history(export: Export) -> SessionHistory {
+    history_from_data(&export)
+}
+
+fn history_from_data(export: &Export) -> SessionHistory {
     let mut out = vec![];
     let mut latest_turn = None;
     let mut turns = std::collections::BTreeSet::new();
     let mut has_user = false;
-    for message in export.messages {
-        let info = message.info;
+    for message in &export.messages {
+        let info = &message.info;
         if info.role == "user" {
             latest_turn = Some(format!("opencode:{}", info.id));
             turns.insert(latest_turn.clone().unwrap());
@@ -165,14 +174,14 @@ fn select_history(export: Export) -> SessionHistory {
         }
         let text = message
             .parts
-            .into_iter()
+            .iter()
             .filter(|p| p.kind == "text" && !p.synthetic && !p.ignored)
-            .filter_map(|p| p.text)
+            .filter_map(|p| p.text.clone())
             .collect::<Vec<_>>()
             .join("\n");
         if !text.trim().is_empty() {
             out.push(FinalMessage {
-                id: info.id,
+                id: info.id.clone(),
                 text,
                 turn,
             });
@@ -206,5 +215,72 @@ async fn export_data(bin: &Path, session: &str) -> Result<Export> {
         "OpenCode export exceeds 128 MiB"
     );
     file.seek(SeekFrom::Start(0))?;
-    Ok(serde_json::from_reader(BufReader::new(file))?)
+    tokio::task::spawn_blocking(move || Ok(serde_json::from_reader(BufReader::new(file))?))
+        .await
+        .map_err(|_| anyhow::anyhow!("OpenCode export reader failed"))?
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SessionSnapshot {
+    pub history: SessionHistory,
+    pub tasks: Option<tasks::TaskList>,
+    pub decision: Option<decision::Decision>,
+}
+
+/// Read reply, task and decision projections from one consistent transcript.
+pub async fn read_snapshot(
+    config: &crate::BridgeConfig,
+    session: &crate::herdr::Session,
+) -> Result<SessionSnapshot> {
+    ensure!(
+        session.kind == "id",
+        "Unsupported native session reference kind"
+    );
+    if let Some(path) = &config.opencode_db
+        && session.agent == "opencode"
+    {
+        let path = path.clone();
+        let session = session.clone();
+        return tokio::task::spawn_blocking(move || {
+            opencode::Reader::default()
+                .read(&path, &session.value)
+                .map(|read| read.snapshot)
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("OpenCode database reader failed"))?;
+    }
+    match session.agent.as_str() {
+        "opencode" => {
+            let export = export_data(&config.opencode_bin, &session.value).await?;
+            Ok(SessionSnapshot {
+                history: history_from_data(&export),
+                tasks: tasks::from_data(&export),
+                decision: decision::from_data(&export).ok().flatten(),
+            })
+        }
+        "codex" | "claude" => {
+            let provider = session.agent.clone();
+            let id = session.value.clone();
+            let home = if provider == "codex" {
+                config.codex_home.clone()
+            } else {
+                config.claude_home.clone()
+            };
+            tokio::task::spawn_blocking(move || {
+                let (history, tasks) = if provider == "codex" {
+                    codex::snapshot(&home, &id)?
+                } else {
+                    claude::snapshot(&home, &id)?
+                };
+                Ok(SessionSnapshot {
+                    history,
+                    tasks,
+                    decision: None,
+                })
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("Native transcript reader failed"))?
+        }
+        _ => Ok(SessionSnapshot::default()),
+    }
 }

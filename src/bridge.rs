@@ -23,6 +23,8 @@ pub struct Bridge {
     pub herdr_available: bool,
     phone: String,
     media_job: Option<tokio::task::JoinHandle<Result<String>>>,
+    reads: crate::reads::Reads,
+    last_snapshot: Vec<Agent>,
 }
 
 impl Drop for Bridge {
@@ -61,6 +63,8 @@ impl Bridge {
             herdr_available: false,
             phone,
             media_job: None,
+            reads: crate::reads::Reads::default(),
+            last_snapshot: vec![],
         };
         bridge.refresh_forwarding()?;
         Ok(bridge)
@@ -135,11 +139,37 @@ impl Bridge {
                 })?,
             ));
         }
+        if self.reads.background {
+            // Start every checkpoint before waiting for any one session.
+            let mut histories = Vec::new();
+            let mut pending = false;
+            for (key, agent) in &agents {
+                match self.read_history(agent).await {
+                    Ok(history) => histories.push((key.clone(), agent.clone(), history)),
+                    Err(_) => pending = true,
+                }
+            }
+            for (key, agent, history) in histories {
+                self.apply_forwarding_baseline(&key, &agent, Some(history))?;
+                self.reads.finish(&key);
+            }
+            if pending {
+                return Err(crate::reads::Pending.into());
+            }
+            self.refresh_forwarding()?;
+            if self.state.forwarding_revision == revision {
+                self.state.forwarding_enabled = true;
+                self.state.forwarding_resume_pending = false;
+                self.save()?;
+            }
+            return Ok(());
+        }
         let limit = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
         let mut readers = tokio::task::JoinSet::new();
         for (key, agent) in agents {
             let config = self.config.clone();
             let limit = limit.clone();
+            let database = self.reads.database.clone();
             readers.spawn(async move {
                 let _permit = limit.acquire_owned().await?;
                 let history = if let Some(session) = agent
@@ -147,7 +177,11 @@ impl Bridge {
                     .as_ref()
                     .filter(|session| output::supported(&session.agent))
                 {
-                    Some(output::read_history(&config, session).await?)
+                    Some(
+                        crate::reads::snapshot(&config, session, database)
+                            .await?
+                            .history,
+                    )
                 } else {
                     None
                 };
@@ -199,12 +233,12 @@ impl Bridge {
         if !self.state.mappings[key].forwarding_baseline_pending {
             return Ok(false);
         }
-        let history = if let Some(session) = agent
+        let history = if agent
             .agent_session
             .as_ref()
-            .filter(|session| output::supported(&session.agent))
+            .is_some_and(|session| output::supported(&session.agent))
         {
-            Some(output::read_history(&self.config, session).await?)
+            Some(self.read_history(agent).await?)
         } else {
             None
         };
@@ -384,6 +418,7 @@ impl Bridge {
 
     pub async fn reconcile(&mut self, agents: Vec<Agent>) -> Result<()> {
         self.refresh_forwarding()?;
+        self.last_snapshot = agents.clone();
         let mut current = BTreeMap::new();
         let mut uncertain_terminals = HashSet::new();
         for mut agent in agents {
@@ -402,6 +437,22 @@ impl Bridge {
             );
         }
         self.agents = current;
+        for key in self.agents.keys() {
+            self.reads.set_ended(key, false);
+        }
+        let read_keys = self
+            .agents
+            .keys()
+            .cloned()
+            .chain(
+                self.state
+                    .mappings
+                    .iter()
+                    .filter(|(_, mapping)| mapping.active)
+                    .map(|(key, _)| key.clone()),
+            )
+            .collect();
+        self.reads.retain(&read_keys);
         self.herdr_available = true;
         self.activate_forwarding().await?;
         ensure!(
@@ -411,8 +462,12 @@ impl Bridge {
         let keys: Vec<_> = self.agents.keys().cloned().collect();
         for key in keys {
             let agent = self.agents[&key].clone();
-            if self.reconcile_agent(&key, &agent).await.is_err() {
-                eprintln!("A session could not reconcile; other sessions remain available.");
+            if let Err(error) = self.reconcile_agent(&key, &agent).await {
+                if error.downcast_ref::<crate::reads::Pending>().is_none() {
+                    eprintln!("A session could not reconcile; other sessions remain available.");
+                }
+            } else {
+                self.reads.finish(&key);
             }
         }
         let ended: Vec<_> = self
@@ -430,6 +485,7 @@ impl Bridge {
             .map(|(key, _)| key.clone())
             .collect();
         for key in ended {
+            self.reads.set_ended(&key, true);
             let baselining = self.state.mappings[&key].forwarding_baseline_pending;
             if let Some(group) = self.state.mappings[&key].group_id_hex.clone() {
                 if let Some(agent) = self.state.mappings[&key].agent_record.clone()
@@ -438,6 +494,7 @@ impl Bridge {
                     eprintln!("Final reply for an ended session remains pending.");
                     continue;
                 }
+                self.reads.finish(&key);
                 if self.config.edit_responses && self.state.mappings[&key].response_id.is_some() {
                     self.state.update_response(
                         &key,
@@ -460,12 +517,12 @@ impl Bridge {
 
     async fn seed_native_history(&mut self, key: &str, agent: &Agent) -> Result<bool> {
         if !self.state.mappings[key].output_initialised
-            && let Some(session) = agent
+            && let Some(_) = agent
                 .agent_session
                 .as_ref()
                 .filter(|session| matches!(session.agent.as_str(), "codex" | "claude"))
         {
-            let finals = output::read_session(&self.config, session).await?;
+            let finals = self.read_history(agent).await?.finals;
             let mapping = self.state.mappings.get_mut(key).unwrap();
             mapping
                 .final_ids
@@ -486,12 +543,12 @@ impl Bridge {
         if self.seed_native_history(key, agent).await? {
             return Ok(());
         }
-        if let Some(session) = agent
+        if agent
             .agent_session
             .as_ref()
-            .filter(|s| output::supported(&s.agent))
+            .is_some_and(|s| output::supported(&s.agent))
         {
-            let history = output::read_history(&self.config, session).await?;
+            let history = self.read_history(agent).await?;
             if !self.state.forwarding_enabled {
                 let mapping = self.state.mappings.get_mut(key).unwrap();
                 let muted: HashSet<_> = mapping.muted_turns.iter().cloned().collect();
@@ -529,6 +586,45 @@ impl Bridge {
     }
 
     async fn reconcile_agent(&mut self, key: &str, agent: &Agent) -> Result<()> {
+        if self.reads.background
+            && agent
+                .agent_session
+                .as_ref()
+                .is_some_and(|s| output::supported(&s.agent))
+        {
+            let needs_read = self.state.mappings.get(key).is_none_or(|mapping| {
+                !mapping.output_initialised
+                    || mapping.forwarding_baseline_pending
+                    || (self.config.edit_responses && agent.agent_status == "working")
+                    || (agent.agent_status == "blocked"
+                        && agent
+                            .agent_session
+                            .as_ref()
+                            .is_some_and(|s| s.agent == "opencode")
+                        && (mapping.blocked_context_seq != Some(agent.state_change_seq)
+                            || now().saturating_sub(mapping.decision_checked_at) >= 5))
+                    || (agent.settled()
+                        && (mapping.last_state_change_seq != agent.state_change_seq
+                            || mapping.last_agent_status != agent.agent_status
+                            || mapping.completion_pending
+                            || now().saturating_sub(mapping.last_export_at) >= 30))
+            });
+            if needs_read {
+                let result = self
+                    .reads
+                    .read(&self.config, agent, self.state.forwarding_revision.clone())
+                    .await;
+                if let Err(error) = result {
+                    // Pending reads are silent. Progress/blocked-state updates remain
+                    // available when optional task or decision extraction fails.
+                    if !matches!(agent.agent_status.as_str(), "blocked" | "working")
+                        || error.downcast_ref::<crate::reads::Pending>().is_some()
+                    {
+                        return Err(error);
+                    }
+                }
+            }
+        }
         if !self.state.mappings.contains_key(key) {
             // Capture the initial final-message watermark before exposing a new group.
             let mut m = Mapping {
@@ -537,16 +633,17 @@ impl Bridge {
                 agent_record: Some(agent.clone()),
                 ..Mapping::default()
             };
-            if let Some(session) = agent
+            if agent
                 .agent_session
                 .as_ref()
-                .filter(|s| output::supported(&s.agent))
+                .is_some_and(|s| output::supported(&s.agent))
             {
-                let finals = output::read_session(&self.config, session).await?;
+                let finals = self.read_history(agent).await?.finals;
                 m.final_ids = finals.into_iter().map(|f| f.id).collect();
                 m.output_initialised = true;
                 if self.config.edit_responses && agent.settled() {
-                    m.task_revision = output::tasks::read_session(&self.config, session)
+                    m.task_revision = self
+                        .read_tasks(agent)
                         .await
                         .ok()
                         .flatten()
@@ -635,9 +732,9 @@ impl Bridge {
         if self.config.edit_responses
             && self.state.forwarding_enabled
             && agent.agent_status == "working"
-            && let Some(session) = &agent.agent_session
+            && agent.agent_session.is_some()
         {
-            match output::tasks::read_session(&self.config, session).await {
+            match self.read_tasks(agent).await {
                 Ok(Some(tasks))
                     if self.state.mappings[key].task_revision.as_ref() != Some(&tasks.revision)
                         || resumed =>
@@ -664,9 +761,11 @@ impl Bridge {
                     || mapping.decision_refresh_pending)
                     && now().saturating_sub(mapping.decision_checked_at) >= 5
             {
-                let decision =
-                    output::decision::read(&self.config, agent.agent_session.as_ref().unwrap())
-                        .await;
+                let decision = self
+                    .reads
+                    .read(&self.config, agent, self.state.forwarding_revision.clone())
+                    .await
+                    .map(|snapshot| snapshot.decision.clone());
                 self.state
                     .mappings
                     .get_mut(key)
@@ -738,13 +837,13 @@ impl Bridge {
                         false,
                     );
                 }
-                if let Some(session) = &agent.agent_session {
-                    self.state.mappings.get_mut(key).unwrap().task_revision =
-                        output::tasks::read_session(&self.config, session)
-                            .await
-                            .ok()
-                            .flatten()
-                            .map(|tasks| tasks.revision);
+                if agent.agent_session.is_some() {
+                    self.state.mappings.get_mut(key).unwrap().task_revision = self
+                        .read_tasks(agent)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|tasks| tasks.revision);
                 }
             }
             if self.state.mappings[key].completion_pending {
@@ -765,6 +864,39 @@ impl Bridge {
         m.agent_record = Some(agent.clone());
         self.save()?;
         Ok(())
+    }
+
+    async fn read_history(&mut self, agent: &Agent) -> Result<output::SessionHistory> {
+        Ok(self
+            .reads
+            .read(&self.config, agent, self.state.forwarding_revision.clone())
+            .await?
+            .history
+            .clone())
+    }
+
+    async fn read_tasks(&mut self, agent: &Agent) -> Result<Option<output::tasks::TaskList>> {
+        Ok(self
+            .reads
+            .read(&self.config, agent, self.state.forwarding_revision.clone())
+            .await?
+            .tasks
+            .clone())
+    }
+
+    /// Schedule independent transcript reads without waiting for their completion.
+    pub async fn poll_sessions(&mut self, agents: Vec<Agent>) -> Result<()> {
+        self.reads.background = true;
+        self.reconcile(agents).await
+    }
+
+    pub async fn poll_ready_sessions(&mut self) -> Result<()> {
+        // Completion wakes apply existing reads without starting another polling round.
+        // Preserve unknown-session terminals from the authoritative HERDR snapshot.
+        self.reads.scheduling = false;
+        let result = self.reconcile(self.last_snapshot.clone()).await;
+        self.reads.scheduling = true;
+        result
     }
 
     pub async fn inbound(&mut self, event: &Value) -> Result<()> {
@@ -1150,7 +1282,12 @@ impl Bridge {
             }
             return Ok(false);
         }
-        let Some(active) = output::decision::read(&self.config, session).await? else {
+        let active = if self.config.opencode_db.is_some() {
+            self.reads.fresh(&self.config, session).await?.decision
+        } else {
+            output::decision::read(&self.config, session).await?
+        };
+        let Some(active) = active else {
             if looks_like_answer || previous.is_some() {
                 return self.decision_notice(key, group, id, "No supported decision is available yet. Wait for its question card or use the terminal. No answer was sent.");
             }
@@ -1335,6 +1472,8 @@ impl Bridge {
     }
 
     pub async fn run(&mut self) -> Result<()> {
+        self.reads.background = true;
+        let reads_ready = self.reads.notify.clone();
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Value>(256);
         let marmot = self.marmot.clone();
         let account = self.config.account_id_hex.clone();
@@ -1367,6 +1506,11 @@ impl Bridge {
                     match herdr::snapshot(&self.herdr).await {
                         Ok(agents) => if self.reconcile(agents).await.is_err() { eprintln!("Session reconciliation failed; will retry."); },
                         Err(_) => { self.herdr_available = false; recovery_due = true; eprintln!("HERDR is unavailable; waiting for reconnection."); }
+                    }
+                },
+                _ = reads_ready.notified() => {
+                    if self.herdr_available && self.poll_ready_sessions().await.is_err() {
+                        eprintln!("Session reads remain pending.");
                     }
                 },
                 Some(event) = rx.recv() => {

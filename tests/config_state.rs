@@ -37,5 +37,7 @@ fn native_transcript_roots_default_for_old_configs_and_reject_relative_overrides
     let config = BridgeConfig::from_toml(&base).unwrap();
     assert!(config.codex_home.is_absolute());
     assert!(config.claude_home.is_absolute());
+    assert!(config.opencode_db.is_none());
+    assert!(BridgeConfig::from_toml(&(base.clone() + "opencode_db = 'relative.db'\n")).is_err());
     assert!(BridgeConfig::from_toml(&(base + "codex_home = 'relative'\n")).is_err());
 }

@@ -212,31 +212,7 @@ pub async fn read_session(config: &BridgeConfig, session: &Session) -> Result<Op
     match session.agent.as_str() {
         "opencode" => {
             let export = super::export_data(&config.opencode_bin, &session.value).await?;
-            let mut tracker = Tracker::default();
-            for message in export.messages {
-                if message.info.role == "user" {
-                    tracker.new_turn();
-                }
-                if message.info.role != "assistant" || message.info.error.is_some() {
-                    continue;
-                }
-                for (index, part) in message.parts.into_iter().enumerate() {
-                    if part.kind != "tool"
-                        || part.tool.as_deref() != Some("todowrite")
-                        || part.state["status"] != "completed"
-                    {
-                        continue;
-                    }
-                    let revision = format!(
-                        "opencode:{}:{}",
-                        message.info.id,
-                        part.id.unwrap_or_else(|| index.to_string())
-                    );
-                    tracker.call(&revision, "todowrite", &part.state["input"]);
-                    tracker.complete(&revision, &Value::Null, false, &revision);
-                }
-            }
-            Ok(tracker.latest)
+            Ok(from_data(&export))
         }
         "codex" | "claude" => {
             let provider = session.agent.clone();
@@ -258,4 +234,32 @@ pub async fn read_session(config: &BridgeConfig, session: &Session) -> Result<Op
         }
         _ => Ok(None),
     }
+}
+
+pub(super) fn from_data(export: &super::Export) -> Option<TaskList> {
+    let mut tracker = Tracker::default();
+    for message in &export.messages {
+        if message.info.role == "user" {
+            tracker.new_turn();
+        }
+        if message.info.role != "assistant" || message.info.error.is_some() {
+            continue;
+        }
+        for (index, part) in message.parts.iter().enumerate() {
+            if part.kind != "tool"
+                || part.tool.as_deref() != Some("todowrite")
+                || part.state["status"] != "completed"
+            {
+                continue;
+            }
+            let revision = format!(
+                "opencode:{}:{}",
+                message.info.id,
+                part.id.clone().unwrap_or_else(|| index.to_string())
+            );
+            tracker.call(&revision, "todowrite", &part.state["input"]);
+            tracker.complete(&revision, &Value::Null, false, &revision);
+        }
+    }
+    tracker.latest
 }

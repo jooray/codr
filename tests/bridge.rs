@@ -28,6 +28,7 @@ fn config(dir: &std::path::Path) -> BridgeConfig {
         account_id_hex: "aa".repeat(32),
         state_path: dir.join("state.json"),
         opencode_bin: dir.join("opencode"),
+        opencode_db: None,
         codex_home: dir.join("codex"),
         claude_home: dir.join("claude"),
         edit_responses: false,
@@ -121,6 +122,421 @@ fn export_script(path: &std::path::Path, text: &str, id: &str) {
     let data = json!({"messages":[{"info":{"id":id,"role":"assistant","time":{"completed":1},"finish":"stop"},"parts":[{"type":"text","text":text}]}]});
     std::fs::write(path, format!("#!/bin/sh\nprintf '%s' '{}'\n", data)).unwrap();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+#[tokio::test]
+async fn background_reads_deliver_a_fast_session_and_accept_input_while_another_is_slow() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let release = root.path().join("release");
+    let started = root.path().join("slow-started");
+    let data = json!({"messages":[{"info":{"id":"new-final","role":"assistant","time":{"completed":1},"finish":"stop"},"parts":[{"type":"text","text":"Fast answer"}]}]});
+    std::fs::write(&config.opencode_bin, format!("#!/bin/sh\nif [ \"$3\" = ses_slow ]; then touch {started:?}; while [ ! -e {release:?} ]; do sleep 0.01; done; fi\nprintf '%s' '{data}'\n")).unwrap();
+    std::fs::set_permissions(&config.opencode_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let herdr = peer(&config.herdr_socket, false, calls.clone()).await;
+    let mut bridge = Bridge::open(config).unwrap();
+    let fast = agent();
+    let mut slow = fast.clone();
+    slow.agent_session.as_mut().unwrap().value = "ses_slow".into();
+    slow.pane_id = "w1:p2".into();
+    for (a, group) in [(&fast, "bb".repeat(16)), (&slow, "dd".repeat(16))] {
+        bridge.state.mappings.insert(
+            a.key(),
+            Mapping {
+                group_id_hex: Some(group),
+                output_initialised: true,
+                active: true,
+                agent_record: Some(a.clone()),
+                last_agent_status: "idle".into(),
+                last_state_change_seq: 1,
+                ..Mapping::default()
+            },
+        );
+    }
+    let agents = vec![slow, fast.clone()];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        bridge.poll_sessions(agents.clone()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    for _ in 0..100 {
+        bridge.poll_sessions(agents.clone()).await.unwrap();
+        if started.exists()
+            && bridge
+                .state
+                .outbox
+                .iter()
+                .any(|item| item.group == "bb".repeat(16) && item.text == "Fast answer")
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(started.exists(), "The slow export must still be in flight");
+    assert!(
+        bridge
+            .state
+            .outbox
+            .iter()
+            .any(|item| item.group == "bb".repeat(16) && item.text == "Fast answer")
+    );
+    bridge.flush().await.unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        bridge.inbound(&inbound(HEX, "phone-during-export")),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        bridge.state.mappings[&fast.key()]
+            .seen_messages
+            .contains(&"phone-during-export".into())
+    );
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call["method"] == "agent.prompt")
+            .count(),
+        1
+    );
+    std::fs::write(release, "").unwrap();
+    mdk.abort();
+    herdr.abort();
+}
+
+#[tokio::test]
+async fn completion_wakes_keep_uncertain_sessions_active_and_do_not_restart_working_exports() {
+    let root = tempfile::tempdir().unwrap();
+    let config = editable_config(root.path());
+    let starts = root.path().join("starts");
+    std::fs::write(
+        &config.opencode_bin,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$3\" >> {starts:?}\nprintf '%s' '{{\"messages\":[]}}'\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&config.opencode_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut bridge = Bridge::open(config).unwrap();
+    let mut uncertain = agent();
+    let mut agents = Vec::new();
+    for index in 0..3 {
+        let mut a = agent();
+        a.pane_id = format!("w1:p{index}");
+        a.terminal_id = format!("term{index}");
+        a.agent_session.as_mut().unwrap().value = format!("ses_{index}");
+        a.agent_status = "working".into();
+        bridge.state.mappings.insert(
+            a.key(),
+            Mapping {
+                group_id_hex: Some(format!("{index:032x}")),
+                output_initialised: true,
+                active: true,
+                agent_record: Some(a.clone()),
+                last_agent_status: "working".into(),
+                last_state_change_seq: 1,
+                ..Mapping::default()
+            },
+        );
+        if index == 0 {
+            uncertain = a.clone();
+            a.agent_session = None;
+        }
+        agents.push(a);
+    }
+    bridge.poll_sessions(agents.clone()).await.unwrap();
+    for _ in 0..100 {
+        bridge.poll_ready_sessions().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(bridge.state.mappings[&uncertain.key()].active);
+    assert!(
+        !bridge
+            .state
+            .outbox
+            .iter()
+            .any(|item| item.text.starts_with("> ended"))
+    );
+    assert_eq!(
+        std::fs::read_to_string(&starts).unwrap().lines().count(),
+        2,
+        "Read completion must not trigger the next export before a scheduled poll"
+    );
+}
+
+#[tokio::test]
+async fn an_ended_session_requires_a_post_exit_snapshot_before_it_is_closed() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let source = root.path().join("export.json");
+    let started = root.path().join("started");
+    let release = root.path().join("release");
+    std::fs::write(&source, "{\"messages\":[]}").unwrap();
+    std::fs::write(&config.opencode_bin, format!("#!/bin/sh\ndata=$(cat {source:?})\ntouch {started:?}\nwhile [ ! -e {release:?} ]; do sleep 0.01; done\nprintf '%s' \"$data\"\n")).unwrap();
+    std::fs::set_permissions(&config.opencode_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut bridge = Bridge::open(config).unwrap();
+    let a = agent();
+    bridge.state.mappings.insert(
+        a.key(),
+        Mapping {
+            group_id_hex: Some("bb".repeat(16)),
+            output_initialised: true,
+            active: true,
+            agent_record: Some(a.clone()),
+            last_agent_status: "idle".into(),
+            last_state_change_seq: 1,
+            ..Mapping::default()
+        },
+    );
+    bridge.poll_sessions(vec![a.clone()]).await.unwrap();
+    for _ in 0..100 {
+        if started.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(started.exists());
+    std::fs::write(&source, json!({"messages":[{"info":{"id":"last-final","role":"assistant","time":{"completed":1},"finish":"stop"},"parts":[{"type":"text","text":"Final after exit"}]}]}).to_string()).unwrap();
+    bridge.poll_sessions(vec![]).await.unwrap();
+    std::fs::write(release, "").unwrap();
+    for _ in 0..100 {
+        bridge.poll_sessions(vec![]).await.unwrap();
+        if !bridge.state.mappings[&a.key()].active {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(!bridge.state.mappings[&a.key()].active);
+    assert!(
+        bridge
+            .state
+            .outbox
+            .iter()
+            .any(|item| item.text == "Final after exit")
+    );
+}
+
+#[tokio::test]
+async fn background_export_failure_still_announces_a_blocked_session() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    std::fs::write(&config.opencode_bin, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(&config.opencode_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut bridge = Bridge::open(config).unwrap();
+    let mut a = agent();
+    bridge.state.mappings.insert(
+        a.key(),
+        Mapping {
+            group_id_hex: Some("bb".repeat(16)),
+            output_initialised: true,
+            active: true,
+            agent_record: Some(a.clone()),
+            last_agent_status: "idle".into(),
+            last_state_change_seq: 1,
+            ..Mapping::default()
+        },
+    );
+    a.agent_status = "blocked".into();
+    a.state_change_seq = 2;
+    for _ in 0..100 {
+        bridge.poll_sessions(vec![a.clone()]).await.unwrap();
+        if bridge
+            .state
+            .outbox
+            .iter()
+            .any(|item| item.text.contains("Agent needs input in the terminal"))
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        bridge
+            .state
+            .outbox
+            .iter()
+            .any(|item| item.text.contains("Agent needs input in the terminal"))
+    );
+}
+
+#[tokio::test]
+async fn background_task_export_failure_does_not_hide_working_status() {
+    let root = tempfile::tempdir().unwrap();
+    let config = editable_config(root.path());
+    std::fs::write(&config.opencode_bin, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(&config.opencode_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut bridge = Bridge::open(config).unwrap();
+    let mut a = agent();
+    bridge.state.mappings.insert(
+        a.key(),
+        Mapping {
+            group_id_hex: Some("bb".repeat(16)),
+            output_initialised: true,
+            active: true,
+            agent_record: Some(a.clone()),
+            last_agent_status: "idle".into(),
+            last_state_change_seq: 1,
+            ..Mapping::default()
+        },
+    );
+    a.agent_status = "working".into();
+    a.state_change_seq = 2;
+    for _ in 0..100 {
+        bridge.poll_sessions(vec![a.clone()]).await.unwrap();
+        if bridge.state.mappings[&a.key()].last_agent_status == "working" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(bridge.state.mappings[&a.key()].last_agent_status, "working");
+    assert!(
+        bridge
+            .state
+            .outbox
+            .iter()
+            .any(|item| item.text == "> working")
+    );
+}
+
+#[tokio::test]
+async fn background_reads_discard_a_snapshot_from_an_older_agent_state() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let source = root.path().join("export.json");
+    let started = root.path().join("started");
+    let release = root.path().join("release");
+    let data = |id: &str, text: &str| {
+        json!({"messages":[{"info":{"id":id,"role":"assistant","time":{"completed":1},"finish":"stop"},"parts":[{"type":"text","text":text}]}]}).to_string()
+    };
+    std::fs::write(&source, data("stale", "Stale final")).unwrap();
+    std::fs::write(&config.opencode_bin, format!("#!/bin/sh\ndata=$(cat {source:?})\ntouch {started:?}\nwhile [ ! -e {release:?} ]; do sleep 0.01; done\nprintf '%s' \"$data\"\n")).unwrap();
+    std::fs::set_permissions(&config.opencode_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut bridge = Bridge::open(config).unwrap();
+    let mut a = agent();
+    bridge.state.mappings.insert(
+        a.key(),
+        Mapping {
+            group_id_hex: Some("bb".repeat(16)),
+            output_initialised: true,
+            active: true,
+            agent_record: Some(a.clone()),
+            last_agent_status: "idle".into(),
+            last_state_change_seq: 1,
+            ..Mapping::default()
+        },
+    );
+    bridge.poll_sessions(vec![a.clone()]).await.unwrap();
+    for _ in 0..100 {
+        if started.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(started.exists());
+    a.state_change_seq = 2;
+    std::fs::write(&source, data("current", "Current final")).unwrap();
+    std::fs::write(release, "").unwrap();
+    for _ in 0..100 {
+        bridge.poll_sessions(vec![a.clone()]).await.unwrap();
+        if bridge
+            .state
+            .outbox
+            .iter()
+            .any(|item| item.text == "Current final")
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        bridge
+            .state
+            .outbox
+            .iter()
+            .any(|item| item.text == "Current final")
+    );
+    assert!(
+        !bridge
+            .state
+            .outbox
+            .iter()
+            .any(|item| item.text == "Stale final")
+    );
+}
+
+#[tokio::test]
+async fn background_reads_limit_parallel_exports_and_ignore_results_after_desk_selection() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let starts = root.path().join("starts");
+    let release = root.path().join("release");
+    let data = json!({"messages":[{"info":{"id":"new-final","role":"assistant","time":{"completed":1},"finish":"stop"},"parts":[{"type":"text","text":"Must stay muted"}]}]});
+    std::fs::write(&config.opencode_bin, format!("#!/bin/sh\nprintf '%s\\n' \"$3\" >> {starts:?}\nwhile [ ! -e {release:?} ]; do sleep 0.01; done\nprintf '%s' '{data}'\n")).unwrap();
+    std::fs::set_permissions(&config.opencode_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    let agents: Vec<_> = (0..6)
+        .map(|index| {
+            let mut a = agent();
+            a.agent_session.as_mut().unwrap().value = format!("ses_{index}");
+            a.pane_id = format!("w1:p{index}");
+            bridge.state.mappings.insert(
+                a.key(),
+                Mapping {
+                    group_id_hex: Some(format!("{index:032x}")),
+                    output_initialised: true,
+                    active: true,
+                    agent_record: Some(a.clone()),
+                    last_agent_status: "idle".into(),
+                    last_state_change_seq: 1,
+                    ..Mapping::default()
+                },
+            );
+            a
+        })
+        .collect();
+    bridge.poll_sessions(agents.clone()).await.unwrap();
+    for _ in 0..100 {
+        if std::fs::read_to_string(&starts)
+            .unwrap_or_default()
+            .lines()
+            .count()
+            == 4
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(std::fs::read_to_string(&starts).unwrap().lines().count(), 4);
+    assert!(forwarding_command(&config, "desk").await.status.success());
+    std::fs::write(release, "").unwrap();
+    for _ in 0..100 {
+        bridge.poll_sessions(agents.clone()).await.unwrap();
+        if bridge
+            .state
+            .mappings
+            .values()
+            .all(|m| !m.forwarding_baseline_pending)
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(!bridge.state.forwarding_enabled);
+    assert!(
+        bridge
+            .state
+            .mappings
+            .values()
+            .all(|m| !m.forwarding_baseline_pending)
+    );
+    assert!(bridge.state.outbox.is_empty());
 }
 
 fn editable_config(dir: &std::path::Path) -> BridgeConfig {

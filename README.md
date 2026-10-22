@@ -4,7 +4,7 @@
 
 Supported agents: OpenCode, Codex, and Claude Code on Linux.
 
-*Source-build update: `[cd] session` names, `> status` notices, images, and direct Phonon-2 voice prompts. The v0.4.0 release predates these changes.*
+*Source builds add `[cd]` names, `> status` notices, images, local voice prompts, and incremental OpenCode reads. These changes postdate v0.4.0.*
 
 <img src="docs/screenshots/herdr-phone-progress.png" width="1280" alt="HERDR with the Garden planner task checklist beside matching working status and editable tasks in White Noise">
 
@@ -52,6 +52,8 @@ White Noise ↔ MDK ↔ codr ↔ HERDR ↔ your agent
 [MDK](https://github.com/marmot-protocol/mdk) handles identity, encrypted messaging, and relays. **codr** routes prompts through HERDR and reads completed replies from existing agent transcripts.
 
 Reply collection uses existing transcripts without an additional model call or terminal scraping. [Behaviour and recovery](docs/REFERENCE.md)
+
+OpenCode can use incremental, read-only SQLite reads instead of full exports. [Reader configuration](docs/REFERENCE.md#incremental-opencode-database-reads)
 
 **Limits:** Decision replies support OpenCode single-choice questions with 1–9 options. Other dialogs need the terminal. Avoid simultaneous terminal/phone answers. [Decision compatibility](docs/REFERENCE.md#answer-decisions-from-the-phone) · [Media and audio](docs/REFERENCE.md#images-and-voice-messages)
 

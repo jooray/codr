@@ -219,16 +219,16 @@ fn compact(text: &str) -> String {
 }
 
 pub fn from_export(value: &Value) -> Result<Option<Decision>> {
-    from_data(serde_json::from_value(value.clone())?)
+    from_data(&serde_json::from_value(value.clone())?)
 }
 
-fn from_data(export: super::Export) -> Result<Option<Decision>> {
+pub(super) fn from_data(export: &super::Export) -> Result<Option<Decision>> {
     let latest_user = export
         .messages
         .iter()
         .rposition(|message| message.info.role == "user");
     let mut found = None;
-    for (index, message) in export.messages.into_iter().enumerate() {
+    for (index, message) in export.messages.iter().enumerate() {
         if latest_user.is_some_and(|user| index < user)
             || message.info.role != "assistant"
             || message.info.error.is_some()
@@ -236,7 +236,7 @@ fn from_data(export: super::Export) -> Result<Option<Decision>> {
         {
             continue;
         }
-        for part in message.parts {
+        for part in &message.parts {
             if part.kind != "tool"
                 || part.tool.as_deref() != Some("question")
                 || part.state["status"] != "running"
@@ -273,6 +273,7 @@ fn from_data(export: super::Export) -> Result<Option<Decision>> {
             ensure!(size <= 12000, "Pending question is too large");
             let id = part
                 .id
+                .clone()
                 .filter(|id| !id.is_empty())
                 .ok_or_else(|| anyhow::anyhow!("Pending question has no identity"))?;
             ensure!(found.is_none(), "Multiple pending questions are ambiguous");
@@ -295,5 +296,5 @@ pub async fn read(
     if session.agent != "opencode" || session.kind != "id" {
         return Ok(None);
     }
-    from_data(super::export_data(&config.opencode_bin, &session.value).await?)
+    from_data(&super::export_data(&config.opencode_bin, &session.value).await?)
 }

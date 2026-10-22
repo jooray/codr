@@ -111,6 +111,8 @@ journalctl --user -u wn-agent-herdr.service -u herdr-white-noise-bridge.service 
 
 Configuration lives under `${XDG_CONFIG_HOME:-~/.config}/herdr-white-noise-bridge/config.toml`. The worker unit specifies that path explicitly. State uses `${XDG_STATE_HOME:-~/.local/state}/herdr-white-noise-bridge/state.json`.
 
+Current source builds support `opencode_db` for incremental, read-only OpenCode database reads. Select the database for the mapped sessions explicitly. See [reader configuration](REFERENCE.md#incremental-opencode-database-reads). The v0.4.0 binary does not support this setting.
+
 For Codex profiles, `codex_home` selects the directory containing `sessions` and `archived_sessions`. It defaults to `CODEX_HOME` or `~/.codex`. For Claude Code, `claude_home` selects the directory containing `projects`; it defaults to `CLAUDE_CONFIG_DIR` or `~/.claude`. Use absolute paths. Setup saves the installing shell's roots for new configurations, and preserves existing configurations during upgrades.
 
 If a supported agent appears without a native session ID, check its HERDR integration. Enable the matching HERDR integration when needed rather than guessing a transcript from its terminal title or repository. **codr** does not copy credentials or reconfigure the model provider.

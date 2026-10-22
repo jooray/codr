@@ -3,6 +3,7 @@ pub mod config;
 pub mod herdr;
 pub mod media;
 pub mod output;
+mod reads;
 pub mod state;
 pub mod wire;
 pub use config::BridgeConfig;

@@ -13,6 +13,9 @@ pub struct BridgeConfig {
     pub state_path: PathBuf,
     #[serde(default = "default_opencode")]
     pub opencode_bin: PathBuf,
+    /// Explicit database/profile selection. None keeps the CLI export reader.
+    #[serde(default)]
+    pub opencode_db: Option<PathBuf>,
     #[serde(default = "default_codex_home")]
     pub codex_home: PathBuf,
     #[serde(default = "default_claude_home")]
@@ -77,6 +80,12 @@ impl BridgeConfig {
             &config.claude_home,
         ] {
             ensure!(path.is_absolute(), "Configuration paths must be absolute");
+        }
+        if let Some(path) = &config.opencode_db {
+            ensure!(
+                path.is_absolute(),
+                "OpenCode database path must be absolute"
+            );
         }
         Ok(config)
     }

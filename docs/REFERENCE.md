@@ -20,6 +20,26 @@ The bridge uses one dedicated MDK identity across all mapped groups. Setup keeps
 
 HERDR snapshots refresh every three seconds. Very short intermediate states can occur between snapshots. Native session references preserve routing across pane moves. Group creation waits for HERDR to report a native session reference. During identity uncertainty, the bridge defers prompts and preserves the existing group.
 
+The worker reads session transcripts in background jobs, with at most four reads in parallel and one outstanding read per session. Each OpenCode snapshot supplies replies, tasks, and decisions together. Completed reads wake the worker without waiting for slower sessions. State changes and terminal submissions remain serial. Reads from an older session state or forwarding mode are discarded. An exiting session gets a fresh final transcript read before its mapping closes.
+
+The four-reader limit bounds background I/O, not chat subscriptions. The bridge listens for phone messages across all mapped chats.
+
+This removes serial transcript exports from the main loop. HERDR control requests, MDK delivery, and history recovery still await their own I/O. Parallel reads do not guarantee a fixed phone-delivery time.
+
+### Incremental OpenCode database reads
+
+Set `opencode_db` to the absolute path of the database used by the mapped OpenCode sessions. For a default Linux profile, this is usually `~/.local/share/opencode/opencode.db`. Expand `~` before adding the path to the configuration:
+
+```toml
+opencode_db = "/home/your-user/.local/share/opencode/opencode.db"
+```
+
+**codr** opens that database read-only and uses short SQLite read transactions. It does not change OpenCode tables, indexes, journal settings, or migrations. WAL mode lets OpenCode continue to write during a read.
+
+The first read loads the selected session once. Later reads use the indexed per-session event sequence and fetch only messages affected by new events. Updates to existing text, tasks, and questions are included. Unchanged sessions read no message or part bodies. Deletions remove cached content. A restart, replaced checkpoint, or event-log gap rebuilds the cache once. Durable reply IDs still prevent replay after a restart.
+
+This reader supports the v1 `message`/`part` projections and durable message-event format verified with OpenCode 1.19.3. The configured database must contain the mapped sessions. Missing sessions, unsupported message-event versions, and read errors defer collection. They do not silently switch to full exports. Without `opencode_db`, the CLI export reader remains available for installations with a different storage format.
+
 ### At desk / Away forwarding
 
 Use the HERDR action **White Noise forwarding: At desk / Away** to open the control popup. **Toggle White Noise forwarding** switches modes directly and can be bound to a HERDR shortcut.
@@ -97,7 +117,7 @@ These features require the current source build. The published v0.4.0 binary pre
 
 **codr** asks MDK's `download_media` API to fetch and decrypt each attachment. Keys stay in MDK. PNG, JPEG, WebP, and GIF images are copied into a private `media` directory beside bridge state. The prompt includes the local file paths and the original caption. The agent needs its normal local-file access to inspect them. Files remain there for later conversation access until you remove them.
 
-Audio goes through FFmpeg to 16 kHz mono WAV, then to a local Phonon-2 worker. Its transcript enters the same prompt route as typed text. There is no confirmation step or transcript echo. Supported question answers also use that route. The phone sees `> downloading` or `> transcribing` while preparation runs.
+Audio goes through FFmpeg to 16 kHz mono WAV, then to a local Phonon-2 worker. Its transcript enters the same prompt route as typed text. There is no confirmation step or transcript echo. Supported question answers also use that route. The phone sees `> downloading` or `> transcribing` while preparation runs. Download and local transcription add time before the agent starts.
 
 Downloads and transcription run separately from session updates, one media message at a time. Pending messages survive bridge restarts. Sender checks and session checks still apply. A preparation failure sends no agent prompt. An uncertain terminal submission is not repeated automatically.
 

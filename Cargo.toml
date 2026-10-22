@@ -17,3 +17,4 @@ tempfile = "3"
 fs2 = "0.4"
 uuid = { version = "1", features = ["v4", "serde"] }
 unicode-width = "0.2"
+rusqlite = { version = "0.37", features = ["bundled", "limits"] }
