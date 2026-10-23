@@ -36,10 +36,15 @@ struct Response {
 }
 
 impl Response {
-    fn finish(&mut self, replies: &mut Vec<FinalMessage>) {
+    fn finish(
+        &mut self,
+        replies: &mut Vec<FinalMessage>,
+        recent: &mut Vec<super::ConversationMessage>,
+    ) {
         if self.complete {
             let text = self.text.join("\n");
             if !text.trim().is_empty() {
+                super::record_message(recent, "Agent", &text);
                 replies.push(FinalMessage {
                     id: format!("claude:{}", self.last_row),
                     text,
@@ -195,6 +200,7 @@ pub(super) fn snapshot(
     let mut latest_turn = None;
     let mut turns = std::collections::BTreeSet::new();
     let mut user_inputs = Vec::new();
+    let mut recent_messages = Vec::new();
     for position in chain.into_iter().rev() {
         let row = &rows[position];
         if row.private || !row.same_session {
@@ -205,7 +211,8 @@ pub(super) fn snapshot(
                 format!("claude:{}", row.id),
                 &row.input_text,
             ));
-            response.finish(&mut replies);
+            response.finish(&mut replies, &mut recent_messages);
+            super::record_message(&mut recent_messages, "You", &row.input_text);
             latest_turn = Some(format!("claude:{}", row.id));
             turns.insert(latest_turn.clone().unwrap());
             tasks.new_turn();
@@ -255,7 +262,7 @@ pub(super) fn snapshot(
         // Duration/system markers and null stop reasons do not prove a successful final answer.
         response.complete = row.stop.as_deref() == Some("end_turn");
     }
-    response.finish(&mut replies);
+    response.finish(&mut replies, &mut recent_messages);
     Ok((
         super::SessionHistory {
             activity_at: native::modified_at(&path),
@@ -263,6 +270,7 @@ pub(super) fn snapshot(
             latest_turn,
             turns: turns.into_iter().collect(),
             user_inputs,
+            recent_messages,
         },
         tasks.latest,
     ))

@@ -6,6 +6,127 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
+#[tokio::test]
+async fn sync_excerpt_keeps_three_messages_in_order_across_all_transcript_readers() {
+    let session = "00000000-0000-0000-0000-000000000001";
+    for provider in ["opencode-v1", "opencode-v2", "codex", "claude"] {
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path());
+        let v1_user = |id, text| json!({"info":{"id":id,"role":"user"},"parts":[{"type":"text","text":text}]});
+        let v1_answer = |id, text| json!({"info":{"id":id,"role":"assistant","finish":"stop","time":{"completed":1}},"parts":[{"type":"text","text":text}]});
+        let v2_user = |id, text| json!({"id":id,"type":"user","text":text});
+        let v2_answer = |id, text| json!({"id":id,"type":"assistant","finish":"stop","time":{"completed":1},"content":[{"type":"text","text":text}]});
+        let codex_user =
+            |text| json!({"type":"event_msg","payload":{"type":"user_message","message":text}});
+        let codex_answer = |id, text| json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":id,"last_agent_message":text}});
+        let claude_user = |id, parent, text| json!({"sessionId":session,"uuid":id,"parentUuid":parent,"type":"user","message":{"content":text}});
+        let claude_answer = |id, parent, text| json!({"sessionId":session,"uuid":id,"parentUuid":parent,"type":"assistant","message":{"id":id,"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":text}]}});
+        let (path, mut rows, next_user) = match provider {
+            "opencode-v1" => (
+                root.path().join("data.json"),
+                vec![
+                    v1_user("old", "Old prompt"),
+                    v1_answer("first", "Earlier answer"),
+                    v1_user("followup", "Follow-up"),
+                    json!({"info":{"id":"tool","role":"assistant","finish":"tool-calls","time":{"completed":1}},"parts":[{"type":"text","text":"Tool output"}]}),
+                    v1_answer("last", "Latest answer"),
+                    json!({"info":{"id":"stream","role":"assistant","finish":"stop"},"parts":[{"type":"text","text":"Unfinished"}]}),
+                    json!({"info":{"id":"summary","role":"user","summary":true},"parts":[{"type":"text","text":"Internal summary"}]}),
+                ],
+                v1_user("new", "Newest prompt"),
+            ),
+            "opencode-v2" => (
+                root.path().join("data.json"),
+                vec![
+                    v2_user("old", "Old prompt"),
+                    v2_answer("first", "Earlier answer"),
+                    v2_user("followup", "Follow-up"),
+                    json!({"id":"tool","type":"assistant","finish":"tool-calls","time":{"completed":1},"content":[{"type":"text","text":"Tool output"}]}),
+                    v2_answer("last", "Latest answer"),
+                    json!({"id":"stream","type":"assistant","content":[{"type":"text","text":"Unfinished"}]}),
+                    json!({"id":"synthetic","type":"synthetic","text":"Internal summary"}),
+                ],
+                v2_user("new", "Newest prompt"),
+            ),
+            "codex" => (
+                config
+                    .codex_home
+                    .join(format!("sessions/rollout-{session}.jsonl")),
+                vec![
+                    json!({"type":"session_meta","payload":{"id":session}}),
+                    codex_user("Old prompt"),
+                    codex_answer("first", "Earlier answer"),
+                    codex_user("Follow-up"),
+                    json!({"type":"response_item","payload":{"type":"function_call_output","output":"Tool output"}}),
+                    codex_answer("last", "Latest answer"),
+                    codex_answer("last", "Duplicate answer"),
+                    json!({"type":"event_msg","payload":{"type":"agent_message","message":"Unfinished"}}),
+                ],
+                codex_user("Newest prompt"),
+            ),
+            _ => (
+                config
+                    .claude_home
+                    .join(format!("projects/project/{session}.jsonl")),
+                vec![
+                    claude_user("old", "", "Old prompt"),
+                    claude_answer("first", "old", "Earlier answer"),
+                    claude_user("followup", "first", "Follow-up"),
+                    json!({"sessionId":session,"uuid":"tool","parentUuid":"followup","type":"assistant","message":{"id":"tool","role":"assistant","stop_reason":"tool_use","content":[{"type":"text","text":"Tool output"}]}}),
+                    claude_answer("last", "tool", "Latest answer"),
+                    json!({"sessionId":session,"uuid":"private","parentUuid":"last","type":"user","isMeta":true,"message":{"content":"Internal summary"}}),
+                ],
+                claude_user("new", "last", "Newest prompt"),
+            ),
+        };
+        let opencode = provider.starts_with("opencode");
+        if opencode {
+            fs::write(
+                &config.opencode_bin,
+                "#!/bin/sh\ncat \"$(dirname \"$0\")/data.json\"\n",
+            )
+            .unwrap();
+            fs::set_permissions(&config.opencode_bin, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for additional_user in [false, true] {
+            if additional_user {
+                rows.push(next_user.clone());
+            }
+            fs::write(
+                &path,
+                if opencode {
+                    json!({"messages":rows}).to_string()
+                } else {
+                    rows.iter().map(|row| format!("{row}\n")).collect()
+                },
+            )
+            .unwrap();
+            let history = output::read_history(
+                &config,
+                &Session {
+                    source: "test".into(),
+                    agent: if opencode { "opencode" } else { provider }.into(),
+                    kind: "id".into(),
+                    value: session.into(),
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(history.recent_messages.len(), 3, "{provider}");
+            assert_eq!(
+                history.catch_up().as_deref(),
+                Some(if additional_user {
+                    "**You:**\nFollow-up\n\n**Agent:**\nLatest answer\n\n**You:**\nNewest prompt"
+                } else {
+                    "**Agent:**\nEarlier answer\n\n**You:**\nFollow-up\n\n**Agent:**\nLatest answer"
+                }),
+                "{provider}"
+            );
+        }
+    }
+}
+
 fn config(root: &std::path::Path) -> BridgeConfig {
     serde_json::from_value(json!({
         "phone_npub":"unused", "account_id_hex":"aa", "herdr_socket":root.join("herdr.sock"),
@@ -23,7 +144,18 @@ fn sync_replies_chunk_utf8_without_loss_or_ordinary_mute_bypass() {
         forwarding_enabled: false,
         ..Default::default()
     };
-    let text = "🦄".repeat(20000);
+    let history = output::SessionHistory {
+        recent_messages: [
+            ("Agent", "Earlier answer".into()),
+            ("You", "🦄".repeat(20000)),
+            ("Agent", "Latest answer".into()),
+        ]
+        .into_iter()
+        .map(|(speaker, text)| output::ConversationMessage { speaker, text })
+        .collect(),
+        ..Default::default()
+    };
+    let text = history.catch_up().unwrap();
     state.enqueue_manual("group", &text, "sync:request:group");
     assert_eq!(
         state

@@ -1094,9 +1094,9 @@ impl Bridge {
                         if history
                             .activity_at
                             .is_some_and(|at| at <= now() && at >= cutoff)
-                            && let Some(reply) = history.finals.last()
+                            && let Some(excerpt) = history.catch_up()
                         {
-                            replies.push((target, reply.text.clone()));
+                            replies.push((target, excerpt));
                         }
                     }
                     _ => unavailable += 1,
@@ -1120,10 +1120,10 @@ impl Bridge {
                 "in the past hour (no confirmed send history is available)"
             };
             format!(
-                "Sync: queued the latest assistant reply for {count} conversation(s) active {window}, each in its own White Noise chat. {unavailable} history reader(s) unavailable. Mute settings are unchanged; no prompt was sent."
+                "Sync: queued the last three conversation messages (or fewer if unavailable), labelled You or Agent, for {count} conversation(s) active {window}, each in its own White Noise chat. {unavailable} history reader(s) unavailable. Mute settings are unchanged; no prompt was sent."
             )
         } else {
-            "White Noise shortcuts:\n/help — show this list in this chat.\n/sync — send the latest assistant reply for each conversation active since one hour before the last confirmed message across all linked chats, each to its own chat; mute settings stay unchanged. With no confirmed send history, use the past hour.\n/status — show this session's connection and status.\nunmute or /unmute — enable forwarding for all chats without prompting an agent.\n\nDecision replies: use a listed number, exact option label, or /answer 2. If a question shows a code, include that code as requested. Other dialogs need the terminal.".into()
+            "White Noise shortcuts:\n/help — show this list in this chat.\n/sync — send the last three conversation messages (or fewer), labelled You or Agent, together in each eligible chat. A conversation qualifies if active since one hour before the last confirmed new outgoing message across all linked chats. With no confirmed send history, use the past hour. The excerpt may include older context; tool output and unfinished agent replies are excluded. Mute settings stay unchanged; no agent is prompted.\n/status — show this session's connection and status; this can resume forwarding globally.\nunmute or /unmute — enable forwarding for all chats without prompting an agent.\n\nOther text prompts the linked agent when idle and resumes global forwarding. Local terminal prompts mute all chats.\n\nDecision replies: use a listed number, exact option label, or /answer 2. If a question shows a code, include that code as requested. Other dialogs need the terminal.".into()
         };
         self.state
             .enqueue_manual(group, &response, &format!("command:{request}"));

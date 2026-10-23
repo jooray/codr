@@ -106,7 +106,7 @@ Send these as standalone text from the configured owner's account in a linked ch
 | Command | Result |
 | --- | --- |
 | `/help` | List the available commands and decision-reply syntax in this chat only. |
-| `/sync` | Send the latest completed assistant reply from each conversation active since one hour before the last confirmed message across all linked White Noise chats, each to its own chat. |
+| `/sync` | Send the last three conversation text messages (or fewer), labelled You or Agent and grouped in order, to each eligible conversation's own chat. Eligibility uses one hour before the last confirmed message across all linked White Noise chats. |
 | `/status` | Show the mapped session's status and connection. Like ordinary phone input, this can resume forwarding. |
 | `unmute` or `/unmute` | Resume automatic forwarding globally without prompting an agent. |
 
@@ -116,7 +116,9 @@ The cutoff is global, not per-chat and not relative to the time `/sync` is sent.
 
 The reference survives restarts and mute changes. Older installations without it recover the newest available own chat message from retained MDK history across all linked groups, paging past incoming messages when needed. With no confirmed send history, sync falls back to the past hour and says so in its reply. Unavailable timeline readers are reported along with other reader failures; the reference then uses the latest known confirmation.
 
-Conversation activity comes from source clocks, not polling: OpenCode message creation, streaming/update, and completion clocks, or the verified Codex/Claude session log's modification time. Histories with no known activity time, future activity times, no completed assistant reply, or activity before the shared cutoff are skipped. A failed reader does not prevent successful readers from contributing. Sync does not change normal reply checkpoints or replay all missed messages. Replies and long-message continuations use durable, idempotent delivery across restarts.
+Conversation activity comes from source clocks, not polling: OpenCode message creation, streaming/update, and completion clocks, or the verified Codex/Claude session log's modification time. Histories with no known activity time, future activity times, no conversation text, or activity before the shared cutoff are skipped. A failed reader does not prevent successful readers from contributing.
+
+The time window selects conversations, not individual excerpt messages. Each eligible conversation contributes its last three available user or completed assistant text messages in order, even if some context predates the cutoff. This is often Agent → You → Agent, but it follows the actual conversation and can end with an unanswered user prompt. Empty messages, attachment-only inputs, tool output, internal summaries, private subagent branches, and unfinished assistant replies are excluded. Each excerpt is grouped into one labelled catch-up message; very long excerpts use continuation messages. No model call is made. Sync does not change normal reply checkpoints or replay all missed messages. Catch-ups use durable, idempotent delivery across restarts.
 
 Recognition ignores capitalization and surrounding whitespace for `/help` and `/sync`. Longer prose, attachment captions, voice transcripts, and truncated input are not these commands. Use a listed number, an exact option label, or `/answer 2` for a supported pending decision; include the question code when its card requests one.
 

@@ -228,7 +228,7 @@ async fn shortcut_help_replies_in_its_own_chat_while_muted_without_herdr() {
 
 /// A manual catch-up includes only recent linked conversations and does not consume finals.
 #[tokio::test]
-async fn shortcut_sync_sends_latest_replies_to_their_own_chats_without_unmuting() {
+async fn shortcut_sync_sends_recent_excerpts_to_their_own_chats_without_unmuting() {
     let root = tempfile::tempdir().unwrap();
     let config = config(root.path());
     let calls = Arc::new(Mutex::new(vec![]));
@@ -312,11 +312,12 @@ async fn shortcut_sync_sends_latest_replies_to_their_own_chats_without_unmuting(
             .unwrap()
             .contains("1 history reader(s) unavailable")
     }));
-    assert!(
-        !sent
-            .iter()
-            .any(|c| c["text"].as_str().unwrap().contains("Local prompt"))
-    );
+    assert!(sent.iter().any(|c| {
+        c["text"]
+            .as_str()
+            .unwrap()
+            .contains("**You:**\nLocal prompt")
+    }));
     let count = sent.len();
     drop(bridge);
     let mut reopened = Bridge::open(config).unwrap();
@@ -332,6 +333,92 @@ async fn shortcut_sync_sends_latest_replies_to_their_own_chats_without_unmuting(
         count
     );
     mdk.abort();
+}
+
+/// Catch-up includes conversational context, not only the most recent answer.
+#[tokio::test]
+async fn shortcut_sync_sends_last_three_conversation_messages_with_speaker_labels() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    input_history(&config, "ses_1", &[], None);
+    let data = json!({"messages":[
+        {"info":{"id":"old-user","role":"user"},"parts":[{"type":"text","text":"Older prompt"}]},
+        {"info":{"id":"first","role":"assistant","finish":"stop","time":{"completed":1}},"parts":[{"type":"text","text":"Earlier answer"}]},
+        {"info":{"id":"question","role":"user"},"parts":[{"type":"text","text":"Follow-up question"},{"type":"text","text":"hidden instruction","synthetic":true}]},
+        {"info":{"id":"tool","role":"assistant","finish":"tool-calls","time":{"completed":1}},"parts":[{"type":"text","text":"Tool commentary"}]},
+        {"info":{"id":"last","role":"assistant","finish":"stop","time":{"completed":now()*1000}},"parts":[{"type":"text","text":"Latest answer"}]},
+        {"info":{"id":"streaming","role":"assistant","finish":"stop"},"parts":[{"type":"text","text":"Unfinished reply"}]}
+    ]});
+    std::fs::write(
+        config.opencode_bin.with_file_name("ses_1.json"),
+        data.to_string(),
+    )
+    .unwrap();
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge
+        .state
+        .mappings
+        .insert(agent().key(), activity_mapping(agent(), &"bb".repeat(16)));
+    herdr_white_noise_bridge::forwarding::set(&config.state_path, false).unwrap();
+    let mut event = inbound(HEX, "three-message-sync");
+    event["message"]["text"] = json!("/sync");
+    bridge.inbound(&event).await.unwrap();
+    assert!(bridge.state.outbox.iter().any(|item| item.manual && item.text == "**Agent:**\nEarlier answer\n\n**You:**\nFollow-up question\n\n**Agent:**\nLatest answer"));
+    assert!(!bridge.state.forwarding_enabled);
+    let batch = bridge.state.outbox.clone();
+    drop(bridge);
+    let mut reopened = Bridge::open(config).unwrap();
+    reopened.inbound(&event).await.unwrap();
+    assert_eq!(reopened.state.outbox, batch);
+}
+
+#[tokio::test]
+async fn shortcut_help_describes_three_message_sync_and_its_global_cutoff() {
+    let root = tempfile::tempdir().unwrap();
+    let mut bridge = Bridge::open(config(root.path())).unwrap();
+    bridge
+        .state
+        .mappings
+        .insert(agent().key(), activity_mapping(agent(), &"bb".repeat(16)));
+    let mut event = inbound(HEX, "current-help");
+    event["message"]["text"] = json!("/help");
+    bridge.inbound(&event).await.unwrap();
+    let help = &bridge.state.outbox[0].text;
+    assert!(help.contains("last three"));
+    assert!(help.contains("all linked chats"));
+    assert!(help.contains("one hour before"));
+    assert!(help.contains("Mute settings stay unchanged"));
+}
+
+#[tokio::test]
+async fn shortcut_sync_includes_a_recent_user_message_without_an_assistant_reply() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    input_history(
+        &config,
+        "ses_1",
+        &[("user", "A prompt still awaiting its answer")],
+        None,
+    );
+    let path = config.opencode_bin.with_file_name("ses_1.json");
+    let mut data: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    data["messages"][0]["info"]["time"] = json!({"created":now()*1000});
+    std::fs::write(path, data.to_string()).unwrap();
+    let mut bridge = Bridge::open(config).unwrap();
+    bridge
+        .state
+        .mappings
+        .insert(agent().key(), activity_mapping(agent(), &"bb".repeat(16)));
+    let mut event = inbound(HEX, "user-only-sync");
+    event["message"]["text"] = json!("/sync");
+    bridge.inbound(&event).await.unwrap();
+    assert!(
+        bridge
+            .state
+            .outbox
+            .iter()
+            .any(|item| item.text == "**You:**\nA prompt still awaiting its answer")
+    );
 }
 
 /// A reply written while the reader runs is current activity, not a future clock.
@@ -357,7 +444,7 @@ printf '{"messages":[{"info":{"id":"reply","role":"assistant","time":{"completed
             .state
             .outbox
             .iter()
-            .any(|item| item.text == "New during sync")
+            .any(|item| item.text == "**Agent:**\nNew during sync")
     );
 }
 
@@ -406,14 +493,14 @@ async fn sync_reference_uses_one_global_send_minus_an_hour_and_survives_restart(
             .state
             .outbox
             .iter()
-            .any(|item| item.group == "dd".repeat(16) && item.text == "ses_other")
+            .any(|item| item.group == "dd".repeat(16) && item.text.ends_with("\nses_other"))
     );
     assert!(
         bridge
             .state
             .outbox
             .iter()
-            .any(|item| item.group == "bb".repeat(16) && item.text == "ses_1")
+            .any(|item| item.group == "bb".repeat(16) && item.text.ends_with("\nses_1"))
     );
     assert!(
         !bridge
@@ -444,7 +531,7 @@ async fn sync_reference_uses_one_global_send_minus_an_hour_and_survives_restart(
             .state
             .outbox
             .iter()
-            .any(|item| ["ses_1", "ses_other", "ses_old"].contains(&item.text.as_str()))
+            .any(|item| item.text.starts_with("**You:**"))
     );
     mdk.abort();
 }
@@ -553,20 +640,26 @@ async fn sync_reference_bootstraps_legacy_state_from_global_own_message_history(
         serde_json::to_value(&bridge.state).unwrap()["last_confirmed_send_at"],
         reference
     );
-    assert!(bridge.state.outbox.iter().any(|item| item.text == "ses_1"));
     assert!(
         bridge
             .state
             .outbox
             .iter()
-            .any(|item| item.text == "ses_other")
+            .any(|item| item.text.ends_with("\nses_1"))
+    );
+    assert!(
+        bridge
+            .state
+            .outbox
+            .iter()
+            .any(|item| item.text.ends_with("\nses_other"))
     );
     assert!(
         !bridge
             .state
             .outbox
             .iter()
-            .any(|item| item.text == "ses_old")
+            .any(|item| item.text.ends_with("\nses_old"))
     );
     assert!(
         calls
@@ -1286,6 +1379,178 @@ async fn phone_input_wakes_all_groups_and_its_native_echo_does_not_mute_after_re
     assert!(!reopened.state.forwarding_enabled);
     mdk.abort();
     herdr.abort();
+}
+
+/// Characterize the screenshot's failure path without sending to live agents.
+/// The peer acknowledges submission; the fixture supplies the resulting transcript.
+#[tokio::test]
+async fn phone_echo_concatenation_controls_muting_and_late_final_delivery() {
+    const PHONE: &str = "This is just a test return with hello.";
+    const COMBINED: &str = "An unsent desktop draft. This is just a test return with hello.";
+    for v2 in [false, true] {
+        for restart in [false, true] {
+            for concatenated in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let mut config = config(root.path());
+                config.auto_forwarding = true;
+                config.edit_responses = true;
+                let observed = agent();
+                let group = "bb".repeat(16);
+                let write_history = |echo: Option<&str>, completed: bool| {
+                    let mut inputs = vec![("old", "Historical prompt")];
+                    if let Some(text) = echo {
+                        inputs.push(("phone", text));
+                    }
+                    input_history(
+                        &config,
+                        "ses_1",
+                        &inputs,
+                        completed.then_some(("hello-final", "Hello.")),
+                    );
+                    if v2 {
+                        let mut messages: Vec<_> = inputs
+                            .iter()
+                            .map(|(id, text)| json!({"id":id,"type":"user","text":text}))
+                            .collect();
+                        if completed {
+                            messages.push(json!({"id":"hello-final","type":"assistant","finish":"stop","time":{"completed":1},"content":[{"type":"text","text":"Hello."}]}));
+                        }
+                        std::fs::write(
+                            config.opencode_bin.with_file_name("ses_1.json"),
+                            json!({"messages":messages}).to_string(),
+                        )
+                        .unwrap();
+                    }
+                };
+                write_history(None, false);
+                let calls = Arc::new(Mutex::new(vec![]));
+                let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+                let herdr = peer(&config.herdr_socket, false, calls.clone()).await;
+                let mut bridge = Bridge::open(config.clone()).unwrap();
+                bridge
+                    .state
+                    .mappings
+                    .insert(observed.key(), activity_mapping(observed.clone(), &group));
+                bridge.reconcile(vec![observed.clone()]).await.unwrap();
+                let mut event = inbound(HEX, "phone-draft-test");
+                event["message"]["text"] = json!(PHONE);
+                bridge.inbound(&event).await.unwrap();
+                bridge.flush().await.unwrap();
+                assert!(
+                    calls
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|c| c["type"] == "send_final" && c["text"] == "> working...")
+                );
+                assert_eq!(
+                    calls
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|c| c["method"] == "agent.prompt")
+                        .count(),
+                    1
+                );
+                assert!(
+                    calls
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|c| c["method"] == "agent.prompt" && c["params"]["text"] == PHONE)
+                );
+                if restart {
+                    drop(bridge);
+                    bridge = Bridge::open(config.clone()).unwrap();
+                }
+                // Idle can arrive before the completed assistant transcript record.
+                write_history(Some(if concatenated { COMBINED } else { PHONE }), false);
+                let mut idle = observed.clone();
+                idle.state_change_seq = 2;
+                bridge.reconcile(vec![idle.clone()]).await.unwrap();
+                bridge.flush().await.unwrap();
+                assert_eq!(bridge.state.forwarding_enabled, !concatenated);
+                assert!(!calls.lock().unwrap().iter().any(|c| c["text"] == "Hello."));
+                assert!(!bridge.state.outbox.iter().any(|item| item.text == "> done"));
+                assert!(
+                    !calls
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|c| c["type"] == "edit_message" && c["text"] == "> done")
+                );
+                write_history(Some(if concatenated { COMBINED } else { PHONE }), true);
+                // No new agent state event accompanies the late transcript record.
+                // Muted turns have no pending response, so checkpoint on the next
+                // periodic export; exact phone replies must not need that timeout.
+                if concatenated {
+                    bridge
+                        .state
+                        .mappings
+                        .get_mut(&observed.key())
+                        .unwrap()
+                        .last_export_at = 0;
+                }
+                bridge.reconcile(vec![idle.clone()]).await.unwrap();
+                // Advance the persisted edit cooldown without wall-clock sleeps.
+                for item in &mut bridge.state.outbox {
+                    if let Some(delivery) = item.response.as_mut() {
+                        delivery.last_attempt_at = 0;
+                    }
+                }
+                bridge.flush().await.unwrap();
+                assert!(
+                    bridge.state.mappings[&observed.key()]
+                        .final_ids
+                        .iter()
+                        .any(|id| id == "hello-final")
+                );
+                assert_eq!(bridge.state.forwarding_enabled, !concatenated);
+                let sent = calls.lock().unwrap().clone();
+                assert_eq!(
+                    sent.iter()
+                        .filter(|c| c["type"] == "send_final"
+                            && c["text"] == "Hello."
+                            && c["group_id_hex"] == group)
+                        .count(),
+                    usize::from(!concatenated)
+                );
+                assert_eq!(
+                    sent.iter()
+                        .filter(|c| c["type"] == "edit_message" && c["text"] == "> done")
+                        .count(),
+                    usize::from(!concatenated)
+                );
+                // The consumed phone request must never prompt again after recovery.
+                drop(bridge);
+                let mut reopened = Bridge::open(config.clone()).unwrap();
+                reopened.reconcile(vec![idle]).await.unwrap();
+                reopened.inbound(&event).await.unwrap();
+                reopened.flush().await.unwrap();
+                assert_eq!(
+                    calls
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|c| c["method"] == "agent.prompt")
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    calls
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|c| c["type"] == "send_final" && c["text"] == "Hello.")
+                        .count(),
+                    usize::from(!concatenated)
+                );
+                assert_eq!(reopened.state.forwarding_enabled, !concatenated);
+                herdr.abort();
+                mdk.abort();
+            }
+        }
+    }
 }
 
 #[tokio::test]

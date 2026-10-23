@@ -27,11 +27,13 @@ pub(super) fn snapshot(
     let mut turns = std::collections::BTreeSet::new();
     let mut has_started_turn = false;
     let mut user_inputs = Vec::new();
+    let mut recent_messages = Vec::new();
     native::records(&path, |row| {
         tasks.codex_record(&row);
         let payload = &row["payload"];
         if row["type"] == "event_msg" && payload["type"] == "user_message" {
             let text = payload["message"].as_str().unwrap_or("");
+            super::record_message(&mut recent_messages, "You", text);
             let id = format!(
                 "codex:user:{}:{}",
                 user_inputs.len(),
@@ -93,6 +95,7 @@ pub(super) fn snapshot(
             .ok_or_else(|| anyhow::anyhow!("Codex completion lacks its turn ID"))?;
         let id = format!("codex:{turn}");
         if seen.insert(id.clone()) {
+            super::record_message(&mut recent_messages, "Agent", text);
             replies.push(FinalMessage {
                 turn: Some(id.clone()),
                 id,
@@ -112,6 +115,7 @@ pub(super) fn snapshot(
             latest_turn,
             turns: turns.into_iter().collect(),
             user_inputs,
+            recent_messages,
         },
         tasks.latest,
     ))

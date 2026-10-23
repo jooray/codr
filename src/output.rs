@@ -36,6 +36,38 @@ pub struct SessionHistory {
     pub latest_turn: Option<String>,
     pub turns: Vec<String>,
     pub user_inputs: Vec<crate::activity::UserInput>,
+    pub recent_messages: Vec<ConversationMessage>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ConversationMessage {
+    pub speaker: &'static str,
+    pub text: String,
+}
+
+impl SessionHistory {
+    /// A bounded conversation excerpt; never prompts an agent or includes tool output.
+    pub fn catch_up(&self) -> Option<String> {
+        (!self.recent_messages.is_empty()).then(|| {
+            self.recent_messages
+                .iter()
+                .map(|message| format!("**{}:**\n{}", message.speaker, message.text))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        })
+    }
+}
+
+fn record_message(recent: &mut Vec<ConversationMessage>, speaker: &'static str, text: &str) {
+    if !text.trim().is_empty() {
+        recent.push(ConversationMessage {
+            speaker,
+            text: text.into(),
+        });
+        if recent.len() > 3 {
+            recent.remove(0);
+        }
+    }
 }
 
 pub async fn read_history(
@@ -156,6 +188,7 @@ fn history_from_data(export: &Export) -> SessionHistory {
     let mut turns = std::collections::BTreeSet::new();
     let mut has_user = false;
     let mut user_inputs = Vec::new();
+    let mut recent_messages = Vec::new();
     for message in &export.messages {
         let info = &message.info;
         if info.role == "user" {
@@ -179,6 +212,7 @@ fn history_from_data(export: &Export) -> SessionHistory {
                     .collect::<Vec<_>>()
                     .join("\n");
                 let id = format!("opencode:{}", info.id);
+                record_message(&mut recent_messages, "You", &text);
                 user_inputs.push(if message.parts.is_empty() {
                     crate::activity::UserInput::pending(id)
                 } else {
@@ -217,6 +251,7 @@ fn history_from_data(export: &Export) -> SessionHistory {
             .collect::<Vec<_>>()
             .join("\n");
         if !text.trim().is_empty() {
+            record_message(&mut recent_messages, "Agent", &text);
             out.push(FinalMessage {
                 id: info.id.clone(),
                 text,
@@ -246,6 +281,7 @@ fn history_from_data(export: &Export) -> SessionHistory {
         latest_turn,
         turns: turns.into_iter().collect(),
         user_inputs,
+        recent_messages,
     }
 }
 

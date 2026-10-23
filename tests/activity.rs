@@ -74,3 +74,36 @@ fn incomplete_phone_echo_waits_for_text_without_consuming_attribution() {
     assert!(!state.observe(&[input("phone", "hello")]));
     assert!(!state.unresolved());
 }
+
+#[test]
+fn concatenated_phone_text_is_not_an_exact_phone_echo_after_restart() {
+    let phone = "This is just a test return with hello.";
+    for combined in [
+        format!("An unsent desktop draft. {phone}"),
+        format!("{phone} An unsent desktop draft."),
+    ] {
+        let mut state = Activity::default();
+        state.start_phone("receipt", phone, &[]);
+        state.confirm_phone("receipt");
+        let mut state: Activity =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert!(state.observe(&[input("combined", &combined)]));
+        // The mismatch consumes the receipt; a later exact match is not exempt.
+        assert!(state.observe(&[input("combined", &combined), input("later", phone)]));
+    }
+}
+
+#[test]
+fn phone_echo_allows_line_endings_but_not_changes_inside_the_message() {
+    for (echo, local) in [
+        ("  first line\nsecond line\n", false),
+        ("first line second line", true),
+        ("first line\n\nsecond line", true),
+        ("first line\nchanged second line", true),
+    ] {
+        let mut state = Activity::default();
+        state.start_phone("receipt", "first line\r\nsecond line", &[]);
+        state.confirm_phone("receipt");
+        assert_eq!(state.observe(&[input("echo", echo)]), local, "{echo:?}");
+    }
+}

@@ -37,6 +37,64 @@ fn complete() -> Value {
     json!({"role":"assistant","time":{"completed":1},"finish":"stop"})
 }
 
+#[test]
+fn sync_excerpt_tracks_database_user_and_assistant_messages_after_updates() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("opencode.db");
+    let db = database(&path);
+    for (id, role, text, at) in [
+        ("old", "user", "Old prompt", 1),
+        ("first", "assistant", "Earlier answer", 2),
+        ("question", "user", "Follow-up", 3),
+        ("last", "assistant", "Latest answer", 4),
+    ] {
+        message(
+            &db,
+            id,
+            at,
+            if role == "assistant" {
+                complete()
+            } else {
+                json!({"role":role})
+            },
+        );
+        part(&db, id, id, json!({"type":"text","text":text}));
+    }
+    let mut reader = Reader::default();
+    assert_eq!(
+        reader
+            .read(&path, "ses_fixture")
+            .unwrap()
+            .snapshot
+            .history
+            .catch_up()
+            .as_deref(),
+        Some("**Agent:**\nEarlier answer\n\n**You:**\nFollow-up\n\n**Agent:**\nLatest answer")
+    );
+    part(
+        &db,
+        "last",
+        "last",
+        json!({"type":"text","text":"Updated answer"}),
+    );
+    event(
+        &db,
+        1,
+        "message.part.updated.1",
+        json!({"part":{"messageID":"last"}}),
+    );
+    assert_eq!(
+        reader
+            .read(&path, "ses_fixture")
+            .unwrap()
+            .snapshot
+            .history
+            .catch_up()
+            .as_deref(),
+        Some("**Agent:**\nEarlier answer\n\n**You:**\nFollow-up\n\n**Agent:**\nUpdated answer")
+    );
+}
+
 /// Sync recency includes database content changes, even when message JSON clocks are old.
 #[test]
 fn sync_activity_tracks_message_and_part_update_columns() {
