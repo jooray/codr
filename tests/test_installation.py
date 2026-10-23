@@ -361,11 +361,16 @@ class SetupTests(unittest.TestCase):
             upgrade.assert_not_called()
 
     def test_setup_check_reports_deferred_readers_without_changing_services_or_config(self):
-        with self.mocks():
+        opencode = self.home / ".local/bin/opencode"
+        opencode.write_text("fixture")
+        opencode.chmod(0o700)
+        def find(name, candidates=()):
+            return str(opencode) if name == "opencode" else "/usr/bin/" + name
+        with self.mocks(), patch.object(setup, "find_executable", side_effect=find):
             setup.configure("npub1fixture", self.socket, self.runner)
         before = self.config.read_bytes()
         self.calls.clear()
-        with self.mocks(), patch.object(setup, "upgrade_transport") as upgrade:
+        with self.mocks(), patch.object(setup, "find_executable", side_effect=find), patch.object(setup, "upgrade_transport") as upgrade:
             result = setup.configure("npub1fixture", self.socket, self.runner, check=True)
             upgrade.assert_not_called()
         self.assertEqual(result["checked_session_readers"], 0)
@@ -513,6 +518,42 @@ class SetupTests(unittest.TestCase):
                         self.assertEqual(payload["EnvironmentVariables"]["KEEP_ME"], "yes")
                         self.assertEqual(running["transport"], unit.read_text())
                     self.assertTrue(all(loaded.values()))
+
+    def test_find_executable_keeps_the_path_entry_instead_of_the_symlink_target(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            real = root / "real-opencode"
+            real.write_text("fixture")
+            real.chmod(0o700)
+            link = root / "opencode"
+            link.symlink_to(real)
+            with patch.dict(os.environ, {"PATH": str(root)}):
+                self.assertEqual(setup.find_executable("opencode"), str(link))
+
+    def test_existing_install_repairs_a_moved_opencode_executable(self):
+        opencode = self.home / ".local/bin/opencode"
+        opencode.write_text("fixture")
+        opencode.chmod(0o700)
+        def find(name, candidates=()):
+            return str(opencode) if name == "opencode" else "/usr/bin/" + name
+        with self.mocks(), patch.object(setup, "find_executable", side_effect=find):
+            setup.configure("npub1fixture", self.socket, self.runner)
+            self.assertEqual(setup.tomllib.loads(self.config.read_text())["opencode_bin"], str(opencode))
+            text = self.config.read_text().replace(f'opencode_bin = "{opencode}"', 'opencode_bin = "/missing/opencode"')
+            self.config.write_text(text)
+            self.calls.clear()
+            setup.configure("npub1fixture", self.socket, self.runner)
+        self.assertEqual(setup.tomllib.loads(self.config.read_text())["opencode_bin"], str(opencode))
+        self.assertIn(["systemctl", "--user", "restart", "herdr-white-noise-bridge.service"], self.calls)
+
+    def test_check_reports_a_missing_opencode_executable_without_writing(self):
+        with self.mocks():
+            setup.configure("npub1fixture", self.socket, self.runner)
+        text = self.config.read_text().replace('opencode_bin = "/usr/bin/opencode"', 'opencode_bin = "/missing/opencode"')
+        self.config.write_text(text)
+        with self.mocks(), self.assertRaises(setup.SetupError):
+            setup.configure("npub1fixture", self.socket, self.runner, check=True)
+        self.assertIn('"/missing/opencode"', self.config.read_text())
 
 
 if __name__ == "__main__":

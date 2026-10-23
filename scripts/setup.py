@@ -54,15 +54,17 @@ def run(argv):
 
 
 def find_executable(name, candidates=()):
+    # Keep the PATH location instead of the symlink target. Homebrew upgrades
+    # replace the versioned Cellar path, which would break a stored executable.
     found = shutil.which(name)
     if found:
-        return str(Path(found).resolve())
+        return os.path.abspath(found)
     candidates = [Path(candidate) for candidate in candidates]
     if sys.platform == "darwin":
         candidates.extend([Path("/opt/homebrew/bin") / name, Path("/usr/local/bin") / name])
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
-            return str(candidate.resolve())
+            return str(candidate.absolute())
     raise SetupError(f"Required executable not found: {name}")
 
 
@@ -261,6 +263,32 @@ def check_readers(bridge, config_path, runner):
     return checked
 
 
+def repair_opencode_bin(bridge, existing, config_path, runner, check):
+    """Repair a configured OpenCode path that an upgrade or uninstall removed."""
+    configured = existing.get("opencode_bin")
+    if configured and Path(configured).is_file() and os.access(configured, os.X_OK):
+        return False
+    replacement = find_executable("opencode", [Path.home() / ".local/bin/opencode", Path.home() / ".opencode/bin/opencode"])
+    if check:
+        raise SetupError(f"The configured OpenCode executable is missing; rerun setup to select {replacement}")
+    if replacement == configured:
+        return False
+    text = config_path.read_text()
+    setting = toml_text({"opencode_bin": replacement}).rstrip()
+    text, changed = re.subn(r'(?m)^opencode_bin\s*=\s*"[^"]*"(?:[ \t]*#[^\n]*)?$', lambda _: setting, text, count=1)
+    if changed == 0 and "opencode_bin" not in existing:
+        text = text.rstrip() + "\n" + setting + "\n"
+    elif changed != 1:
+        raise SetupError("Could not replace the missing OpenCode executable; inspect the configuration")
+    with tempfile.TemporaryDirectory(prefix="codr-opencode-check-") as temporary:
+        candidate = Path(temporary) / "config.toml"
+        candidate.write_text(text)
+        runner([str(bridge), "--config", str(candidate), "status"])
+    private_write(config_path, text)
+    existing["opencode_bin"] = replacement
+    return True
+
+
 def private_write(path, text):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as output:
@@ -331,6 +359,7 @@ def _configure(owner, herdr_socket, runner, check, enable_audio):
         if selected and Path(selected).resolve() != Path(existing["herdr_socket"]).resolve():
             raise SetupError("Existing configuration targets another HERDR server; nothing was replaced")
         runner([str(bridge), "--config", str(config_path), "status"])
+        repaired_opencode = repair_opencode_bin(bridge, existing, config_path, runner, check)
         checked = check_readers(bridge, config_path, runner)
         if not check:
             upgrade_transport(existing, config_root, runner)
@@ -355,6 +384,8 @@ def _configure(owner, herdr_socket, runner, check, enable_audio):
                 manager.restart("herdr-white-noise-bridge")
         if not check:
             manager.start("herdr-white-noise-bridge")
+        if repaired_opencode:
+            manager.restart("herdr-white-noise-bridge")
         report = {"configuration": str(config_path), "existing_configuration_preserved": True,
                   "bridge_account_id": existing["account_id_hex"], "phone_round_trip": "requires user confirmation",
                   "checked_session_readers": checked, "reader_validation": "passed" if checked else "deferred: no live supported sessions"}
