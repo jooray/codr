@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Add `scripts/transcribe_gemini.py`, an optional voice transcriber that uses the Gemini API. It sends the voice audio to Google. The API key is read from `~/.config/codr/gemini-api-key`.
+
 ### Fixed
 
 - Keep stable executable paths across Homebrew upgrades and report missing OpenCode executables without exposing transcript data.
