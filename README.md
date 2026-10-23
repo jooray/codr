@@ -38,7 +38,7 @@ Or give your coding agent this prompt, with your own public key:
 
 ## Usage
 
-**Linux preview:** [v0.6.1](https://github.com/tidley/codr/releases/tag/v0.6.1) adds the recent progress, to-do, decision, and `unmute` updates for Linux x86-64 and ARM64. Install with `herdr plugin install tidley/codr --ref v0.6.1`, then run Setup. This is an opt-in prerelease; macOS users should keep `v0.6.0`. [Preview notes →](docs/releases/0.6.1.md)
+**Linux preview:** [v0.6.2](https://github.com/tidley/codr/releases/tag/v0.6.2) adds `/sync`, `/help`, muted invitation and naming fixes, and MDK 0.14 for Linux x86-64 and ARM64. **Before upgrading, stop the services and make a private, device-local backup of the complete connector home and secret-store credentials. MDK 0.14 storage migration is one-way; downgrade to 0.13 is unsupported.** Install with `herdr plugin install tidley/codr --ref v0.6.2`, then run Setup. This is an opt-in prerelease; macOS users should keep `v0.6.0`. [Preview notes →](docs/releases/0.6.2.md)
 
 1. Check the inviter against the bridge public key printed by setup, then accept the session's chat invitation.
 2. Send `/status` to check the connection. Send a prompt to continue that session.
