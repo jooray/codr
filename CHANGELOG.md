@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Build the dedicated connector from MDK 0.14.0 (`3fb4b4759ac676b0c21c4c3527074866c9fa4c89`), retaining the founding-admin and media-recovery extensions. Linux previews rebuild this connector instead of reusing 0.13 assets.
+- MDK 0.14.0 rekeys account databases and migrates storage on first open. Keep a device-local backup of the complete connector home and secret-store credentials before upgrading; downgrade to 0.13 is unsupported.
+
+### Fixed
+
+- Muting suppresses chat messages, not group invitations or automatic chat-name and description updates. Metadata updates do not wait for transcript reads.
+- Introduction messages use bracketed lowercase agent labels, such as `[oc] Casual greeting`, instead of legacy labels such as `OC | Casual greeting`.
+
 ## [0.6.1] - 2026-10-23 (Linux preview)
 
 ### Added

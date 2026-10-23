@@ -70,6 +70,13 @@ Version 0.6.0 enables automatic handoff by default: a new local native prompt mu
 
 For an existing installation, setup validates the configuration and selects the release-matched connector. A managed transport upgrade pauses the bridge and transport, replaces only the transport executable in its unit, then restarts both services. Configuration, identities, and mappings are preserved. Custom transport overrides require inspection before an upgrade. `--check` validates without changing services.
 
+MDK 0.13 to 0.14 requires a manual storage migration, not this executable-only upgrade.
+Setup refuses the older cohort before stopping services. Stop both services and keep a
+private, device-local backup of the complete connector home and credentials before the
+first 0.14 start. The migration rekeys databases and changes their schema; an old executable
+cannot reopen them. See [migration precautions](../patches/README.md). Do not restore
+old MLS state automatically after the new connector has received traffic.
+
 The binary installer replaces **codr**'s executable atomically. A running worker continues with its previous executable until restarted. Run setup first to select the matching connector. After that, a separately replaced bridge executable can be applied by restarting only the **codr** worker when work and group creation have settled:
 
 ```bash

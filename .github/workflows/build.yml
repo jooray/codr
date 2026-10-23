@@ -12,7 +12,7 @@ on:
         required: false
         type: string
       linux_preview:
-        description: 'Publish a Linux-only prerelease; reuse the matching v0.6.0 connector'
+        description: 'Publish a Linux-only prerelease; build the pinned connector from source'
         required: false
         default: false
         type: boolean
@@ -236,8 +236,11 @@ jobs:
             arch: aarch64
             target: aarch64-unknown-linux-musl
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    container: ubuntu:22.04
+    timeout-minutes: 120
     steps:
+      - name: Install native build tools
+        run: apt-get update && apt-get install -y build-essential musl-tools pkg-config libssl-dev git curl ca-certificates python3 unzip
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.source_ref || github.ref }}
@@ -245,9 +248,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
+      - name: Install portable Python for the Linux container
+        run: |
+          uv python install 3.11
+          dirname "$(uv python find --managed-python 3.11)" >> "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@v2
       - name: Require an explicitly Linux-only plugin checkout
         run: |
@@ -257,8 +262,6 @@ jobs:
           manifest = tomllib.loads(Path('herdr-plugin.toml').read_text())
           assert manifest['platforms'] == ['linux'], 'Preview must not advertise unsupported platforms'
           PY
-      - name: Install musl build tools
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Build and package Linux bridge
         env:
           TARGET: ${{ matrix.target }}
@@ -277,15 +280,36 @@ jobs:
           asset="codr-v$version-linux-$ARCH.tar.gz"
           tar -czf "dist/$asset" -C "target/$TARGET/release" herdr-white-noise-bridge
           (cd dist && sha256sum "$asset" > "$asset.sha256")
-      - name: Reuse the verified unchanged connector
+      - name: Read connector source pin
+        id: connector
+        run: python3 -c 'import os,tomllib; from pathlib import Path; m=tomllib.loads(Path("connector.toml").read_text()); open(os.environ["GITHUB_OUTPUT"],"a").write("revision="+m["revision"]+"\n")'
+      - uses: actions/checkout@v4
+        with:
+          repository: marmot-protocol/mdk
+          ref: ${{ steps.connector.outputs.revision }}
+          path: mdk
+          persist-credentials: false
+      - name: Apply connector patch
+        run: python3 scripts/connector_source.py mdk
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mdk -> target
+          shared-key: codr-connector-linux-${{ matrix.arch }}
+      - name: Test connector protocol and compatibility
+        working-directory: mdk
+        run: cargo test --locked -p agent-control -p agent-connector -j 2 -- --test-threads=1
+      - name: Build dedicated connector
+        working-directory: mdk
+        run: cargo build --locked --release -p agent-connector --bin wn-agent -j 2
+      - name: Package dedicated connector
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
           ARCH: ${{ matrix.arch }}
         run: |
-          mkdir connector-download
-          gh release download v0.6.0 --pattern "codr-wn-agent-v0.6.0-linux-$ARCH.tar.gz*" --dir connector-download
-          python3 scripts/repackage_connector.py "connector-download/codr-wn-agent-v0.6.0-linux-$ARCH.tar.gz" dist
+          test "$(mdk/target/release/wn-agent --version)" = "wn-agent $(python3 -c 'import tomllib; print(tomllib.load(open("connector.toml", "rb"))["version"])')"
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          asset="codr-wn-agent-v$version-linux-$ARCH.tar.gz"
+          tar -czf "dist/$asset" -C mdk/target/release wn-agent -C ../.. LICENSE CODR-CONNECTOR.json
+          (cd dist && sha256sum "$asset" > "$asset.sha256")
       - uses: actions/upload-artifact@v4
         with:
           name: codr-preview-${{ matrix.arch }}

@@ -9,6 +9,28 @@ use tokio::{
 };
 
 #[test]
+fn introduction_titles_use_bracketed_agent_labels_without_changing_topics() {
+    for (title, expected) in [
+        ("OC | Casual greeting", "[oc] Casual greeting"),
+        ("CC | Build the app", "[cc] Build the app"),
+        ("[oc] Casual greeting", "[oc] Casual greeting"),
+        ("Project | Keep my title", "Project | Keep my title"),
+        (
+            "A topic mentioning OC | another topic",
+            "A topic mentioning OC | another topic",
+        ),
+        ("OC | Safe\n title", "[oc] Safe title"),
+    ] {
+        let agent: Agent = serde_json::from_value(json!({
+            "pane_id":"w1:p1", "terminal_id":"term1", "agent":"opencode", "agent_status":"idle",
+            "terminal_title_stripped":title
+        }))
+        .unwrap();
+        assert_eq!(agent.title(), expected);
+    }
+}
+
+#[test]
 fn group_name_uses_the_herdr_tab_label_instead_of_repository_or_topic() {
     let agent: Agent = serde_json::from_value(json!({
         "pane_id":"w1:p1", "terminal_id":"term1", "agent":"opencode", "agent_status":"idle",

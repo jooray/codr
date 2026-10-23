@@ -138,8 +138,8 @@ class SetupTests(unittest.TestCase):
             dedicated.parent.mkdir(parents=True, exist_ok=True)
             dedicated.write_text("fixture")
         with patch.object(setup, "install_connector", side_effect=install) as download:
-            self.assertEqual(setup.ensure_mdk(lambda argv: "wn-agent 0.13.0"), dedicated)
-            self.assertEqual(setup.ensure_mdk(lambda argv: "wn-agent 0.13.0"), dedicated)
+            self.assertEqual(setup.ensure_mdk(lambda argv: f"wn-agent {setup.MDK_VERSION}"), dedicated)
+            self.assertEqual(setup.ensure_mdk(lambda argv: f"wn-agent {setup.MDK_VERSION}"), dedicated)
             self.assertEqual(download.call_count, 1)
 
     def test_managed_transport_upgrade_changes_only_the_executable(self):
@@ -259,7 +259,22 @@ class SetupTests(unittest.TestCase):
         calls = []
         def runner(argv):
             calls.append(argv)
-            return "wn-agent 0.14.0" if "--version" in argv else ""
+            return "wn-agent 0.15.0" if "--version" in argv else ""
+        with patch.object(setup, "ensure_mdk", return_value=installer.connector_path(installer.version())):
+            with self.assertRaisesRegex(setup.SetupError, "supported MDK cohort"):
+                setup.upgrade_transport(setup.tomllib.loads(self.config.read_text()), self.config.parents[1], runner)
+        self.assertEqual(unit.read_bytes(), original)
+        self.assertFalse(any("stop" in argv for argv in calls))
+
+    def test_013_storage_requires_manual_migration_before_services_are_stopped(self):
+        with self.mocks():
+            setup.configure("npub1fixture", self.socket, self.runner)
+        unit = self.config.parents[1] / "systemd/user/wn-agent-herdr.service"
+        original = unit.read_bytes()
+        calls = []
+        def runner(argv):
+            calls.append(argv)
+            return "wn-agent 0.13.0" if "--version" in argv else ""
         with patch.object(setup, "ensure_mdk", return_value=installer.connector_path(installer.version())):
             with self.assertRaisesRegex(setup.SetupError, "supported MDK cohort"):
                 setup.upgrade_transport(setup.tomllib.loads(self.config.read_text()), self.config.parents[1], runner)

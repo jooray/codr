@@ -1766,7 +1766,7 @@ async fn a_deferred_phone_wake_does_not_undo_a_later_desk_selection() {
 }
 
 #[tokio::test]
-async fn selecting_desk_during_a_transcript_read_prevents_a_new_invitation() {
+async fn selecting_desk_during_a_transcript_read_still_allows_an_invitation() {
     let dir = tempfile::tempdir().unwrap();
     let config = config(dir.path());
     let ready = dir.path().join("ready");
@@ -1791,10 +1791,15 @@ async fn selecting_desk_during_a_transcript_read_prevents_a_new_invitation() {
     std::fs::write(release, "").unwrap();
     let bridge = reconcile.await.unwrap();
     assert!(
-        calls.lock().unwrap().is_empty(),
-        "Do not submit group_create after the Desk control was written"
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call["type"] == "group_create_with_admins")
     );
-    assert!(bridge.state.mappings[&agent().key()].group_id_hex.is_none());
+    assert!(bridge.state.mappings[&agent().key()].group_id_hex.is_some());
+    assert!(!bridge.state.forwarding_enabled);
+    assert!(bridge.state.outbox.is_empty());
     mdk.abort();
 }
 
@@ -3224,7 +3229,7 @@ async fn legacy_native_session_that_exited_before_upgrade_does_not_replay_histor
 }
 
 #[tokio::test]
-async fn desk_selection_during_the_capability_probe_prevents_a_new_invitation() {
+async fn desk_selection_during_the_capability_probe_still_allows_an_invitation() {
     let root = tempfile::tempdir().unwrap();
     let config = config(root.path());
     export_script(&config.opencode_bin, "Historical answer", "old");
@@ -3255,9 +3260,11 @@ async fn desk_selection_during_the_capability_probe_prevents_a_new_invitation() 
     });
     let mut bridge = Bridge::open(config).unwrap();
     bridge.reconcile(vec![agent()]).await.unwrap();
-    assert!(bridge.state.mappings[&agent().key()].group_id_hex.is_none());
+    assert!(bridge.state.mappings[&agent().key()].group_id_hex.is_some());
     assert!(!bridge.state.mappings[&agent().key()].creating);
-    assert_eq!(captured.lock().unwrap().len(), 1);
+    assert!(!bridge.state.forwarding_enabled);
+    assert!(bridge.state.outbox.is_empty());
+    assert_eq!(captured.lock().unwrap().len(), 2);
     server.abort();
 }
 
@@ -4323,6 +4330,113 @@ fn mapped_bridge(config: BridgeConfig, observed: &Agent) -> Bridge {
         },
     );
     bridge
+}
+
+#[tokio::test]
+async fn muted_new_sessions_are_invited_once_without_sending_messages() {
+    for edits in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = config(root.path());
+        config.edit_responses = edits;
+        export_script(&config.opencode_bin, "Historical reply", "old");
+        herdr_white_noise_bridge::forwarding::set(&config.state_path, false).unwrap();
+        let calls = Arc::new(Mutex::new(vec![]));
+        let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+        let mut bridge = Bridge::open(config.clone()).unwrap();
+        bridge.reconcile(vec![agent()]).await.unwrap();
+        assert!(bridge.state.mappings[&agent().key()].group_id_hex.is_some());
+        assert!(!bridge.state.forwarding_enabled);
+        assert!(bridge.state.outbox.is_empty());
+        bridge.flush().await.unwrap();
+        drop(bridge);
+        let mut reopened = Bridge::open(config).unwrap();
+        reopened.reconcile(vec![agent()]).await.unwrap();
+        reopened.flush().await.unwrap();
+        let calls = calls.lock().unwrap();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call["type"] == "group_create_with_admins")
+                .count(),
+            1
+        );
+        assert!(
+            calls
+                .iter()
+                .all(|call| call["type"] != "send_final" && call["type"] != "edit_message")
+        );
+        mdk.abort();
+    }
+}
+
+#[tokio::test]
+async fn introduction_messages_use_the_current_agent_label() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    export_script(&config.opencode_bin, "Historical reply", "old");
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = peer(&config.wn_agent_socket, true, calls).await;
+    let mut observed = agent();
+    observed.terminal_title_stripped = Some("OC | Casual greeting".into());
+    let mut bridge = Bridge::open(config).unwrap();
+    bridge.reconcile(vec![observed]).await.unwrap();
+    assert!(bridge.state.outbox.iter().any(|item| {
+        item.text
+            .starts_with("Connected to herdr: [oc] Casual greeting.")
+    }));
+    assert!(
+        bridge
+            .state
+            .outbox
+            .iter()
+            .all(|item| !item.text.contains("OC |"))
+    );
+    mdk.abort();
+}
+
+#[tokio::test]
+async fn muted_tab_renames_do_not_wait_for_message_history() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let mut observed = agent();
+    observed.tab_label = Some("Review".into());
+    let profile = Arc::new(Mutex::new(GroupProfile {
+        subject: observed.group_name(),
+        description: observed.group_description(),
+        reject_updates: false,
+    }));
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = group_profile_peer(
+        &config.wn_agent_socket,
+        profile.clone(),
+        calls.clone(),
+        config.state_path.clone(),
+    )
+    .await;
+    let mut bridge = mapped_bridge(config.clone(), &observed);
+    herdr_white_noise_bridge::forwarding::set(&config.state_path, false).unwrap();
+    observed.tab_label = Some("Renamed".into());
+    // No transcript executable: metadata must still be updated while delivery is muted.
+    bridge.reconcile(vec![observed.clone()]).await.unwrap();
+    bridge.reconcile(vec![observed]).await.unwrap();
+    bridge.flush().await.unwrap();
+    assert_eq!(profile.lock().unwrap().subject, "[cd] Renamed");
+    let calls = calls.lock().unwrap();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call["type"] == "group_profile_update")
+            .count(),
+        1
+    );
+    assert!(
+        calls
+            .iter()
+            .all(|call| call["type"] != "send_final" && call["type"] != "edit_message")
+    );
+    assert!(!bridge.state.forwarding_enabled);
+    assert!(bridge.state.outbox.is_empty());
+    mdk.abort();
 }
 
 #[tokio::test]

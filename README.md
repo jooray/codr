@@ -1,5 +1,8 @@
 # **codr**
 
+**Canonical source, issues, and pull requests:** [ngit](https://gitworkshop.dev/npub19at4nqjjymca2lh3v546vcg5ktun3al4c5xu2pts3ewckv0y70ys0gupzr/relay.ngit.dev/codr).
+GitHub is a mirror for code, CI, and release downloads. [Contributing](CONTRIBUTING.md)
+
 **codr** connects coding agent sessions in [**herdr**](https://github.com/herdrdev/herdr) to [White Noise](https://github.com/marmot-protocol/whitenoise-android), with one encrypted chat per session. It forwards prompts to the mapped agent and returns completed replies to the same chat.
 
 Supported agents: OpenCode, Codex, and Claude Code on Linux and macOS.

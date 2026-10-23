@@ -50,12 +50,21 @@ impl Agent {
     pub fn settled(&self) -> bool {
         matches!(self.agent_status.as_str(), "idle" | "done")
     }
+    /// Format the introduction label using current bracketed agent codes.
     pub fn title(&self) -> String {
         let raw = self
             .terminal_title_stripped
             .as_deref()
             .unwrap_or(&self.agent);
-        raw.chars().filter(|c| !c.is_control()).take(60).collect()
+        let clean: String = raw.chars().filter(|c| !c.is_control()).take(60).collect();
+        match clean.split_once(" | ") {
+            Some((label, topic))
+                if label.len() == 2 && label.bytes().all(|byte| byte.is_ascii_uppercase()) =>
+            {
+                format!("[{}] {topic}", label.to_ascii_lowercase())
+            }
+            _ => clean,
+        }
     }
 
     pub fn group_name(&self) -> String {

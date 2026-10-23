@@ -455,12 +455,24 @@ impl Bridge {
             .collect();
         self.reads.retain(&read_keys);
         self.herdr_available = true;
+        let keys: Vec<_> = self.agents.keys().cloned().collect();
+        // Metadata is independent of message forwarding and transcript checkpoints.
+        for key in &keys {
+            if let Some(group) = self
+                .state
+                .mappings
+                .get(key)
+                .and_then(|m| m.group_id_hex.clone())
+            {
+                let agent = self.agents[key].clone();
+                self.sync_group_profile(key, &agent, &group).await;
+            }
+        }
         self.activate_forwarding().await?;
         ensure!(
             !self.state.forwarding_resume_pending,
             "Forwarding resume awaits its current history checkpoint"
         );
-        let keys: Vec<_> = self.agents.keys().cloned().collect();
         for key in keys {
             let agent = self.agents[&key].clone();
             if let Err(error) = self.reconcile_agent(&key, &agent).await {
@@ -682,11 +694,8 @@ impl Bridge {
         let name = agent.group_name();
         let description = agent.group_description();
         let m = &self.state.mappings[key];
-        if m.group_id_hex.is_none()
-            && !m.creating
-            && self.state.forwarding_enabled
-            && !self.activity_unresolved()
-        {
+        // Muting suppresses messages, not group invitations or metadata updates.
+        if m.group_id_hex.is_none() && !m.creating {
             let capabilities = self
                 .marmot
                 .marmot(json!({"type":"group_create_capabilities"}))
@@ -697,9 +706,6 @@ impl Bridge {
                 "The connector must support founding owner-admin rights before creating groups"
             );
             self.refresh_forwarding()?;
-            if !self.state.forwarding_enabled {
-                return Ok(());
-            }
             self.state.mappings.get_mut(key).unwrap().creating = true;
             self.save()?;
             // No blind retries: GroupCreate has no idempotency key, even after a timeout.
@@ -723,7 +729,6 @@ impl Bridge {
         let Some(group) = self.state.mappings[key].group_id_hex.clone() else {
             return Ok(());
         };
-        self.sync_group_profile(key, agent, &group).await;
         let previous = &self.state.mappings[key];
         let changed = previous.last_agent_status != agent.agent_status
             || previous.last_state_change_seq != agent.state_change_seq;

@@ -78,7 +78,7 @@ Remote **herdr** clients use their local key bindings by default. Add the bindin
 
 Startup no longer opens the popup automatically. Use the shortcut or action when you need manual control.
 
-- **At desk:** suppress outgoing messages and new group invitations while the bridge continues to listen for your phone.
+- **At desk:** suppress outgoing chat messages while the bridge continues to listen for your phone. New group invitations and chat-name/description updates remain active.
 - **Away:** forward progress and final replies from every mapped session.
 - A new message from the configured phone to any mapped group switches **all sessions** to Away. Already processed messages, your bridge's own messages, and other senders do not switch modes.
 
