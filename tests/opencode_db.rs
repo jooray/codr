@@ -37,6 +37,68 @@ fn complete() -> Value {
     json!({"role":"assistant","time":{"completed":1},"finish":"stop"})
 }
 
+/// Sync recency includes database content changes, even when message JSON clocks are old.
+#[test]
+fn sync_activity_tracks_message_and_part_update_columns() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("opencode.db");
+    let db = database(&path);
+    message(&db, "reply", 1, complete());
+    part(&db, "text", "reply", json!({"type":"text","text":"reply"}));
+    let mut reader = Reader::default();
+    assert_eq!(
+        reader
+            .read(&path, "ses_fixture")
+            .unwrap()
+            .snapshot
+            .history
+            .activity_at,
+        Some(0)
+    );
+    db.execute("UPDATE message SET time_updated=12345000", [])
+        .unwrap();
+    event(&db, 1, "message.updated.1", json!({"info":{"id":"reply"}}));
+    assert_eq!(
+        reader
+            .read(&path, "ses_fixture")
+            .unwrap()
+            .snapshot
+            .history
+            .activity_at,
+        Some(12345)
+    );
+    db.execute("UPDATE part SET time_updated=23456000", [])
+        .unwrap();
+    event(
+        &db,
+        2,
+        "message.part.updated.1",
+        json!({"part":{"messageID":"reply"}}),
+    );
+    assert_eq!(
+        reader
+            .read(&path, "ses_fixture")
+            .unwrap()
+            .snapshot
+            .history
+            .activity_at,
+        Some(23456)
+    );
+    db.execute_batch(
+        "ALTER TABLE message DROP COLUMN time_updated; ALTER TABLE part DROP COLUMN time_updated;",
+    )
+    .unwrap();
+    assert_eq!(
+        Reader::default()
+            .read(&path, "ses_fixture")
+            .unwrap()
+            .snapshot
+            .history
+            .activity_at,
+        Some(0)
+    );
+}
+
 #[test]
 fn attachment_only_database_input_is_complete_local_activity() {
     let root = tempfile::tempdir().unwrap();

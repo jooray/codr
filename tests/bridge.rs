@@ -168,6 +168,223 @@ fn activity_mapping(observed: Agent, group: &str) -> Mapping {
     }
 }
 
+/// Help is a private, replay-safe command response, not a prompt or a global wake.
+#[tokio::test]
+async fn shortcut_help_replies_in_its_own_chat_while_muted_without_herdr() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge
+        .state
+        .mappings
+        .insert(agent().key(), activity_mapping(agent(), &"bb".repeat(16)));
+    herdr_white_noise_bridge::forwarding::set(&config.state_path, false).unwrap();
+    let mut event = inbound(HEX, "help-command");
+    bridge
+        .state
+        .enqueue(&"bb".repeat(16), "Automatic output must stay muted");
+    event["message"]["text"] = json!(" /HeLp \n");
+    bridge.inbound(&event).await.unwrap();
+    bridge.flush().await.unwrap();
+    assert!(!bridge.state.forwarding_enabled);
+    assert!(
+        !herdr_white_noise_bridge::forwarding::load(&config.state_path)
+            .unwrap()
+            .enabled
+    );
+    let sent: Vec<_> = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|c| c["type"] == "send_final")
+        .cloned()
+        .collect();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["group_id_hex"], "bb".repeat(16));
+    let text = sent[0]["text"].as_str().unwrap();
+    for shortcut in ["/help", "/sync", "/status", "/unmute", "/answer"] {
+        assert!(text.contains(shortcut));
+    }
+    drop(bridge);
+    let mut reopened = Bridge::open(config).unwrap();
+    reopened.inbound(&event).await.unwrap();
+    reopened.flush().await.unwrap();
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c["type"] == "send_final")
+            .count(),
+        1
+    );
+    mdk.abort();
+}
+
+/// A manual catch-up includes only recent linked conversations and does not consume finals.
+#[tokio::test]
+async fn shortcut_sync_sends_latest_replies_to_their_own_chats_without_unmuting() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    for (session, group, age) in [
+        ("ses_1", "bb".repeat(16), 20),
+        ("ses_other", "dd".repeat(16), 60),
+        ("ses_old", "ee".repeat(16), 7200),
+        ("ses_future", "ab".repeat(16), 0),
+    ] {
+        let mut observed = agent();
+        observed.agent_session.as_mut().unwrap().value = session.into();
+        let mut mapping = activity_mapping(observed.clone(), &group);
+        mapping.final_ids.push("old-checkpoint".into());
+        mapping.pending_prompt = true;
+        mapping.active = false; // Recently ended conversations are still eligible.
+        bridge.state.mappings.insert(observed.key(), mapping);
+        input_history(
+            &config,
+            session,
+            &[("user", "Local prompt")],
+            Some(("last", session)),
+        );
+        let path = config
+            .opencode_bin
+            .with_file_name(format!("{session}.json"));
+        let mut data: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        data["messages"][0]["info"]["time"] =
+            json!({"created":(if age == 0 { now()+3600 } else { now()-age })*1000});
+        std::fs::write(path, data.to_string()).unwrap();
+    }
+    let mut missing = agent();
+    missing.agent_session.as_mut().unwrap().value = "ses_missing".into();
+    bridge
+        .state
+        .mappings
+        .insert(missing.key(), activity_mapping(missing, &"ff".repeat(16)));
+    let before = bridge.state.mappings.clone();
+    bridge.save().unwrap();
+    herdr_white_noise_bridge::forwarding::set(&config.state_path, false).unwrap();
+    let mut event = inbound(HEX, "sync-command");
+    event["message"]["text"] = json!("/sync");
+    bridge.inbound(&event).await.unwrap();
+    bridge.flush().await.unwrap();
+    assert!(!bridge.state.forwarding_enabled);
+    assert!(
+        !herdr_white_noise_bridge::forwarding::load(&config.state_path)
+            .unwrap()
+            .enabled
+    );
+    for (key, mapping) in &before {
+        assert_eq!(bridge.state.mappings[key].final_ids, mapping.final_ids);
+        assert_eq!(
+            bridge.state.mappings[key].pending_prompt,
+            mapping.pending_prompt
+        );
+    }
+    let sent: Vec<_> = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|c| c["type"] == "send_final")
+        .cloned()
+        .collect();
+    assert!(
+        sent.iter().any(|c| c["group_id_hex"] == "bb".repeat(16)
+            && c["text"].as_str().unwrap().contains("ses_1"))
+    );
+    assert!(sent.iter().any(|c| c["group_id_hex"] == "dd".repeat(16)
+        && c["text"].as_str().unwrap().contains("ses_other")));
+    assert!(!sent.iter().any(|c| c["group_id_hex"] == "ee".repeat(16)));
+    assert!(
+        !sent
+            .iter()
+            .any(|c| c["group_id_hex"] == "ab".repeat(16) || c["group_id_hex"] == "ff".repeat(16))
+    );
+    assert!(sent.iter().any(|c| {
+        c["text"]
+            .as_str()
+            .unwrap()
+            .contains("1 history reader(s) unavailable")
+    }));
+    assert!(
+        !sent
+            .iter()
+            .any(|c| c["text"].as_str().unwrap().contains("Local prompt"))
+    );
+    let count = sent.len();
+    drop(bridge);
+    let mut reopened = Bridge::open(config).unwrap();
+    reopened.inbound(&event).await.unwrap();
+    reopened.flush().await.unwrap();
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c["type"] == "send_final")
+            .count(),
+        count
+    );
+    mdk.abort();
+}
+
+/// A reply written while the reader runs is current activity, not a future clock.
+#[tokio::test]
+async fn shortcut_sync_accepts_activity_written_during_its_read() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    std::fs::write(&config.opencode_bin, r##"#!/bin/sh
+sleep 2
+printf '{"messages":[{"info":{"id":"reply","role":"assistant","time":{"completed":%s000},"finish":"stop"},"parts":[{"type":"text","text":"New during sync"}]}]}' "$(date +%s)"
+"##).unwrap();
+    std::fs::set_permissions(&config.opencode_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut bridge = Bridge::open(config).unwrap();
+    bridge
+        .state
+        .mappings
+        .insert(agent().key(), activity_mapping(agent(), &"bb".repeat(16)));
+    let mut event = inbound(HEX, "sync-during-reply");
+    event["message"]["text"] = json!("/sync");
+    bridge.inbound(&event).await.unwrap();
+    assert!(
+        bridge
+            .state
+            .outbox
+            .iter()
+            .any(|item| item.text == "New during sync")
+    );
+}
+
+/// Neither shortcut can be invoked by a different account, sender, or chat.
+#[tokio::test]
+async fn shortcut_commands_preserve_owner_account_and_group_authorization() {
+    for command in ["/sync", "/help"] {
+        for invalid in ["owner", "account", "group", "self"] {
+            let root = tempfile::tempdir().unwrap();
+            let config = config(root.path());
+            let mut bridge = Bridge::open(config.clone()).unwrap();
+            bridge
+                .state
+                .mappings
+                .insert(agent().key(), activity_mapping(agent(), &"bb".repeat(16)));
+            let mut event = inbound(HEX, "not-authorized");
+            event["message"]["text"] = json!(command);
+            match invalid {
+                "owner" => event["message"]["sender"]["account_id_hex"] = json!("22".repeat(32)),
+                "account" => event["account_id_hex"] = json!("33".repeat(32)),
+                "group" => event["group_id_hex"] = json!("44".repeat(16)),
+                _ => event["message"]["sender"]["is_self"] = json!(true),
+            }
+            let before = bridge.state.clone();
+            bridge.inbound(&event).await.unwrap();
+            assert_eq!(bridge.state, before);
+        }
+    }
+}
+
 #[tokio::test]
 async fn incomplete_input_in_an_ended_session_mutes_but_does_not_block_a_phone_wake() {
     let root = tempfile::tempdir().unwrap();
@@ -225,6 +442,74 @@ async fn incomplete_input_in_an_ended_session_mutes_but_does_not_block_a_phone_w
     );
     mdk.abort();
     herdr.abort();
+}
+
+/// Persisted command replies survive send failures, restarts, and later mute changes.
+#[tokio::test]
+async fn shortcut_delivery_retries_the_same_idempotency_key_without_resending_history() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge
+        .state
+        .mappings
+        .insert(agent().key(), activity_mapping(agent(), &"bb".repeat(16)));
+    let mut event = inbound(HEX, "offline-help");
+    event["message"]["text"] = json!("/help");
+    bridge.inbound(&event).await.unwrap();
+    let queued = bridge.state.outbox[0].clone();
+    assert!(bridge.flush().await.is_err());
+    drop(bridge);
+    herdr_white_noise_bridge::forwarding::set(&config.state_path, false).unwrap();
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    assert_eq!(bridge.state.outbox, vec![queued.clone()]);
+    bridge.inbound(&event).await.unwrap();
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    bridge.flush().await.unwrap();
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["idempotency_key"], queued.id);
+    assert!(!bridge.state.forwarding_enabled);
+    assert!(bridge.state.outbox.is_empty());
+    mdk.abort();
+}
+
+/// Only complete standalone text is a shortcut, never a caption or truncated message.
+#[tokio::test]
+async fn shortcut_commands_reject_captions_truncation_and_longer_text() {
+    for command in ["/help", "/sync"] {
+        for invalid in [
+            "caption",
+            "media",
+            "text_truncated",
+            "attachments_truncated",
+            "prose",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let config = config(root.path());
+            let mut bridge = Bridge::open(config.clone()).unwrap();
+            bridge
+                .state
+                .mappings
+                .insert(agent().key(), activity_mapping(agent(), &"bb".repeat(16)));
+            let mut event = inbound(HEX, "not-a-shortcut");
+            event["message"]["text"] = json!(command);
+            match invalid {
+                "caption" => event["message"]["attachments"] = json!([{"media_type":"image/png"}]),
+                "media" => event["message"]["media"] = json!([{"media_type":"audio/ogg"}]),
+                "prose" => event["message"]["text"] = json!(format!("{command} please")),
+                field => event["message"][field] = json!(true),
+            }
+            assert!(bridge.inbound(&event).await.is_err());
+            assert!(bridge.state.outbox.is_empty());
+            assert!(
+                bridge.state.mappings[&agent().key()]
+                    .seen_messages
+                    .is_empty()
+            );
+        }
+    }
 }
 
 /// An owner command wakes every chat, but never starts a new agent turn.

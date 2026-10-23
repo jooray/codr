@@ -82,7 +82,7 @@ impl Bridge {
                 || control.revision != "initial"
                 || !control.enabled;
             if reset {
-                self.state.outbox.clear();
+                self.state.outbox.retain(|item| item.manual);
                 for mapping in self.state.mappings.values_mut() {
                     mapping.response_id = None;
                     mapping.task_revision = None;
@@ -285,17 +285,14 @@ impl Bridge {
 
     pub async fn flush(&mut self) -> Result<()> {
         self.refresh_forwarding()?;
-        if !self.state.forwarding_enabled || self.activity_unresolved() {
-            return Ok(());
-        }
         let mut failed = HashSet::new();
         let mut outbox = self.state.outbox.clone();
         // Durable replies and their continuations precede best-effort progress.
-        outbox.sort_by_key(|item| item.response.is_some());
+        outbox.sort_by_key(|item| (!item.manual, item.response.is_some()));
         for item in outbox {
             self.refresh_forwarding()?;
-            if !self.state.forwarding_enabled || self.activity_unresolved() {
-                return Ok(());
+            if !item.manual && (!self.state.forwarding_enabled || self.activity_unresolved()) {
+                continue;
             }
             if !self
                 .state
@@ -984,6 +981,86 @@ impl Bridge {
         self.route_inbound(event, false).await
     }
 
+    /// White Noise-only commands bypass agent input and the global phone-wake path.
+    async fn chat_command(&mut self, key: &str, group: &str, id: &str, sync: bool) -> Result<()> {
+        use sha2::{Digest, Sha256};
+        self.refresh_forwarding()?;
+        let request = hex::encode(Sha256::digest(serde_json::to_vec(&(group, id))?));
+        let mut replies = Vec::new();
+        let mut unavailable = 0;
+        if sync {
+            let requested_at = now();
+            let limit = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+            let mut readers = tokio::task::JoinSet::new();
+            for (mapping_key, mapping) in &self.state.mappings {
+                let Some(target) = mapping.group_id_hex.clone() else {
+                    continue;
+                };
+                let Some(agent) = self
+                    .agents
+                    .get(mapping_key)
+                    .or(mapping.agent_record.as_ref())
+                    .filter(|agent| agent.key() == *mapping_key)
+                else {
+                    continue;
+                };
+                let Some(session) = agent
+                    .agent_session
+                    .clone()
+                    .filter(|session| output::supported(&session.agent))
+                else {
+                    continue;
+                };
+                let config = self.config.clone();
+                let limit = limit.clone();
+                readers.spawn(async move {
+                    let _permit = limit.acquire_owned().await?;
+                    Ok::<_, anyhow::Error>((target, output::read_history(&config, &session).await))
+                });
+            }
+            while let Some(result) = readers.join_next().await {
+                match result {
+                    Ok(Ok((target, Ok(history)))) => {
+                        if history.activity_at.is_some_and(|at| {
+                            at <= now() && at >= requested_at.saturating_sub(3600)
+                        }) && let Some(reply) = history.finals.last()
+                        {
+                            replies.push((target, reply.text.clone()));
+                        }
+                    }
+                    _ => unavailable += 1,
+                }
+            }
+        }
+        // Persist the complete batch and consumption together before any network send.
+        let before = self.state.clone();
+        let count = replies.len();
+        for (target, text) in replies {
+            self.state
+                .enqueue_manual(&target, &text, &format!("sync:{request}:{target}"));
+        }
+        let response = if sync {
+            format!(
+                "Sync: queued the latest assistant reply for {count} conversation(s) active in the past hour, each in its own White Noise chat. {unavailable} history reader(s) unavailable. Mute settings are unchanged; no prompt was sent."
+            )
+        } else {
+            "White Noise shortcuts:\n/help — show this list in this chat.\n/sync — send the latest assistant reply for each linked conversation active in the past hour to its own chat; mute settings stay unchanged.\n/status — show this session's connection and status.\nunmute or /unmute — enable forwarding for all chats without prompting an agent.\n\nDecision replies: use a listed number, exact option label, or /answer 2. If a question shows a code, include that code as requested. Other dialogs need the terminal.".into()
+        };
+        self.state
+            .enqueue_manual(group, &response, &format!("command:{request}"));
+        self.state
+            .mappings
+            .get_mut(key)
+            .unwrap()
+            .seen_messages
+            .push(id.into());
+        if let Err(error) = self.save() {
+            self.state = before;
+            return Err(error);
+        }
+        Ok(())
+    }
+
     async fn route_inbound(&mut self, event: &Value, prepared: bool) -> Result<()> {
         ensure!(
             event["marmot_agent_control"] == PROTOCOL,
@@ -1033,6 +1110,22 @@ impl Bridge {
             }
             return Ok(());
         }
+        let text = msg["text"].as_str().unwrap_or("");
+        let plain_command = !prepared
+            && msg["text_truncated"] != true
+            && msg["attachments_truncated"] != true
+            && msg["attachments"]
+                .as_array()
+                .is_none_or(|items| items.is_empty())
+            && msg["media"].as_array().is_none_or(|items| items.is_empty());
+        if plain_command
+            && (text.trim().eq_ignore_ascii_case("/sync")
+                || text.trim().eq_ignore_ascii_case("/help"))
+        {
+            return self
+                .chat_command(&key, group, id, text.trim().eq_ignore_ascii_case("/sync"))
+                .await;
+        }
         self.refresh_forwarding()?;
         forwarding::wake(&self.config.state_path, group, id)?;
         self.refresh_forwarding()?;
@@ -1045,7 +1138,6 @@ impl Bridge {
             !self.state.forwarding_resume_pending,
             "Forwarding resume awaits its current history checkpoint"
         );
-        let text = msg["text"].as_str().unwrap_or("");
         if !prepared
             && (text.trim().eq_ignore_ascii_case("unmute")
                 || text.trim().eq_ignore_ascii_case("/unmute"))

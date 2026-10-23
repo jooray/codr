@@ -30,6 +30,8 @@ pub async fn read_session(
 
 #[derive(Clone, Debug, Default)]
 pub struct SessionHistory {
+    /// Unix seconds of source activity; never the time this bridge polled it.
+    pub activity_at: Option<u64>,
     pub finals: Vec<FinalMessage>,
     pub latest_turn: Option<String>,
     pub turns: Vec<String>,
@@ -107,6 +109,8 @@ struct Info {
 }
 #[derive(Clone, Default, Deserialize)]
 struct MessageTime {
+    created: Option<u64>,
+    updated: Option<u64>,
     completed: Option<u64>,
 }
 #[derive(Clone, Deserialize)]
@@ -221,6 +225,23 @@ fn history_from_data(export: &Export) -> SessionHistory {
         }
     }
     SessionHistory {
+        activity_at: export
+            .messages
+            .iter()
+            .filter(|message| {
+                matches!(message.info.role.as_str(), "user" | "assistant")
+                    && message.info.summary != true
+            })
+            .flat_map(|message| {
+                [
+                    message.info.time.created,
+                    message.info.time.updated,
+                    message.info.time.completed,
+                ]
+            })
+            .flatten()
+            .max()
+            .map(|milliseconds| milliseconds / 1000),
         finals: out,
         latest_turn,
         turns: turns.into_iter().collect(),
@@ -348,6 +369,9 @@ struct MessageV2 {
 
 #[derive(Default, Deserialize)]
 struct MessageTimeV2 {
+    created: Option<u64>,
+    updated: Option<u64>,
+    streamed: Option<u64>,
     #[serde(default)]
     completed: Option<u64>,
 }
@@ -400,7 +424,16 @@ fn from_v2(export: ExportV2) -> Export {
                 info: Info {
                     id: message.id,
                     role: role.into(),
-                    time: MessageTime { completed },
+                    time: MessageTime {
+                        completed,
+                        created: message.time.created,
+                        updated: message
+                            .time
+                            .updated
+                            .into_iter()
+                            .chain(message.time.streamed)
+                            .max(),
+                    },
                     finish,
                     error: message.error,
                     summary: Value::Bool(false),

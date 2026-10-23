@@ -78,6 +78,9 @@ pub struct Outgoing {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response: Option<ResponseDelivery>,
+    /// An explicit owner command may reply once even while automatic forwarding is muted.
+    #[serde(default)]
+    pub manual: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -151,20 +154,35 @@ impl BridgeState {
         if !self.forwarding_enabled {
             return;
         }
+        self.enqueue_text(group, text, None);
+    }
+
+    /// Queue an owner-requested reply with stable per-chunk transport idempotency keys.
+    pub fn enqueue_manual(&mut self, group: &str, text: &str, request: &str) {
+        self.enqueue_text(group, text, Some(request));
+    }
+
+    fn enqueue_text(&mut self, group: &str, text: &str, request: Option<&str>) {
         // Keep each encrypted message below MDK's message-size ceiling.
         let mut rest = text;
+        let mut part = 0;
         while !rest.is_empty() {
             let mut end = rest.len().min(30000);
             while !rest.is_char_boundary(end) {
                 end -= 1;
             }
             self.outbox.push(Outgoing {
-                id: uuid::Uuid::new_v4().to_string(),
+                id: request.map_or_else(
+                    || uuid::Uuid::new_v4().to_string(),
+                    |request| format!("{request}:{part}"),
+                ),
                 group: group.into(),
                 text: rest[..end].into(),
                 response: None,
+                manual: request.is_some(),
             });
             rest = &rest[end..];
+            part += 1;
         }
     }
 
@@ -185,6 +203,7 @@ impl BridgeState {
             group: group.into(),
             text: "> working...".into(),
             response: Some(ResponseDelivery::default()),
+            manual: false,
         });
         self.mappings.get_mut(key).unwrap().response_id = Some(id);
     }
@@ -202,6 +221,7 @@ impl BridgeState {
                 durable: true,
                 ..ResponseDelivery::default()
             }),
+            manual: false,
         });
         Some(id)
     }

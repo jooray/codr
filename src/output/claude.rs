@@ -258,6 +258,7 @@ pub(super) fn snapshot(
     response.finish(&mut replies);
     Ok((
         super::SessionHistory {
+            activity_at: native::modified_at(&path),
             finals: replies,
             latest_turn,
             turns: turns.into_iter().collect(),

@@ -80,13 +80,13 @@ Startup no longer opens the popup automatically. Use the shortcut or action when
 
 - **At desk:** suppress outgoing chat messages while the bridge continues to listen for your phone. New group invitations and chat-name/description updates remain active.
 - **Away:** forward progress and final replies from every mapped session.
-- A new message from the configured phone to any mapped group switches **all sessions** to Away. Already processed messages, your bridge's own messages, and other senders do not switch modes.
+- A new message from the configured phone to any mapped group switches **all sessions** to Away, except the read-only `/help` and `/sync` commands. Already processed messages, your bridge's own messages, and other senders do not switch modes.
 
 To resume forwarding without asking an agent to do work, send `unmute` or `/unmute` by itself in any linked White Noise chat. **codr** consumes the command and confirms in that chat after the normal history checkpoint. It works in busy, blocked, and ended conversations. It does not start a turn or answer a pending decision. Recognition ignores capitalization and surrounding whitespace; longer messages, attachment captions, voice transcripts, and truncated input are not commands. Only the configured phone owner can use it. Muted history is not replayed, and duplicate deliveries cannot unmute again after a later mute.
 
 In the popup, enter **1** for At desk, **2** for Away, **3** to toggle, or **q** to close. Press Enter after your choice. Muting applies to every mapped session; it does not stop the transport or change your groups.
 
-The selected mode survives restarts. Mode changes discard the outgoing backlog. Before Away becomes active, the bridge checkpoints replies for all active sessions. The popup shows **Away requested** while a transcript checkpoint is pending. Completed muted turns remain suppressed even if their transcript records arrive late. An operation already submitted to MDK can still arrive after you select At desk.
+The selected mode survives restarts. Mode changes discard the automatic outgoing backlog, but preserve explicitly requested `/help` and `/sync` replies. Before Away becomes active, the bridge checkpoints replies for all active sessions. The popup shows **Away requested** while a transcript checkpoint is pending. Completed muted turns remain suppressed even if their transcript records arrive late. An operation already submitted to MDK can still arrive after you select At desk.
 
 The command-line controls work while the worker runs:
 
@@ -98,6 +98,23 @@ The command-line controls work while the worker runs:
 ```
 
 Forwarding defaults to Away on an existing installation. The control file is private and separate from routing state, so changing modes does not stop either service.
+
+### White Noise chat commands
+
+Send these as standalone text from the configured owner's account in a linked chat:
+
+| Command | Result |
+| --- | --- |
+| `/help` | List the available commands and decision-reply syntax in this chat only. |
+| `/sync` | Send the latest completed assistant reply from each linked conversation active in the past hour to its own White Noise chat. |
+| `/status` | Show the mapped session's status and connection. Like ordinary phone input, this can resume forwarding. |
+| `unmute` or `/unmute` | Resume automatic forwarding globally without prompting an agent. |
+
+`/help` and `/sync` do not prompt agents, answer questions, create groups, or change mute settings. They work while muted or **herdr** is disconnected. Recently ended mapped conversations can participate in sync. The command chat receives a count of queued conversations and unavailable readers; a queued send does not prove phone receipt. Retrying the same inbound event does not resend the catch-up. A new `/sync` message requests a new catch-up, even for a reply sent before.
+
+The hour is measured from source activity, not polling: OpenCode message creation, streaming/update, and completion clocks, or the verified Codex/Claude session log's modification time. Histories with no known activity time, future activity times, no completed assistant reply, or activity older than an hour are skipped. A failed reader does not prevent successful readers from contributing. Sync does not change normal reply checkpoints or replay all missed messages. Replies and long-message continuations use durable, idempotent delivery across restarts.
+
+Recognition ignores capitalization and surrounding whitespace for `/help` and `/sync`. Longer prose, attachment captions, voice transcripts, and truncated input are not these commands. Use a listed number, an exact option label, or `/answer 2` for a supported pending decision; include the question code when its card requests one.
 
 ### Editable progress and separate final replies
 

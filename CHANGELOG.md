@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+
+- Owner-only `/sync` sends the latest completed assistant reply from linked conversations active in the past hour to their own White Noise chats. It includes recently ended mappings, uses source activity times, and leaves mute settings and normal reply checkpoints unchanged.
+- Owner-only `/help` lists White Noise commands and decision-reply syntax in the requesting chat. Both commands work while muted, never prompt agents, and retain durable replay-safe replies across bridge restarts.
+
 ### Changed
 
 - Build the dedicated connector from MDK 0.14.0 (`3fb4b4759ac676b0c21c4c3527074866c9fa4c89`), retaining the founding-admin and media-recovery extensions. Linux previews rebuild this connector instead of reusing 0.13 assets.

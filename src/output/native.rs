@@ -9,6 +9,17 @@ use std::{
 const MAX_FILE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_RECORD_BYTES: u64 = 16 * 1024 * 1024;
 
+/// A session log's modification time counts tool and assistant activity as well as input.
+pub fn modified_at(path: &Path) -> Option<u64> {
+    fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|time| time.as_secs())
+}
+
 pub fn session_id(value: &str) -> Result<String> {
     Ok(uuid::Uuid::parse_str(value)
         .map_err(|_| anyhow::anyhow!("Invalid native session UUID"))?
