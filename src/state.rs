@@ -183,7 +183,7 @@ impl BridgeState {
         self.outbox.push(Outgoing {
             id: id.clone(),
             group: group.into(),
-            text: "> working".into(),
+            text: "> working...".into(),
             response: Some(ResponseDelivery::default()),
         });
         self.mappings.get_mut(key).unwrap().response_id = Some(id);
@@ -239,7 +239,11 @@ impl BridgeState {
             self.outbox.retain(|item| item.id != id);
             return;
         }
-        item.text = if let Some(tasks) = item.text.strip_prefix("> working\n") {
+        item.text = if let Some(tasks) = item
+            .text
+            .strip_prefix("> working...\n")
+            .or_else(|| item.text.strip_prefix("> working\n"))
+        {
             format!("> done\n{tasks}")
         } else {
             "> done".into()

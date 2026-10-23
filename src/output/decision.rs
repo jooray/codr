@@ -296,5 +296,78 @@ pub async fn read(
     if session.agent != "opencode" || session.kind != "id" {
         return Ok(None);
     }
-    from_data(&super::export_data(&config.opencode_bin, &session.value).await?)
+    Ok(
+        super::read_opencode_snapshot(config, session, Default::default())
+            .await?
+            .decision,
+    )
+}
+
+/// V2 exports contain settled messages only; pending questions live in session forms.
+pub(super) async fn read_v2(bin: &std::path::Path, session: &str) -> Result<Option<Decision>> {
+    ensure!(
+        session.starts_with("ses_")
+            && session
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-'),
+        "Invalid OpenCode session identity"
+    );
+    let path = format!("/api/session/{session}/form");
+    let output = super::run_command(bin, &["api", "get", &path], 1024 * 1024).await?;
+    let value: Value = serde_json::from_reader(std::io::BufReader::new(output))?;
+    from_forms(&value, session)
+}
+
+pub fn from_forms(value: &Value, session: &str) -> Result<Option<Decision>> {
+    let forms = value["data"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("Invalid session forms"))?;
+    let mut found = None;
+    for form in forms
+        .iter()
+        .filter(|form| form["metadata"]["kind"] == "question")
+    {
+        ensure!(
+            form["sessionID"] == session,
+            "Question belongs to another session"
+        );
+        ensure!(found.is_none(), "Multiple pending questions are ambiguous");
+        let message = form["metadata"]["tool"]["messageID"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Question has no message identity"))?;
+        let tool = form["metadata"]["tool"]["id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Question has no tool identity"))?;
+        let fields = form["fields"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("Invalid question fields"))?;
+        let mut questions = Vec::new();
+        for (index, field) in fields.iter().enumerate() {
+            ensure!(
+                field["key"] == format!("q{index}")
+                    && matches!(field["type"].as_str(), Some("string" | "multiselect")),
+                "Unsupported question field"
+            );
+            let options = field["options"]
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("Question has no options"))?;
+            ensure!(options.iter().all(|option| option["value"].is_string() && option["value"] == option["label"]),
+                "Unsupported question option mapping");
+            questions.push(serde_json::json!({
+                "question": field["description"], "header": field["title"], "options": options,
+                "custom": field.get("custom").cloned().unwrap_or(Value::Bool(false)),
+                "multiple": field["type"] == "multiselect"
+            }));
+        }
+        // Share the legacy parser's size, option-count, and ambiguity checks.
+        found = from_export(&serde_json::json!({"messages":[{
+            "info":{"id":message,"role":"assistant"}, "parts":[{
+                "type":"tool","id":tool,"tool":"question",
+                "state":{"status":"running","input":{"questions":questions}}
+            }]
+        }]}))?;
+    }
+    Ok(found)
 }

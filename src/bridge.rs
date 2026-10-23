@@ -604,7 +604,9 @@ impl Bridge {
                 self.config.auto_forwarding
                     || !mapping.output_initialised
                     || mapping.forwarding_baseline_pending
-                    || (self.config.edit_responses && agent.agent_status == "working")
+                    || (self.config.edit_responses
+                        && (agent.agent_status == "working"
+                            || (agent.settled() && mapping.response_id.is_some())))
                     || (agent.agent_status == "blocked"
                         && agent
                             .agent_session
@@ -707,7 +709,7 @@ impl Bridge {
                         let group = response["group_id_hex"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| anyhow::anyhow!("Missing group ID"))?.to_owned();
                         let m = self.state.mappings.get_mut(key).unwrap(); m.group_id_hex = Some(group.clone()); m.creating = false;
                         m.group_name = Some(name.clone()); m.group_description = Some(description.clone());
-                        self.state.enqueue(&group, &format!("Connected to HERDR: {}. Send a message here to prompt this session. Use /status for its state.", agent.title()));
+                        self.state.enqueue(&group, &format!("Connected to herdr: {}. Send a message here to prompt this session. Use /status for its state.", agent.title()));
                         self.save()?;
                     }
                     Err(error) => {
@@ -743,7 +745,8 @@ impl Bridge {
                 }
                 self.state.begin_response(key, &group);
                 if resumed {
-                    self.state.update_response(key, &group, "> working", false);
+                    self.state
+                        .update_response(key, &group, "> working...", false);
                 }
             } else if status_changed
                 && !agent.settled()
@@ -757,8 +760,12 @@ impl Bridge {
                 );
             }
         } else if previous.last_agent_status != agent.agent_status && agent.agent_status != "done" {
-            self.state
-                .enqueue(&group, &format!("> {}", agent.agent_status));
+            let status = if agent.agent_status == "working" {
+                "working..."
+            } else {
+                &agent.agent_status
+            };
+            self.state.enqueue(&group, &format!("> {status}"));
         }
         let m = self.state.mappings.get_mut(key).unwrap();
         m.last_agent_status = agent.agent_status.clone();
@@ -771,7 +778,8 @@ impl Bridge {
         self.save()?;
         if self.config.edit_responses
             && self.state.forwarding_enabled
-            && agent.agent_status == "working"
+            && (agent.agent_status == "working"
+                || (agent.settled() && self.state.mappings[key].response_id.is_some()))
             && agent.agent_session.is_some()
         {
             match self.read_tasks(agent).await {
@@ -869,14 +877,8 @@ impl Bridge {
         {
             self.collect_finals(key, agent, &group).await?;
             if self.config.edit_responses {
-                if self.state.mappings[key].response_id.is_some() {
-                    self.state.update_response(
-                        key,
-                        &group,
-                        "> idle Waiting for the completed reply.",
-                        false,
-                    );
-                }
+                // Runtime idle can precede the native final. Keep progress and its
+                // checklist intact until collect_finals completes the response.
                 if agent.agent_session.is_some() {
                     self.state.mappings.get_mut(key).unwrap().task_revision = self
                         .read_tasks(agent)
@@ -966,7 +968,7 @@ impl Bridge {
 
     pub async fn poll_ready_sessions(&mut self) -> Result<()> {
         // Completion wakes apply existing reads without starting another polling round.
-        // Preserve unknown-session terminals from the authoritative HERDR snapshot.
+        // Preserve unknown-session terminals from the authoritative herdr snapshot.
         self.reads.scheduling = false;
         let result = self.reconcile(self.last_snapshot.clone()).await;
         self.reads.scheduling = true;
@@ -1031,13 +1033,38 @@ impl Bridge {
         self.refresh_forwarding()?;
         ensure!(
             self.herdr_available,
-            "HERDR unavailable; inbound message deferred until recovery"
+            "herdr unavailable; inbound message deferred until recovery"
         );
         self.activate_forwarding().await?;
         ensure!(
             !self.state.forwarding_resume_pending,
             "Forwarding resume awaits its current history checkpoint"
         );
+        let text = msg["text"].as_str().unwrap_or("");
+        if !prepared
+            && (text.trim().eq_ignore_ascii_case("unmute")
+                || text.trim().eq_ignore_ascii_case("/unmute"))
+            && msg["text_truncated"] != true
+            && msg["attachments_truncated"] != true
+            && msg["attachments"]
+                .as_array()
+                .is_none_or(|items| items.is_empty())
+            && msg["media"].as_array().is_none_or(|items| items.is_empty())
+        {
+            // The shared phone-wake path already resumed all chats. Consume this
+            // command before any agent readiness, prompt, or decision handling.
+            self.state
+                .mappings
+                .get_mut(&key)
+                .unwrap()
+                .seen_messages
+                .push(id.into());
+            self.state.enqueue(
+                group,
+                "White Noise forwarding is enabled for all chats. No prompt was sent.",
+            );
+            return self.save();
+        }
         ensure!(
             self.agents.contains_key(&key) || !self.state.mappings[&key].active,
             "Session identity is uncertain; phone input deferred"
@@ -1045,7 +1072,6 @@ impl Bridge {
         if let Some(agent) = self.agents.get(&key).cloned() {
             self.baseline_forwarding(&key, &agent).await?;
         }
-        let text = msg["text"].as_str().unwrap_or("");
         if text != "/status"
             && !text.trim().is_empty()
             && msg["text_truncated"] != true
@@ -1056,7 +1082,7 @@ impl Bridge {
         {
             return Ok(());
         }
-        // A final transcript record can lag HERDR's idle state. Resolve it before
+        // A final transcript record can lag herdr's idle state. Resolve it before
         // opening another response, so it cannot overwrite the next prompt's message.
         if self.config.edit_responses
             && text != "/status"
@@ -1161,7 +1187,7 @@ impl Bridge {
         self.save()?;
         let response = if text == "/status" {
             Some(format!(
-                "> {} HERDR session: {}.",
+                "> {} herdr session: {}.",
                 self.state.mappings[&key].last_agent_status,
                 if self.agents.contains_key(&key) {
                     "connected"
@@ -1578,7 +1604,7 @@ impl Bridge {
                 .as_ref()
                 .map(Agent::group_description)
                 .unwrap_or_else(|| {
-                    "Workspace: unknown\nAgent: unknown\nManaged by codr via HERDR.".into()
+                    "Workspace: unknown\nAgent: unknown\nManaged by codr via herdr.".into()
                 });
             // MDK 0.13 exposes the subject but not the description. Remember only
             // confirmed metadata writes, so matching titles can still gain details.
@@ -1627,7 +1653,7 @@ impl Bridge {
         Ok(())
     }
 
-    /// Keep a live group's title and description in step with HERDR. A title the
+    /// Keep a live group's title and description in step with herdr. A title the
     /// user changed is never overwritten, and an uncertain profile update is never retried.
     async fn sync_group_profile(&mut self, key: &str, agent: &Agent, group: &str) {
         let desired_name = agent.group_name();
@@ -1767,7 +1793,7 @@ impl Bridge {
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
         });
-        // Authoritative snapshots avoid relying on HERDR's non-durable, differently shaped event payloads.
+        // Authoritative snapshots avoid relying on herdr's non-durable, differently shaped event payloads.
         // State-change sequence and stored assistant message IDs also catch work completed between snapshots.
         let mut tick = tokio::time::interval(Duration::from_secs(3));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1784,7 +1810,7 @@ impl Bridge {
                 _ = tick.tick() => {
                     match herdr::snapshot(&self.herdr).await {
                         Ok(agents) => if self.reconcile(agents).await.is_err() { eprintln!("Session reconciliation failed; will retry."); },
-                        Err(_) => { self.herdr_available = false; recovery_due = true; eprintln!("HERDR is unavailable; waiting for reconnection."); }
+                        Err(_) => { self.herdr_available = false; recovery_due = true; eprintln!("herdr is unavailable; waiting for reconnection."); }
                     }
                 },
                 _ = reads_ready.notified() => {

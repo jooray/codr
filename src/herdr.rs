@@ -94,7 +94,7 @@ impl Agent {
                 .collect::<String>()
         };
         format!(
-            "Workspace: {}\nAgent: {}\nManaged by codr via HERDR.",
+            "Workspace: {}\nAgent: {}\nManaged by codr via herdr.",
             clean(workspace),
             clean(agent)
         )
@@ -144,7 +144,7 @@ fn group_title(label: &str, workspace: Option<&str>) -> String {
 pub async fn snapshot(socket: &Socket) -> Result<Vec<Agent>> {
     let response = socket.herdr("session.snapshot", json!({})).await?;
     let agents = &response["result"]["snapshot"]["agents"];
-    ensure!(agents.is_array(), "HERDR did not return a session snapshot");
+    ensure!(agents.is_array(), "herdr did not return a session snapshot");
     let mut agents: Vec<Agent> = serde_json::from_value(agents.clone())?;
     let labels: HashMap<&str, String> = response["result"]["snapshot"]["tabs"]
         .as_array()
@@ -183,7 +183,7 @@ pub async fn get(socket: &Socket, agent: &Agent) -> Result<Agent> {
     let current: Agent = serde_json::from_value(response["result"]["agent"].clone())?;
     ensure!(
         current.key() == agent.key() && current.terminal_id == agent.terminal_id,
-        "HERDR agent changed"
+        "herdr agent changed"
     );
     Ok(current)
 }

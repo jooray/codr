@@ -4,7 +4,7 @@ use herdr_white_noise_bridge::{BridgeConfig, BridgeState, bridge::Bridge, forwar
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(version, about = "White Noise remote for local HERDR agent sessions")]
+#[command(version, about = "White Noise remote for local herdr agent sessions")]
 struct Args {
     #[arg(long)]
     config: Option<PathBuf>,
@@ -14,7 +14,7 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Action {
-    /// Run in the foreground. HERDR starts this worker through the plugin manifest.
+    /// Run in the foreground. herdr starts this worker through the plugin manifest.
     Run,
     /// Print public routing state without message contents.
     Status,
@@ -196,7 +196,7 @@ async fn check_readers(config: BridgeConfig) -> Result<usize> {
     })
     .await
     .map_err(|_| {
-        anyhow::anyhow!("Session history check failed: HERDR snapshot is unavailable or invalid")
+        anyhow::anyhow!("Session history check failed: herdr snapshot is unavailable or invalid")
     })?;
     let sessions: std::collections::BTreeMap<_, _> = agents
         .into_iter()

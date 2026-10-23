@@ -15,6 +15,7 @@ The bridge uses one dedicated MDK identity across all mapped groups. Setup keeps
 - Final replies come from completed stored agent messages. They exclude reasoning and tool output.
 - Working, idle, blocked, and ended notices appear in the group. Blocked notices can include a labelled terminal excerpt. Unsupported OpenCode blockers use a short notice. Separate `done` notices are suppressed; the final reply signals completion.
 - `/status` reports the mapped session state.
+- `unmute` or `/unmute` resumes forwarding for all chats without sending a prompt or answering an agent question.
 - Ended sessions retain their group. A restored native session reuses its group.
 - Images and audio use the media route below. Other attachment types and arbitrary terminal key commands are not supported.
 - Other detected agent backends get groups, prompts, and state notices. Structured final-reply extraction supports **OpenCode, Codex, and Claude Code**.
@@ -81,6 +82,8 @@ Startup no longer opens the popup automatically. Use the shortcut or action when
 - **Away:** forward progress and final replies from every mapped session.
 - A new message from the configured phone to any mapped group switches **all sessions** to Away. Already processed messages, your bridge's own messages, and other senders do not switch modes.
 
+To resume forwarding without asking an agent to do work, send `unmute` or `/unmute` by itself in any linked White Noise chat. **codr** consumes the command and confirms in that chat after the normal history checkpoint. It works in busy, blocked, and ended conversations. It does not start a turn or answer a pending decision. Recognition ignores capitalization and surrounding whitespace; longer messages, attachment captions, voice transcripts, and truncated input are not commands. Only the configured phone owner can use it. Muted history is not replayed, and duplicate deliveries cannot unmute again after a later mute.
+
 In the popup, enter **1** for At desk, **2** for Away, **3** to toggle, or **q** to close. Press Enter after your choice. Muting applies to every mapped session; it does not stop the transport or change your groups.
 
 The selected mode survives restarts. Mode changes discard the outgoing backlog. Before Away becomes active, the bridge checkpoints replies for all active sessions. The popup shows **Away requested** while a transcript checkpoint is pending. Completed muted turns remain suppressed even if their transcript records arrive late. An operation already submitted to MDK can still arrive after you select At desk.
@@ -106,7 +109,9 @@ OpenCode to-do writes, Codex plan updates, and Claude Code to-do/task tools supp
 
 Progress is best effort. Final replies take priority over progress updates, and progress requests have a three-second local deadline. A failed progress edit does not block a queued final answer. An MDK response or local readback does not prove phone delivery. Very long final replies use continuation messages to preserve all text. Progress messages are ordinary encrypted chat messages, not Nostr ephemeral events.
 
-If **herdr** becomes idle before the agent stores its final reply, the bridge keeps that response pending and retries the transcript read. After inspection, `clear-prompt` can release a cancelled response that has no final record.
+If **herdr** becomes idle before the agent stores its final reply, the bridge keeps the `working...` progress bubble and its checklist, continues reading task updates, and retries the final transcript read. It marks progress done only when the completed reply is collected. After inspection, `clear-prompt` can release a cancelled response that has no final record.
+
+OpenCode 2 disables todos by default. To restore native task updates, add `"experimental": { "todo": true }` to your global `~/.config/opencode/opencode.json(c)`. This makes the `todowrite` tool available; the checklist appears when the agent uses it. **codr** does not invent a task list when the agent supplies none.
 
 Edit support is included in the dedicated connector; the flag controls whether **codr** uses it.
 
@@ -115,6 +120,8 @@ Edit support is included in the dedicated connector; the flag controls whether *
 When OpenCode asks one single-choice question, **codr** sends a clean question card with numbered options. Reply with **1**, **2**, or an exact option label. The answer goes to the active question, even while **herdr** reports the agent as blocked; it is not submitted as a new chat prompt.
 
 Decision cards and answers do not require editable progress.
+
+OpenCode V2 exports omit running questions. The bridge reads V2's live session forms through `opencode api` instead, using the CLI's existing service discovery and authentication. It still checks the exact visible question before submitting a choice. Completed forms disappear from this read and cannot be replayed as pending questions.
 
 The bridge checks the session, pending tool request, and visible question before sending the native number shortcut. If a question was not answered through **codr** and is replaced, the new card requires its short code, for example `qabc123 1`. Duplicate deliveries and uncertain submissions are not sent again automatically.
 

@@ -28,6 +28,23 @@ fn state_round_trip_keeps_the_session_group_mapping() {
 }
 
 #[test]
+fn completed_progress_keeps_tasks_from_current_and_previous_working_labels() {
+    for label in ["> working...", "> working"] {
+        let mut state = BridgeState::with_mapping("session", "ab".repeat(16));
+        state.forwarding_enabled = true;
+        state.update_response(
+            "session",
+            &"ab".repeat(16),
+            &format!("{label}\n\n✓ Keep this task"),
+            false,
+        );
+        state.outbox[0].response.as_mut().unwrap().target = Some("sent-progress".into());
+        state.complete_progress("session");
+        assert_eq!(state.outbox[0].text, "> done\n\n✓ Keep this task");
+    }
+}
+
+#[test]
 fn native_transcript_roots_default_for_old_configs_and_reject_relative_overrides() {
     let owner = bech32::encode("npub", [0x11u8; 32].to_base32(), bech32::Variant::Bech32).unwrap();
     let base = format!(

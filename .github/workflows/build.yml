@@ -11,6 +11,11 @@ on:
         description: 'Source tag or commit to verify and package (blank uses this ref)'
         required: false
         type: string
+      linux_preview:
+        description: 'Publish a Linux-only prerelease; reuse the matching v0.6.0 connector'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -19,6 +24,15 @@ jobs:
   checks:
     runs-on: ubuntu-24.04
     steps:
+      - name: Require an immutable source commit for Linux previews
+        if: inputs.linux_preview
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          python3 - <<'PY'
+          import os, re
+          assert re.fullmatch(r'[0-9a-f]{40}', os.environ['SOURCE_REF']), 'Linux previews require source_ref to be a full commit SHA'
+          PY
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.source_ref || github.ref }}
@@ -47,6 +61,7 @@ jobs:
       - run: python3 -m unittest discover -s tests -p 'test_*.py' -v
 
   checks-macos:
+    if: ${{ !inputs.linux_preview }}
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -62,7 +77,7 @@ jobs:
 
   binaries:
     needs: [checks, checks-macos]
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    if: ${{ !inputs.linux_preview && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') }}
     strategy:
       fail-fast: false
       matrix:
@@ -206,6 +221,111 @@ jobs:
           name: codr-${{ matrix.os }}-${{ matrix.arch }}
           path: dist/*
           if-no-files-found: error
+
+  linux-preview:
+    if: github.event_name == 'workflow_dispatch' && inputs.linux_preview
+    needs: checks
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: Swatinem/rust-cache@v2
+      - name: Require an explicitly Linux-only plugin checkout
+        run: |
+          python3 - <<'PY'
+          import tomllib
+          from pathlib import Path
+          manifest = tomllib.loads(Path('herdr-plugin.toml').read_text())
+          assert manifest['platforms'] == ['linux'], 'Preview must not advertise unsupported platforms'
+          PY
+      - name: Install musl build tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build and package Linux bridge
+        env:
+          TARGET: ${{ matrix.target }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          cargo build --locked --release --target "$TARGET"
+          binary="target/$TARGET/release/herdr-white-noise-bridge"
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          test "$("$binary" --version)" = "herdr-white-noise-bridge $version"
+          "$binary" --help > /dev/null
+          if readelf -l "$binary" | grep -q INTERP; then
+            echo 'Linux bridge must be statically linked' >&2
+            exit 1
+          fi
+          mkdir -p dist
+          asset="codr-v$version-linux-$ARCH.tar.gz"
+          tar -czf "dist/$asset" -C "target/$TARGET/release" herdr-white-noise-bridge
+          (cd dist && sha256sum "$asset" > "$asset.sha256")
+      - name: Reuse the verified unchanged connector
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          mkdir connector-download
+          gh release download v0.6.0 --pattern "codr-wn-agent-v0.6.0-linux-$ARCH.tar.gz*" --dir connector-download
+          python3 scripts/repackage_connector.py "connector-download/codr-wn-agent-v0.6.0-linux-$ARCH.tar.gz" dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codr-preview-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish-linux-preview:
+    if: github.event_name == 'workflow_dispatch' && inputs.linux_preview
+    needs: linux-preview
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: codr-preview-*
+          merge-multiple: true
+          path: dist
+      - name: Verify complete Linux assets and publish an opt-in prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          python3 - <<'PY'
+          import tomllib
+          from pathlib import Path
+          version = tomllib.loads(Path('Cargo.toml').read_text())['package']['version']
+          archives = {f'{name}-v{version}-linux-{arch}.tar.gz' for name in ('codr', 'codr-wn-agent') for arch in ('x86_64', 'aarch64')}
+          assert {path.name for path in Path('dist').iterdir()} == archives | {name + '.sha256' for name in archives}
+          PY
+          (cd dist && sha256sum -c *.sha256)
+          # GITHUB_TOKEN creates this tag without triggering the full tag-build workflow.
+          gh release create "v$version" dist/* --target "$(git rev-parse HEAD)" \
+            --title "codr v$version — Linux preview" --prerelease --latest=false \
+            --notes-file "docs/releases/$version.md"
 
   release:
     needs: binaries

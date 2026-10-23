@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.6.1] - 2026-10-23 (Linux preview)
+
+### Added
+
+- Send `unmute` or `/unmute` in any linked White Noise chat to resume forwarding for all chats without sending agent input. Owner checks, history checkpoints, and duplicate-message protection still apply.
+- Opt-in Linux-only prerelease builds for x86-64 and ARM64, with verified reuse of the unchanged dedicated connector. Stable macOS releases remain separate.
+
+### Fixed
+
+- Recover pending OpenCode V2 question cards from live session forms. V2 transcript exports omit running questions. Existing session, choice, and visible-terminal checks still apply before an answer is sent.
+- Keep the working checklist visible while a final reply is being saved, send completed replies separately, and preserve checklists from both working-label formats.
+
 ## [0.6.0] - 2026-10-22
 
 ### Added

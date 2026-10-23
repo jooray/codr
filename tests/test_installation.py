@@ -90,10 +90,9 @@ class InstallerTests(unittest.TestCase):
 
 
 class ManifestTests(unittest.TestCase):
-    def test_manifest_declares_both_host_platforms(self):
+    def test_preview_manifest_declares_linux_and_matches_the_package_version(self):
         manifest = setup.tomllib.loads((SCRIPTS.parent / "herdr-plugin.toml").read_text())
-        self.assertIn("linux", manifest["platforms"])
-        self.assertIn("macos", manifest["platforms"])
+        self.assertEqual(manifest["platforms"], ["linux"])
         self.assertEqual(manifest["version"], setup.tomllib.loads((SCRIPTS.parent / "Cargo.toml").read_text())["package"]["version"])
 
 

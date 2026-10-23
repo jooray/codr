@@ -86,7 +86,7 @@ def read_snapshot(path):
     response = control_request(path, {"method": "session.snapshot", "params": {}})
     snapshot = response.get("result", {}).get("snapshot")
     if not isinstance(snapshot, dict) or not isinstance(snapshot.get("agents"), list):
-        raise SetupError("HERDR did not return a session snapshot")
+        raise SetupError("herdr did not return a session snapshot")
     return snapshot
 
 
@@ -329,7 +329,7 @@ def _configure(owner, herdr_socket, runner, check, enable_audio):
             raise SetupError("Existing configuration belongs to a different phone; nothing was replaced")
         selected = herdr_socket or os.environ.get("HERDR_SOCKET_PATH")
         if selected and Path(selected).resolve() != Path(existing["herdr_socket"]).resolve():
-            raise SetupError("Existing configuration targets another HERDR server; nothing was replaced")
+            raise SetupError("Existing configuration targets another herdr server; nothing was replaced")
         runner([str(bridge), "--config", str(config_path), "status"])
         checked = check_readers(bridge, config_path, runner)
         if not check:
@@ -403,10 +403,10 @@ def _configure(owner, herdr_socket, runner, check, enable_audio):
     mdk_home = home / ".marmot-agents/herdr"
     mdk_socket = mdk_home / "dev/wn-agent.sock"
     state_path = Path(os.environ.get("XDG_STATE_HOME", home / ".local/state")) / "herdr-white-noise-bridge/state.json"
-    manager.install(services.Service("wn-agent-herdr", "MDK transport for HERDR White Noise remote",
+    manager.install(services.Service("wn-agent-herdr", "MDK transport for herdr White Noise remote",
         [mdk, "--home", mdk_home, "--socket", mdk_socket,
          "--relay", "wss://relay.eu.whitenoise.chat", "--relay", "wss://relay.us.whitenoise.chat"]))
-    manager.install(services.Service("herdr-white-noise-bridge", "HERDR White Noise remote plugin worker",
+    manager.install(services.Service("herdr-white-noise-bridge", "herdr White Noise remote plugin worker",
         [bridge, "--config", config_path, "run"], environment={"PATH": services.worker_path()}))
     mdk_home.mkdir(mode=0o700, parents=True, exist_ok=True)
     manager.reload()

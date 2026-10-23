@@ -20,6 +20,74 @@ fn pending() -> Decision {
     decision::from_export(&data("running")).unwrap().unwrap()
 }
 
+fn forms() -> Value {
+    json!({"data":[{
+        "sessionID":"ses_fixture", "metadata":{"kind":"question","tool":{"messageID":"message","id":"tool"}},
+        "fields":[{"key":"q0","type":"string","title":"Scope","description":"Which next step?","custom":true,
+            "options":[{"value":"Proceed","label":"Proceed","description":"Continue with the plan"},
+                       {"value":"Review","label":"Review","description":"Review the alternatives"}]}]
+    }]})
+}
+
+#[test]
+fn live_forms_keep_question_identity_and_reject_ambiguous_or_foreign_requests() {
+    let decision = decision::from_forms(&forms(), "ses_fixture")
+        .unwrap()
+        .unwrap();
+    assert_eq!(decision.id, "message:tool");
+    assert_eq!(decision.questions, pending().questions);
+    assert!(decision::from_forms(&forms(), "ses_other").is_err());
+    for path in ["messageID", "id"] {
+        let mut value = forms();
+        value["data"][0]["metadata"]["tool"][path] = json!("");
+        assert!(decision::from_forms(&value, "ses_fixture").is_err());
+    }
+    let mut value = forms();
+    let duplicate = value["data"][0].clone();
+    value["data"].as_array_mut().unwrap().push(duplicate);
+    assert!(decision::from_forms(&value, "ses_fixture").is_err());
+    assert!(
+        decision::from_forms(&json!({"data":[]}), "ses_fixture")
+            .unwrap()
+            .is_none()
+    );
+    assert!(decision::from_forms(&json!({}), "ses_fixture").is_err());
+}
+
+#[test]
+fn live_forms_only_expose_supported_question_fields_and_keep_multi_select_terminal_only() {
+    for (key, replacement) in [
+        ("type", json!("external")),
+        ("key", json!("q1")),
+        ("options", json!([])),
+        ("description", json!("x".repeat(4001))),
+    ] {
+        let mut value = forms();
+        value["data"][0]["fields"][0][key] = replacement;
+        assert!(
+            decision::from_forms(&value, "ses_fixture").is_err(),
+            "{key}"
+        );
+    }
+    let mut value = forms();
+    value["data"][0]["fields"][0]["options"][0]["value"] = json!("different");
+    assert!(decision::from_forms(&value, "ses_fixture").is_err());
+    let mut value = forms();
+    value["data"][0]["metadata"]["kind"] = json!("other");
+    assert!(
+        decision::from_forms(&value, "ses_fixture")
+            .unwrap()
+            .is_none()
+    );
+    let mut value = forms();
+    value["data"][0]["fields"][0]["type"] = json!("multiselect");
+    let decision = decision::from_forms(&value, "ses_fixture")
+        .unwrap()
+        .unwrap();
+    assert!(!decision.supported());
+    assert!(decision.choice("1").is_err());
+}
+
 #[test]
 fn only_running_questions_in_the_current_turn_are_selected() {
     let decision = pending();

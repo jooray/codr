@@ -35,9 +35,13 @@ Or give your coding agent this prompt, with your own public key:
 
 ## Usage
 
+**Linux preview:** [v0.6.1](https://github.com/tidley/codr/releases/tag/v0.6.1) adds the recent progress, to-do, decision, and `unmute` updates for Linux x86-64 and ARM64. Install with `herdr plugin install tidley/codr --ref v0.6.1`, then run Setup. This is an opt-in prerelease; macOS users should keep `v0.6.0`. [Preview notes →](docs/releases/0.6.1.md)
+
 1. Check the inviter against the bridge public key printed by setup, then accept the session's chat invitation.
 2. Send `/status` to check the connection. Send a prompt to continue that session.
 3. Read the reply in the same chat. For a supported decision, reply `1`, `2`, or an exact option label.
+
+Send `unmute` (or `/unmute`) by itself in any linked chat to resume forwarding for **all chats**, without prompting an agent.
 
 Handoff is automatic. Manual controls remain available through **herdr**'s **White Noise forwarding: At desk / Away** action. [Controls and limits →](docs/REFERENCE.md#at-desk--away-forwarding)
 

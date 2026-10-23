@@ -241,6 +241,10 @@ const EXPORT_V2: u8 = 2;
 static EXPORT_API: AtomicU8 = AtomicU8::new(EXPORT_UNKNOWN);
 
 async fn export_data(bin: &Path, session: &str) -> Result<Export> {
+    Ok(export_with_api(bin, session).await?.0)
+}
+
+async fn export_with_api(bin: &Path, session: &str) -> Result<(Export, u8)> {
     let attempts = if EXPORT_API.load(Ordering::Relaxed) == EXPORT_V2 {
         [EXPORT_V2, EXPORT_V1]
     } else {
@@ -251,7 +255,7 @@ async fn export_data(bin: &Path, session: &str) -> Result<Export> {
         match run_export(bin, session, api).await {
             Ok(export) => {
                 EXPORT_API.store(api, Ordering::Relaxed);
-                return Ok(export);
+                return Ok((export, api));
             }
             Err(error) => failures[usize::from(api - EXPORT_V1)] = format!("{error:#}"),
         }
@@ -264,14 +268,30 @@ async fn export_data(bin: &Path, session: &str) -> Result<Export> {
 }
 
 async fn run_export(bin: &Path, session: &str, api: u8) -> Result<Export> {
-    // Regular files avoid OpenCode's observed stdout-pipe truncation. They are anonymous and owner-only.
-    let mut output = tempfile::tempfile()?;
-    let mut errors = tempfile::tempfile()?;
     let args: &[&str] = if api == EXPORT_V2 {
         &["session", "export", session]
     } else {
         &["--pure", "export", session]
     };
+    let output = run_command(bin, args, 128 * 1024 * 1024).await?;
+    match api {
+        EXPORT_V2 => tokio::task::spawn_blocking(move || {
+            Ok(from_v2(serde_json::from_reader(BufReader::new(output))?))
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("OpenCode export reader failed"))?,
+        _ => tokio::task::spawn_blocking(move || {
+            Ok(serde_json::from_reader(BufReader::new(output))?)
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("OpenCode export reader failed"))?,
+    }
+}
+
+async fn run_command(bin: &Path, args: &[&str], max_bytes: u64) -> Result<std::fs::File> {
+    // Regular files avoid OpenCode's observed stdout-pipe truncation. They are anonymous and owner-only.
+    let mut output = tempfile::tempfile()?;
+    let mut errors = tempfile::tempfile()?;
     let mut command = Command::new(bin);
     command
         .args(args)
@@ -296,22 +316,11 @@ async fn run_export(bin: &Path, session: &str, api: u8) -> Result<Export> {
         );
     }
     ensure!(
-        output.metadata()?.len() <= 128 * 1024 * 1024,
-        "OpenCode export exceeds 128 MiB"
+        output.metadata()?.len() <= max_bytes,
+        "OpenCode output exceeds its read limit"
     );
     output.seek(SeekFrom::Start(0))?;
-    match api {
-        EXPORT_V2 => tokio::task::spawn_blocking(move || {
-            Ok(from_v2(serde_json::from_reader(BufReader::new(output))?))
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("OpenCode export reader failed"))?,
-        _ => tokio::task::spawn_blocking(move || {
-            Ok(serde_json::from_reader(BufReader::new(output))?)
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("OpenCode export reader failed"))?,
-    }
+    Ok(output)
 }
 
 #[derive(Deserialize)]
@@ -462,11 +471,18 @@ pub(crate) async fn read_opencode_snapshot(
             return Ok(read.snapshot);
         }
     }
-    let export = export_data(&config.opencode_bin, &session.value).await?;
+    let (export, api) = export_with_api(&config.opencode_bin, &session.value).await?;
     Ok(SessionSnapshot {
         history: history_from_data(&export),
         tasks: tasks::from_data(&export),
-        decision: decision::from_data(&export).ok().flatten(),
+        decision: if api == EXPORT_V2 {
+            decision::read_v2(&config.opencode_bin, &session.value)
+                .await
+                .ok()
+                .flatten()
+        } else {
+            decision::from_data(&export).ok().flatten()
+        },
     })
 }
 
