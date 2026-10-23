@@ -102,6 +102,9 @@ async fn peer_for_agent(
                         "message":{"message_id_hex":req["message_id_hex"],"availability":"available","kind":9,
                             "sender":{"account_id_hex":HEX},"text":"", "attachments":[{"media_type":"audio/ogg","file_name":"voice.ogg"}]}})
                     }
+                    "timeline_list" => {
+                        json!({"type":"timeline_page","messages":[],"has_more_before":false})
+                    }
                     _ => panic!("unexpected request"),
                 }
             } else {
@@ -356,6 +359,291 @@ printf '{"messages":[{"info":{"id":"reply","role":"assistant","time":{"completed
             .iter()
             .any(|item| item.text == "New during sync")
     );
+}
+
+/// One global confirmed send anchors every conversation's catch-up window.
+#[tokio::test]
+async fn sync_reference_uses_one_global_send_minus_an_hour_and_survives_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    let reference = now() - 6 * 3600;
+    for (session, group, age) in [
+        ("ses_1", "bb".repeat(16), 3 * 3600),
+        ("ses_other", "dd".repeat(16), 6 * 3600 + 1800),
+        ("ses_old", "ee".repeat(16), 7 * 3600 + 1800),
+    ] {
+        let mut observed = agent();
+        observed.agent_session.as_mut().unwrap().value = session.into();
+        bridge
+            .state
+            .mappings
+            .insert(observed.key(), activity_mapping(observed, &group));
+        input_history(
+            &config,
+            session,
+            &[("user", "prompt")],
+            Some(("reply", session)),
+        );
+        let path = config
+            .opencode_bin
+            .with_file_name(format!("{session}.json"));
+        let mut data: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        data["messages"][0]["info"]["time"] = json!({"created":(now()-age)*1000});
+        std::fs::write(path, data.to_string()).unwrap();
+    }
+    let mut state = serde_json::to_value(&bridge.state).unwrap();
+    state["last_confirmed_send_at"] = json!(reference);
+    bridge.state = serde_json::from_value(state).unwrap();
+    bridge.save().unwrap();
+    drop(bridge);
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    let mut event = inbound(HEX, "global-sync");
+    event["message"]["text"] = json!("/sync");
+    bridge.inbound(&event).await.unwrap();
+    assert!(
+        bridge
+            .state
+            .outbox
+            .iter()
+            .any(|item| item.group == "dd".repeat(16) && item.text == "ses_other")
+    );
+    assert!(
+        bridge
+            .state
+            .outbox
+            .iter()
+            .any(|item| item.group == "bb".repeat(16) && item.text == "ses_1")
+    );
+    assert!(
+        !bridge
+            .state
+            .outbox
+            .iter()
+            .any(|item| item.group == "ee".repeat(16))
+    );
+    assert_eq!(
+        serde_json::to_value(&bridge.state).unwrap()["last_confirmed_send_at"],
+        reference
+    );
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    bridge.flush().await.unwrap();
+    drop(bridge);
+    let mut bridge = Bridge::open(config).unwrap();
+    assert!(
+        serde_json::to_value(&bridge.state).unwrap()["last_confirmed_send_at"]
+            .as_u64()
+            .unwrap()
+            >= now() - 5
+    );
+    event["message"]["message_id_hex"] = json!("next-global-sync");
+    bridge.inbound(&event).await.unwrap();
+    assert!(
+        !bridge
+            .state
+            .outbox
+            .iter()
+            .any(|item| ["ses_1", "ses_other", "ses_old"].contains(&item.text.as_str()))
+    );
+    mdk.abort();
+}
+
+/// Failed sends and unrelated inbound commands do not invent a confirmation clock.
+#[tokio::test]
+async fn sync_reference_advances_only_after_a_confirmed_send_in_any_chat() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge
+        .state
+        .enqueue(&"dd".repeat(16), "reply in another conversation");
+    bridge.save().unwrap();
+    assert!(bridge.flush().await.is_err());
+    assert!(serde_json::to_value(&bridge.state).unwrap()["last_confirmed_send_at"].is_null());
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = peer(&config.wn_agent_socket, true, calls).await;
+    bridge.flush().await.unwrap();
+    assert!(
+        serde_json::to_value(&bridge.state).unwrap()["last_confirmed_send_at"]
+            .as_u64()
+            .unwrap()
+            >= now() - 5
+    );
+    mdk.abort();
+}
+
+/// Recover one global maximum from legacy history, paging past recent phone input.
+#[tokio::test]
+async fn sync_reference_bootstraps_legacy_state_from_global_own_message_history() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    for (session, group, age) in [
+        ("ses_1", "bb".repeat(16), 3 * 3600),
+        ("ses_other", "dd".repeat(16), 5 * 3600 + 1800),
+        ("ses_old", "ee".repeat(16), 6 * 3600 + 1800),
+    ] {
+        let mut observed = agent();
+        observed.agent_session.as_mut().unwrap().value = session.into();
+        bridge
+            .state
+            .mappings
+            .insert(observed.key(), activity_mapping(observed, &group));
+        input_history(
+            &config,
+            session,
+            &[("user", "prompt")],
+            Some(("reply", session)),
+        );
+        let path = config
+            .opencode_bin
+            .with_file_name(format!("{session}.json"));
+        let mut data: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        data["messages"][0]["info"]["time"] = json!({"created":(now()-age)*1000});
+        std::fs::write(path, data.to_string()).unwrap();
+    }
+    let mut legacy = serde_json::to_value(&bridge.state).unwrap();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("last_confirmed_send_at");
+    std::fs::write(&config.state_path, legacy.to_string()).unwrap();
+    drop(bridge);
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    let listener = UnixListener::bind(&config.wn_agent_socket).unwrap();
+    let calls = Arc::new(Mutex::new(vec![]));
+    let received = calls.clone();
+    let reference = now() - 5 * 3600;
+    let mdk = tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = tokio::io::BufReader::new(stream);
+            let req = read_line(&mut reader).await.unwrap();
+            received.lock().unwrap().push(req.clone());
+            assert_eq!(req["type"], "timeline_list");
+            let first_page = req["group_id_hex"] == "bb".repeat(16) && req["before"].is_null();
+            let middle_page = req["group_id_hex"] == "bb".repeat(16)
+                && req["before"]["message_id_hex"] == "phone-sync";
+            let at = if first_page {
+                reference - 3600
+            } else if middle_page {
+                reference - 1800
+            } else if req["group_id_hex"] == "bb".repeat(16) {
+                reference
+            } else if req["group_id_hex"] == "dd".repeat(16) {
+                reference - 3600
+            } else {
+                reference - 3 * 3600
+            };
+            let response = json!({"id":req["id"],"marmot_agent_control":"marmot.agent-control.v2","type":"timeline_page","has_more_before":first_page || middle_page,"messages":[{
+                "message_id_hex":if first_page { "phone-sync" } else if middle_page { "middle-reply" } else { "own-reply" },"recorded_at":at,"kind":9,"availability":"available","sender":{"is_self":!first_page}
+            }]});
+            reader
+                .get_mut()
+                .write_all(format!("{response}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+    });
+    let mut event = inbound(HEX, "legacy-global-sync");
+    event["message"]["text"] = json!("/sync");
+    bridge.inbound(&event).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(&bridge.state).unwrap()["last_confirmed_send_at"],
+        reference
+    );
+    assert!(bridge.state.outbox.iter().any(|item| item.text == "ses_1"));
+    assert!(
+        bridge
+            .state
+            .outbox
+            .iter()
+            .any(|item| item.text == "ses_other")
+    );
+    assert!(
+        !bridge
+            .state
+            .outbox
+            .iter()
+            .any(|item| item.text == "ses_old")
+    );
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|req| !req["before"].is_null())
+    );
+    mdk.abort();
+}
+
+/// Invalid acknowledgements cannot remove queued messages or advance the reference.
+#[tokio::test]
+async fn sync_reference_rejects_malformed_send_confirmations() {
+    for ids in [json!([]), json!([null]), json!([""])] {
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path());
+        let mut bridge = Bridge::open(config.clone()).unwrap();
+        bridge.state.enqueue(&"bb".repeat(16), "reply");
+        let listener = UnixListener::bind(&config.wn_agent_socket).unwrap();
+        let mdk = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = tokio::io::BufReader::new(stream);
+            let req = read_line(&mut reader).await.unwrap();
+            let response = json!({"id":req["id"],"marmot_agent_control":"marmot.agent-control.v2","type":"final_sent","message_ids_hex":ids});
+            reader
+                .get_mut()
+                .write_all(format!("{response}\n").as_bytes())
+                .await
+                .unwrap();
+        });
+        assert!(bridge.flush().await.is_err());
+        assert_eq!(bridge.state.last_confirmed_send_at, None);
+        assert_eq!(bridge.state.outbox.len(), 1);
+        mdk.await.unwrap();
+    }
+}
+
+/// Confirmed progress creation counts as a new message; later edits do not.
+#[tokio::test]
+async fn sync_reference_records_new_progress_and_help_but_not_edits_or_inbound_requests() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge
+        .state
+        .mappings
+        .insert(agent().key(), activity_mapping(agent(), &"bb".repeat(16)));
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = peer(&config.wn_agent_socket, true, calls).await;
+    bridge
+        .state
+        .begin_response(&agent().key(), &"bb".repeat(16));
+    bridge.flush().await.unwrap();
+    assert!(bridge.state.last_confirmed_send_at.unwrap() >= now() - 5);
+    let previous = now() - 1800;
+    bridge.state.last_confirmed_send_at = Some(previous);
+    bridge.state.outbox[0]
+        .response
+        .as_mut()
+        .unwrap()
+        .last_attempt_at = 0;
+    bridge.state.update_response(
+        &agent().key(),
+        &"bb".repeat(16),
+        "> working...\nnew tasks",
+        false,
+    );
+    bridge.flush().await.unwrap();
+    assert_eq!(bridge.state.last_confirmed_send_at, Some(previous));
+    let mut event = inbound(HEX, "help-does-not-anchor-until-sent");
+    event["message"]["text"] = json!("/help");
+    bridge.inbound(&event).await.unwrap();
+    assert_eq!(bridge.state.last_confirmed_send_at, Some(previous));
+    bridge.flush().await.unwrap();
+    assert!(bridge.state.last_confirmed_send_at.unwrap() >= now() - 5);
+    mdk.abort();
 }
 
 /// Neither shortcut can be invoked by a different account, sender, or chat.

@@ -4,7 +4,7 @@
 
 ### Added
 
-- Owner-only `/sync` sends the latest completed assistant reply from linked conversations active in the past hour to their own White Noise chats. It includes recently ended mappings, uses source activity times, and leaves mute settings and normal reply checkpoints unchanged.
+- Owner-only `/sync` sends the latest completed assistant reply from conversations active since one hour before the last confirmed message across all linked White Noise chats, each to its own chat. The global reference persists across restarts and is recovered from MDK history on older installations; no-history installs fall back to the past hour. Recently ended mappings remain eligible, and mute settings and normal reply checkpoints stay unchanged.
 - Owner-only `/help` lists White Noise commands and decision-reply syntax in the requesting chat. Both commands work while muted, never prompt agents, and retain durable replay-safe replies across bridge restarts.
 
 ### Changed

@@ -90,6 +90,10 @@ pub struct BridgeState {
     pub phone: Option<String>,
     pub mappings: BTreeMap<String, Mapping>,
     pub outbox: Vec<Outgoing>,
+    /// Global Unix-second reference for the last confirmed new White Noise message.
+    /// Edits and incoming phone commands do not advance it.
+    #[serde(default)]
+    pub last_confirmed_send_at: Option<u64>,
     #[serde(default = "forwarding_default")]
     pub forwarding_enabled: bool,
     #[serde(default)]
@@ -113,6 +117,7 @@ impl Default for BridgeState {
             phone: None,
             mappings: BTreeMap::new(),
             outbox: vec![],
+            last_confirmed_send_at: None,
             forwarding_enabled: true,
             forwarding_revision: None,
             forwarding_resume_pending: false,

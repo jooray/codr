@@ -46,7 +46,7 @@ Or give your coding agent this prompt, with your own public key:
 
 Send `unmute` (or `/unmute`) by itself in any linked chat to resume forwarding for **all chats**, without prompting an agent.
 
-Send `/sync` for a one-time catch-up: each linked conversation active in the past hour sends its latest completed reply to its own chat. Send `/help` to list commands in the current chat. These two commands do not change mute settings or prompt agents.
+Send `/sync` for a one-time catch-up: use one hour before the last confirmed message sent across **all linked White Noise chats** as the shared cutoff, then send each eligible conversation's latest completed reply to its own chat. With no confirmed send history, use the past hour. Send `/help` to list commands in the current chat. These two commands do not change mute settings or prompt agents.
 
 Handoff is automatic. Manual controls remain available through **herdr**'s **White Noise forwarding: At desk / Away** action. [Controls and limits →](docs/REFERENCE.md#at-desk--away-forwarding)
 

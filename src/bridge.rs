@@ -389,6 +389,9 @@ impl Bridge {
                         if delivery.finished && sent_text == item.text {
                             self.state.outbox.retain(|m| m.id != item.id);
                         }
+                        if delivery.target.is_none() {
+                            self.state.last_confirmed_send_at = Some(now());
+                        }
                         self.save()?;
                     }
                     _ => {
@@ -404,7 +407,8 @@ impl Bridge {
                 continue;
             }
             match self.marmot.marmot(json!({"type":"send_final","account_id_hex":self.config.account_id_hex,"group_id_hex":item.group,"text":item.text,"reply_to_message_id_hex":null,"idempotency_key":item.id})).await {
-                Ok(response) if response["type"] == "final_sent" && response["message_ids_hex"].as_array().is_some_and(|ids|!ids.is_empty()) => {
+                Ok(response) if response["type"] == "final_sent" && response["message_ids_hex"].as_array().is_some_and(|ids|!ids.is_empty() && ids.iter().all(|id| id.as_str().is_some_and(|id| !id.is_empty()))) => {
+                    self.state.last_confirmed_send_at = Some(now());
                     self.state.outbox.retain(|m| m.id != item.id); self.save()?;
                 }
                 _ => { failed.insert(item.group); }
@@ -981,6 +985,53 @@ impl Bridge {
         self.route_inbound(event, false).await
     }
 
+    /// Recover an old installation's last own message without treating the incoming
+    /// /sync request (or another participant's message) as a new send reference.
+    async fn last_own_message_at(&self, group: &str, requested_at: u64) -> Result<Option<u64>> {
+        let mut before: Option<(u64, String)> = None;
+        let mut cursors = HashSet::new();
+        let mut latest = None;
+        loop {
+            let mut request = json!({"type":"timeline_list","account_id_hex":self.config.account_id_hex,"group_id_hex":group,"limit":50});
+            if let Some((at, id)) = &before {
+                request["before"] = json!({"recorded_at":at,"message_id_hex":id});
+            }
+            let page = self.marmot.marmot(request).await?;
+            ensure!(page["type"] == "timeline_page", "Invalid timeline response");
+            let rows = page["messages"]
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("Missing timeline messages"))?;
+            let page_latest = rows
+                .iter()
+                .filter(|row| {
+                    row["sender"]["is_self"] == true
+                        && row["kind"] == 9
+                        && row["availability"] == "available"
+                })
+                .filter_map(|row| row["recorded_at"].as_u64())
+                .filter(|at| *at > 0 && *at <= requested_at)
+                .max();
+            latest = latest.max(page_latest);
+            if rows.is_empty() || page["has_more_before"] != true {
+                return Ok(latest);
+            }
+            let cursor = (
+                rows[0]["recorded_at"]
+                    .as_u64()
+                    .ok_or_else(|| anyhow::anyhow!("Invalid timeline time"))?,
+                rows[0]["message_id_hex"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("Missing timeline message ID"))?
+                    .to_owned(),
+            );
+            ensure!(
+                cursors.insert(cursor.1.clone()),
+                "Timeline cursor did not advance"
+            );
+            before = Some(cursor);
+        }
+    }
+
     /// White Noise-only commands bypass agent input and the global phone-wake path.
     async fn chat_command(&mut self, key: &str, group: &str, id: &str, sync: bool) -> Result<()> {
         use sha2::{Digest, Sha256};
@@ -988,8 +1039,27 @@ impl Bridge {
         let request = hex::encode(Sha256::digest(serde_json::to_vec(&(group, id))?));
         let mut replies = Vec::new();
         let mut unavailable = 0;
+        let requested_at = now();
+        let mut reference = self.state.last_confirmed_send_at;
         if sync {
-            let requested_at = now();
+            if reference.is_none() {
+                let groups: HashSet<_> = self
+                    .state
+                    .mappings
+                    .values()
+                    .filter_map(|mapping| mapping.group_id_hex.clone())
+                    .collect();
+                for target in groups {
+                    match self.last_own_message_at(&target, requested_at).await {
+                        Ok(at) => reference = reference.max(at),
+                        Err(_) => unavailable += 1,
+                    }
+                }
+            }
+            let cutoff = reference
+                .unwrap_or(requested_at)
+                .min(requested_at)
+                .saturating_sub(3600);
             let limit = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
             let mut readers = tokio::task::JoinSet::new();
             for (mapping_key, mapping) in &self.state.mappings {
@@ -1021,9 +1091,10 @@ impl Bridge {
             while let Some(result) = readers.join_next().await {
                 match result {
                     Ok(Ok((target, Ok(history)))) => {
-                        if history.activity_at.is_some_and(|at| {
-                            at <= now() && at >= requested_at.saturating_sub(3600)
-                        }) && let Some(reply) = history.finals.last()
+                        if history
+                            .activity_at
+                            .is_some_and(|at| at <= now() && at >= cutoff)
+                            && let Some(reply) = history.finals.last()
                         {
                             replies.push((target, reply.text.clone()));
                         }
@@ -1034,17 +1105,25 @@ impl Bridge {
         }
         // Persist the complete batch and consumption together before any network send.
         let before = self.state.clone();
+        if self.state.last_confirmed_send_at.is_none() {
+            self.state.last_confirmed_send_at = reference;
+        }
         let count = replies.len();
         for (target, text) in replies {
             self.state
                 .enqueue_manual(&target, &text, &format!("sync:{request}:{target}"));
         }
         let response = if sync {
+            let window = if reference.is_some() {
+                "since one hour before the last confirmed message sent across all linked chats"
+            } else {
+                "in the past hour (no confirmed send history is available)"
+            };
             format!(
-                "Sync: queued the latest assistant reply for {count} conversation(s) active in the past hour, each in its own White Noise chat. {unavailable} history reader(s) unavailable. Mute settings are unchanged; no prompt was sent."
+                "Sync: queued the latest assistant reply for {count} conversation(s) active {window}, each in its own White Noise chat. {unavailable} history reader(s) unavailable. Mute settings are unchanged; no prompt was sent."
             )
         } else {
-            "White Noise shortcuts:\n/help — show this list in this chat.\n/sync — send the latest assistant reply for each linked conversation active in the past hour to its own chat; mute settings stay unchanged.\n/status — show this session's connection and status.\nunmute or /unmute — enable forwarding for all chats without prompting an agent.\n\nDecision replies: use a listed number, exact option label, or /answer 2. If a question shows a code, include that code as requested. Other dialogs need the terminal.".into()
+            "White Noise shortcuts:\n/help — show this list in this chat.\n/sync — send the latest assistant reply for each conversation active since one hour before the last confirmed message across all linked chats, each to its own chat; mute settings stay unchanged. With no confirmed send history, use the past hour.\n/status — show this session's connection and status.\nunmute or /unmute — enable forwarding for all chats without prompting an agent.\n\nDecision replies: use a listed number, exact option label, or /answer 2. If a question shows a code, include that code as requested. Other dialogs need the terminal.".into()
         };
         self.state
             .enqueue_manual(group, &response, &format!("command:{request}"));

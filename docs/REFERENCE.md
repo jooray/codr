@@ -106,13 +106,17 @@ Send these as standalone text from the configured owner's account in a linked ch
 | Command | Result |
 | --- | --- |
 | `/help` | List the available commands and decision-reply syntax in this chat only. |
-| `/sync` | Send the latest completed assistant reply from each linked conversation active in the past hour to its own White Noise chat. |
+| `/sync` | Send the latest completed assistant reply from each conversation active since one hour before the last confirmed message across all linked White Noise chats, each to its own chat. |
 | `/status` | Show the mapped session's status and connection. Like ordinary phone input, this can resume forwarding. |
 | `unmute` or `/unmute` | Resume automatic forwarding globally without prompting an agent. |
 
 `/help` and `/sync` do not prompt agents, answer questions, create groups, or change mute settings. They work while muted or **herdr** is disconnected. Recently ended mapped conversations can participate in sync. The command chat receives a count of queued conversations and unavailable readers; a queued send does not prove phone receipt. Retrying the same inbound event does not resend the catch-up. A new `/sync` message requests a new catch-up, even for a reply sent before.
 
-The hour is measured from source activity, not polling: OpenCode message creation, streaming/update, and completion clocks, or the verified Codex/Claude session log's modification time. Histories with no known activity time, future activity times, no completed assistant reply, or activity older than an hour are skipped. A failed reader does not prevent successful readers from contributing. Sync does not change normal reply checkpoints or replay all missed messages. Replies and long-message continuations use durable, idempotent delivery across restarts.
+The cutoff is global, not per-chat and not relative to the time `/sync` is sent. If the last confirmed new outgoing message in any linked chat was at 10:00, a sync at 16:00 includes conversations active since 09:00. The cutoff is fixed for the whole batch. Incoming phone commands, queued or failed sends, and progress edits do not move the reference. Successful new messages, including progress creation and command replies, do. MDK confirmation does not prove receipt on the phone.
+
+The reference survives restarts and mute changes. Older installations without it recover the newest available own chat message from retained MDK history across all linked groups, paging past incoming messages when needed. With no confirmed send history, sync falls back to the past hour and says so in its reply. Unavailable timeline readers are reported along with other reader failures; the reference then uses the latest known confirmation.
+
+Conversation activity comes from source clocks, not polling: OpenCode message creation, streaming/update, and completion clocks, or the verified Codex/Claude session log's modification time. Histories with no known activity time, future activity times, no completed assistant reply, or activity before the shared cutoff are skipped. A failed reader does not prevent successful readers from contributing. Sync does not change normal reply checkpoints or replay all missed messages. Replies and long-message continuations use durable, idempotent delivery across restarts.
 
 Recognition ignores capitalization and surrounding whitespace for `/help` and `/sync`. Longer prose, attachment captions, voice transcripts, and truncated input are not these commands. Use a listed number, an exact option label, or `/answer 2` for a supported pending decision; include the question code when its card requests one.
 
