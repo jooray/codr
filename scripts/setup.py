@@ -266,9 +266,16 @@ def check_readers(bridge, config_path, runner):
 def repair_opencode_bin(bridge, existing, config_path, runner, check):
     """Repair a configured OpenCode path that an upgrade or uninstall removed."""
     configured = existing.get("opencode_bin")
-    if configured and Path(configured).is_file() and os.access(configured, os.X_OK):
+    # Bare commands remain PATH-based and OpenCode is optional for native agents.
+    # Session reader validation decides whether a live session needs OpenCode.
+    if not configured or not Path(configured).is_absolute():
         return False
-    replacement = find_executable("opencode", [Path.home() / ".local/bin/opencode", Path.home() / ".opencode/bin/opencode"])
+    if Path(configured).is_file() and os.access(configured, os.X_OK):
+        return False
+    try:
+        replacement = find_executable("opencode", [Path.home() / ".local/bin/opencode", Path.home() / ".opencode/bin/opencode"])
+    except SetupError:
+        return False
     if check:
         raise SetupError(f"The configured OpenCode executable is missing; rerun setup to select {replacement}")
     if replacement == configured:
@@ -276,14 +283,13 @@ def repair_opencode_bin(bridge, existing, config_path, runner, check):
     text = config_path.read_text()
     setting = toml_text({"opencode_bin": replacement}).rstrip()
     text, changed = re.subn(r'(?m)^opencode_bin\s*=\s*"[^"]*"(?:[ \t]*#[^\n]*)?$', lambda _: setting, text, count=1)
-    if changed == 0 and "opencode_bin" not in existing:
-        text = text.rstrip() + "\n" + setting + "\n"
-    elif changed != 1:
+    if changed != 1:
         raise SetupError("Could not replace the missing OpenCode executable; inspect the configuration")
     with tempfile.TemporaryDirectory(prefix="codr-opencode-check-") as temporary:
         candidate = Path(temporary) / "config.toml"
         candidate.write_text(text)
         runner([str(bridge), "--config", str(candidate), "status"])
+        check_readers(bridge, candidate, runner)
     private_write(config_path, text)
     existing["opencode_bin"] = replacement
     return True
@@ -359,7 +365,15 @@ def _configure(owner, herdr_socket, runner, check, enable_audio):
         if selected and Path(selected).resolve() != Path(existing["herdr_socket"]).resolve():
             raise SetupError("Existing configuration targets another HERDR server; nothing was replaced")
         runner([str(bridge), "--config", str(config_path), "status"])
+        original_config = config_path.read_text()
         repaired_opencode = repair_opencode_bin(bridge, existing, config_path, runner, check)
+        if repaired_opencode:
+            try:
+                manager.restart("herdr-white-noise-bridge")
+            except BaseException:
+                # Keep the repair detectable on the next setup attempt.
+                private_write(config_path, original_config)
+                raise
         checked = check_readers(bridge, config_path, runner)
         if not check:
             upgrade_transport(existing, config_root, runner)
@@ -384,8 +398,6 @@ def _configure(owner, herdr_socket, runner, check, enable_audio):
                 manager.restart("herdr-white-noise-bridge")
         if not check:
             manager.start("herdr-white-noise-bridge")
-        if repaired_opencode:
-            manager.restart("herdr-white-noise-bridge")
         report = {"configuration": str(config_path), "existing_configuration_preserved": True,
                   "bridge_account_id": existing["account_id_hex"], "phone_round_trip": "requires user confirmation",
                   "checked_session_readers": checked, "reader_validation": "passed" if checked else "deferred: no live supported sessions"}
