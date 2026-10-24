@@ -445,22 +445,6 @@ Without `--group`, the command sends the notice to every mapped group. The comma
 
 ## Screenshot provenance
 
-### 0.7.0 controls
-
-The three `codr-v070-*-chat.png` images in the [README gallery](../README.md#screenshots) are crops of the unmodified native White Noise Linux interface. Fresh fictional accounts ran in network-disabled containers, using offline Notes to self chats and supported fixture-injection hooks. They show help, workspace selection, and model-provider selection, including literal **0. Cancel** choices.
-
-The images preserve native pixels; no text or overlays were added. Crops retain the chat title and complete messages. PNGs contain only image chunks, with no text or EXIF metadata. No existing accounts, private conversations, physical-device captures, or credentials were used. These are visual examples, not evidence of live encrypted routing, cancellation, model selection, or model execution. The displayed provider list is a fixture, not a list of bundled accounts or credentials.
-
-Published SHA-256 checksums:
-
-```text
-3c04e8821cb27d8ed664610bdb097b0b811fab8f5901e2454194aa873b5cead1  codr-v070-help-chat.png
-da336f940a28b856440a7fed5ce3629efb07b232504780b375906c039568b33e  codr-v070-model-providers-chat.png
-5499d5c4bfd0316cb5a57f6b4c46cd88312d3327897020b21df7c615369dfc8d  codr-v070-workspaces-chat.png
-```
-
-### Earlier end-to-end examples
-
 The earlier gallery contains side-by-side composites of real **herdr** 0.9.1, OpenCode 1.19.3, and White Noise Android interfaces.
 
 All seven images use the same fictional Garden planner project. The desktop replays matching history imported into an isolated OpenCode installation. The phone uses a dedicated Alex demo profile. A synthetic **herdr**/OpenCode fixture supplies agent state and scripted replies through the real **codr** bridge and an isolated MDK transport.

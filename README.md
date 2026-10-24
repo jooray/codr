@@ -94,21 +94,6 @@ OpenCode can use incremental, read-only SQLite reads instead of full exports. [R
 
 ## Screenshots
 
-### 0.7.0 phone controls
-
-Project setup, provider selection, and help rendered in the native White Noise Linux app. These offline examples use fictional, fixture-injected messages, not live agent handoffs. [Capture details](docs/REFERENCE.md#screenshot-provenance).
-
-<img src="docs/screenshots/codr-v070-workspaces-chat.png" width="640" alt="Step 1 of 4: choose Garden planner or create a new workspace, with 0 to cancel">
-
-<img src="docs/screenshots/codr-v070-model-providers-chat.png" width="640" alt="Step 4 of 4: choose the backend default or browse OpenAI, Claude, or Free models, with 0 to cancel">
-
-<details>
-<summary>Commands and persistent sync mode</summary>
-
-<img src="docs/screenshots/codr-v070-help-chat.png" width="640" alt="codr help with project commands, cancel, recent messages, and automatic sync mode">
-
-</details>
-
 <details>
 <summary>A shared project, images, voice, decisions, and multiple chats</summary>
 
