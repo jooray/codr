@@ -1,7 +1,11 @@
 # **codr**
 
-**Canonical source, issues, and pull requests:** [ngit](https://gitworkshop.dev/npub19at4nqjjymca2lh3v546vcg5ktun3al4c5xu2pts3ewckv0y70ys0gupzr/relay.ngit.dev/codr).
-GitHub is a mirror for code, CI, and release downloads. [Contributing](CONTRIBUTING.md)
+**Source, issues, pull requests, CI, and releases:** [GitHub](https://github.com/tidley/codr).
+Contributors do not need Nostr or ngit. [Contributing](CONTRIBUTING.md)
+
+[ngit](https://gitworkshop.dev/npub19at4nqjjymca2lh3v546vcg5ktun3al4c5xu2pts3ewckv0y70ys0gupzr/relay.ngit.dev/codr)
+provides an independent source and release mirror. Release mirrors use unchanged GitHub assets with verified SHA-256 checksums.
+[Mirror policy and verification](docs/MIRRORING.md)
 
 **codr** connects coding agent sessions in [**herdr**](https://github.com/herdrdev/herdr) to [White Noise](https://github.com/marmot-protocol/whitenoise-android), with one encrypted chat per session. It forwards prompts to the mapped agent and returns completed replies to the same chat.
 
