@@ -94,22 +94,19 @@ OpenCode can use incremental, read-only SQLite reads instead of full exports. [R
 
 ## Screenshots
 
-### 0.7.0 in the stock Android app
+Real messages in the stock White Noise Android app, captured over ADB on a Pixel 5. The fictional Garden planner demo connects through **codr** to real **herdr** sessions. Each close-up shows one request followed by its reply. Click an image for the full app view. [Capture details](docs/REFERENCE.md#screenshot-provenance).
 
-Captured through ADB on a connected Pixel 5, using fictional demo data and a real **White Noise ↔ codr ↔ herdr** connection. No desktop substitute or rendered test fixtures. [Capture details](docs/REFERENCE.md#screenshot-provenance).
+### Start a project
 
-<img src="docs/screenshots/codr-v070-android-workspaces.png" width="320" alt="Stock White Noise Android app showing the real four-step workspace menu, with Garden planner, Create new workspace, and 0. Cancel">
-<img src="docs/screenshots/codr-v070-android-model-providers.png" width="320" alt="Stock White Noise Android app showing the real model-provider menu and the acknowledgement after cancelling with 0">
+Send **`/new`** to choose an existing workspace or create one. Nothing starts before the final confirmation.
 
-<details>
-<summary>Pat's introduction, commands, and sync mode</summary>
+<a href="docs/screenshots/codr-v070-android-new-full.png"><img src="docs/screenshots/codr-v070-android-new.png" width="520" alt="The phone sends /new, then codr replies with workspace choices and 0. Cancel"></a>
 
-The long help reply appears at two scroll positions in the same chat.
+### Choose a model
 
-<img src="docs/screenshots/codr-v070-android-help-top.png" width="320" alt="Pat's actual introduction and the top of codr help in the stock Android app">
-<img src="docs/screenshots/codr-v070-android-help-sync.png" width="320" alt="The lower part of codr help with cancel, unmute, and persistent sync controls in the stock Android app">
+Send **`/model`** in an idle OpenCode chat to browse providers. The current model stays unchanged until confirmation.
 
-</details>
+<a href="docs/screenshots/codr-v070-android-model-full.png"><img src="docs/screenshots/codr-v070-android-model.png" width="520" alt="The phone sends /model, then codr replies with OpenAI, Claude, and Free provider choices"></a>
 
 <details>
 <summary>Earlier demos: a shared project, images, voice, decisions, and multiple chats</summary>

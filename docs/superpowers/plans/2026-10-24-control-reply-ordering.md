@@ -16,8 +16,9 @@
 
 ## Capture and delivery
 
-- [ ] Rebuild the reviewed worker. Replace only the isolated demo worker, without stopping herdr agents, the connector, or the normal installed bridge. Preserve its state.
-- [ ] Create separate real, empty native sessions for two fictional demo chats. Capture `/new` with workspace choices in one chat. Capture `/model` with provider choices in the other. Do not include help or cancellation in either frame.
-- [ ] Verify request/reply timestamps and actual rendered order before capture. Use the connected Pixel 5 and unchanged stock White Noise app. Do not rearrange pixels or clear prior history.
-- [ ] Add short purpose-based captions. Remove the earlier mixed-history images from the new gallery. Keep help as text reference documentation.
-- [ ] Verify native pixels, metadata, privacy, file paths and hashes. Obtain two read-only reviews, publish reviewed source to GitHub, mirror approved refs, and continue full release verification before publication.
+- [x] Rebuild the reviewed worker. Replace only the isolated demo worker, without stopping herdr agents, the connector, or the normal installed bridge. Preserve its state.
+- [x] Create separate real, empty native sessions for two fictional demo chats. Capture `/new` with workspace choices in one chat. Capture `/model` with provider choices in the other. Do not include help or cancellation in either detail crop. Link full app views for context.
+- [x] Verify request/reply timestamps and actual rendered order before capture. Use the connected Pixel 5 and unchanged stock White Noise app. Do not rearrange pixels or clear prior history.
+- [x] Add short purpose-based captions. Remove the earlier mixed-history images from the new gallery. Keep help as text reference documentation.
+- [x] Verify native pixels, metadata, privacy, file paths and hashes. Obtain two read-only reviews.
+- [ ] Publish reviewed source to GitHub, mirror approved refs, and continue full release verification before publication.
