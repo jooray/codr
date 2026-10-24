@@ -114,6 +114,16 @@ async fn sync_excerpt_keeps_three_messages_in_order_across_all_transcript_reader
             .await
             .unwrap();
             assert_eq!(history.recent_messages.len(), 3, "{provider}");
+            let final_reply = history.finals.last().unwrap();
+            let source = history
+                .recent_messages
+                .iter()
+                .find(|message| message.speaker == "Agent" && message.text == final_reply.text)
+                .unwrap();
+            assert_eq!(
+                source.id, final_reply.id,
+                "Normal forwarding and sync must use the same source identity for {provider}"
+            );
             assert_eq!(
                 history.catch_up().as_deref(),
                 Some(if additional_user {
@@ -137,6 +147,20 @@ fn config(root: &std::path::Path) -> BridgeConfig {
     .unwrap()
 }
 
+#[test]
+fn sync_source_identity_distinguishes_messages_with_the_same_text_and_content_edits() {
+    let message = |id: &str, speaker, text: &str| output::ConversationMessage {
+        id: id.into(),
+        speaker,
+        text: text.into(),
+    };
+    let first = message("first", "Agent", "Hello").key();
+    assert_eq!(first, message("first", "Agent", "Hello").key());
+    assert_ne!(first, message("second", "Agent", "Hello").key());
+    assert_ne!(first, message("first", "You", "Hello").key());
+    assert_ne!(first, message("first", "Agent", "Corrected answer").key());
+}
+
 /// Manual long replies keep stable, distinct chunk keys across persistence and retries.
 #[test]
 fn sync_replies_chunk_utf8_without_loss_or_ordinary_mute_bypass() {
@@ -151,7 +175,11 @@ fn sync_replies_chunk_utf8_without_loss_or_ordinary_mute_bypass() {
             ("Agent", "Latest answer".into()),
         ]
         .into_iter()
-        .map(|(speaker, text)| output::ConversationMessage { speaker, text })
+        .map(|(speaker, text)| output::ConversationMessage {
+            id: speaker.into(),
+            speaker,
+            text,
+        })
         .collect(),
         ..Default::default()
     };

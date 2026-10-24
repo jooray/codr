@@ -44,7 +44,7 @@ impl Response {
         if self.complete {
             let text = self.text.join("\n");
             if !text.trim().is_empty() {
-                super::record_message(recent, "Agent", &text);
+                super::record_message(recent, "Agent", &format!("claude:{}", self.last_row), &text);
                 replies.push(FinalMessage {
                     id: format!("claude:{}", self.last_row),
                     text,
@@ -212,7 +212,12 @@ pub(super) fn snapshot(
                 &row.input_text,
             ));
             response.finish(&mut replies, &mut recent_messages);
-            super::record_message(&mut recent_messages, "You", &row.input_text);
+            super::record_message(
+                &mut recent_messages,
+                "You",
+                &format!("claude:{}", row.id),
+                &row.input_text,
+            );
             latest_turn = Some(format!("claude:{}", row.id));
             turns.insert(latest_turn.clone().unwrap());
             tasks.new_turn();

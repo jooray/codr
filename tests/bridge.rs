@@ -421,6 +421,133 @@ async fn shortcut_sync_includes_a_recent_user_message_without_an_assistant_reply
     );
 }
 
+/// Different /sync requests share delivery history, not just command replay guards.
+#[tokio::test]
+async fn shortcut_sync_does_not_resend_confirmed_or_pending_messages_after_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    input_history(
+        &config,
+        "ses_1",
+        &[("user", "Question")],
+        Some(("answer", "Answer")),
+    );
+    let path = config.opencode_bin.with_file_name("ses_1.json");
+    let mut data: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    data["messages"][1]["info"]["time"]["completed"] = json!(now() * 1000);
+    std::fs::write(&path, data.to_string()).unwrap();
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge
+        .state
+        .mappings
+        .insert(agent().key(), activity_mapping(agent(), &"bb".repeat(16)));
+    let mut event = inbound(HEX, "dedup-first");
+    event["message"]["text"] = json!("/sync");
+    bridge.inbound(&event).await.unwrap();
+    let excerpt_count = |state: &BridgeState| {
+        state
+            .outbox
+            .iter()
+            .filter(|item| item.text.starts_with("**"))
+            .count()
+    };
+    assert_eq!(excerpt_count(&bridge.state), 1);
+    assert!(bridge.flush().await.is_err());
+    assert!(
+        bridge.state.delivered_messages.is_empty(),
+        "Failed sends must not confirm source delivery"
+    );
+    drop(bridge);
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    event["message"]["message_id_hex"] = json!("dedup-while-pending");
+    bridge.inbound(&event).await.unwrap();
+    assert_eq!(
+        excerpt_count(&bridge.state),
+        1,
+        "Do not queue a second copy of pending source messages"
+    );
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    bridge.flush().await.unwrap();
+    drop(bridge);
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    event["message"]["message_id_hex"] = json!("dedup-after-confirmation");
+    bridge.reconcile(vec![agent()]).await.unwrap();
+    assert!(
+        !bridge.state.outbox.iter().any(|item| item.text == "Answer"),
+        "A later normal checkpoint must not forward the synced answer again"
+    );
+    bridge.inbound(&event).await.unwrap();
+    assert_eq!(
+        excerpt_count(&bridge.state),
+        0,
+        "Confirmed messages survive restart"
+    );
+    data["messages"].as_array_mut().unwrap().push(json!({"info":{"id":"new-user","role":"user","time":{"created":now()*1000}},"parts":[{"type":"text","text":"New question"}]}));
+    std::fs::write(&path, data.to_string()).unwrap();
+    event["message"]["message_id_hex"] = json!("dedup-overlap");
+    bridge.inbound(&event).await.unwrap();
+    let excerpts: Vec<_> = bridge
+        .state
+        .outbox
+        .iter()
+        .filter(|item| item.text.starts_with("**"))
+        .collect();
+    assert_eq!(excerpts.len(), 1);
+    assert_eq!(excerpts[0].text, "**You:**\nNew question");
+    mdk.abort();
+}
+
+#[tokio::test]
+async fn shortcut_sync_skips_assistant_messages_confirmed_by_automatic_forwarding() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    input_history(
+        &config,
+        "ses_1",
+        &[("user", "Question")],
+        Some(("answer", "Answer")),
+    );
+    let path = config.opencode_bin.with_file_name("ses_1.json");
+    let mut data: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    data["messages"][1]["info"]["time"]["completed"] = json!(now() * 1000);
+    std::fs::write(path, data.to_string()).unwrap();
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge
+        .state
+        .mappings
+        .insert(agent().key(), activity_mapping(agent(), &"bb".repeat(16)));
+    bridge.reconcile(vec![agent()]).await.unwrap();
+    bridge.flush().await.unwrap();
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call["type"] == "send_final" && call["text"] == "Answer")
+    );
+    let mut event = inbound(HEX, "dedup-normal-final");
+    event["message"]["text"] = json!("/sync");
+    bridge.inbound(&event).await.unwrap();
+    assert!(
+        bridge
+            .state
+            .outbox
+            .iter()
+            .any(|item| item.text == "**You:**\nQuestion")
+    );
+    assert!(
+        !bridge
+            .state
+            .outbox
+            .iter()
+            .any(|item| item.text.contains("**Agent:**"))
+    );
+    mdk.abort();
+}
+
 /// A reply written while the reader runs is current activity, not a future clock.
 #[tokio::test]
 async fn shortcut_sync_accepts_activity_written_during_its_read() {

@@ -72,6 +72,13 @@ pub struct ResponseDelivery {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SourceDelivery {
+    pub batch: String,
+    /// Digests of source identity, speaker and content; no extra transcript plaintext.
+    pub messages: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Outgoing {
     pub id: String,
     pub group: String,
@@ -81,6 +88,8 @@ pub struct Outgoing {
     /// An explicit owner command may reply once even while automatic forwarding is muted.
     #[serde(default)]
     pub manual: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SourceDelivery>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -94,6 +103,9 @@ pub struct BridgeState {
     /// Edits and incoming phone commands do not advance it.
     #[serde(default)]
     pub last_confirmed_send_at: Option<u64>,
+    /// Per-group source messages confirmed after every chunk in their batch was sent.
+    #[serde(default)]
+    pub delivered_messages: BTreeMap<String, Vec<String>>,
     #[serde(default = "forwarding_default")]
     pub forwarding_enabled: bool,
     #[serde(default)]
@@ -118,6 +130,7 @@ impl Default for BridgeState {
             mappings: BTreeMap::new(),
             outbox: vec![],
             last_confirmed_send_at: None,
+            delivered_messages: BTreeMap::new(),
             forwarding_enabled: true,
             forwarding_revision: None,
             forwarding_resume_pending: false,
@@ -167,6 +180,68 @@ impl BridgeState {
         self.enqueue_text(group, text, Some(request));
     }
 
+    pub fn source_known(&self, group: &str, message: &str) -> bool {
+        self.delivered_messages
+            .get(group)
+            .is_some_and(|sent| sent.iter().any(|key| key == message))
+            || self.outbox.iter().any(|item| {
+                item.group == group
+                    && item
+                        .source
+                        .as_ref()
+                        .is_some_and(|source| source.messages.iter().any(|key| key == message))
+            })
+    }
+
+    /// Source identity remains pending until every chunk is confirmed, including after restart.
+    pub fn enqueue_tracked(
+        &mut self,
+        group: &str,
+        text: &str,
+        request: Option<&str>,
+        messages: Vec<String>,
+    ) {
+        if request.is_none() && !self.forwarding_enabled {
+            return;
+        }
+        let start = self.outbox.len();
+        self.enqueue_text(group, text, request);
+        if let Some(first) = self.outbox.get(start) {
+            let source = SourceDelivery {
+                batch: first.id.clone(),
+                messages,
+            };
+            for item in &mut self.outbox[start..] {
+                item.source = Some(source.clone());
+            }
+        }
+    }
+
+    pub fn confirm_send(&mut self, id: &str) {
+        let Some(position) = self.outbox.iter().position(|item| item.id == id) else {
+            return;
+        };
+        let item = self.outbox.remove(position);
+        let Some(source) = item.source else {
+            return;
+        };
+        if self.outbox.iter().any(|pending| {
+            pending.group == item.group
+                && pending
+                    .source
+                    .as_ref()
+                    .is_some_and(|other| other.batch == source.batch)
+        }) {
+            return;
+        }
+        let sent = self.delivered_messages.entry(item.group).or_default();
+        for message in source.messages {
+            if !sent.contains(&message) {
+                sent.push(message);
+            }
+        }
+    }
+
     fn enqueue_text(&mut self, group: &str, text: &str, request: Option<&str>) {
         // Keep each encrypted message below MDK's message-size ceiling.
         let mut rest = text;
@@ -185,6 +260,7 @@ impl BridgeState {
                 text: rest[..end].into(),
                 response: None,
                 manual: request.is_some(),
+                source: None,
             });
             rest = &rest[end..];
             part += 1;
@@ -209,6 +285,7 @@ impl BridgeState {
             text: "> working...".into(),
             response: Some(ResponseDelivery::default()),
             manual: false,
+            source: None,
         });
         self.mappings.get_mut(key).unwrap().response_id = Some(id);
     }
@@ -227,6 +304,7 @@ impl BridgeState {
                 ..ResponseDelivery::default()
             }),
             manual: false,
+            source: None,
         });
         Some(id)
     }

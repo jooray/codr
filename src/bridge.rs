@@ -409,7 +409,7 @@ impl Bridge {
             match self.marmot.marmot(json!({"type":"send_final","account_id_hex":self.config.account_id_hex,"group_id_hex":item.group,"text":item.text,"reply_to_message_id_hex":null,"idempotency_key":item.id})).await {
                 Ok(response) if response["type"] == "final_sent" && response["message_ids_hex"].as_array().is_some_and(|ids|!ids.is_empty() && ids.iter().all(|id| id.as_str().is_some_and(|id| !id.is_empty()))) => {
                     self.state.last_confirmed_send_at = Some(now());
-                    self.state.outbox.retain(|m| m.id != item.id); self.save()?;
+                    self.state.confirm_send(&item.id); self.save()?;
                 }
                 _ => { failed.insert(item.group); }
             }
@@ -591,7 +591,11 @@ impl Bridge {
                         if self.config.edit_responses {
                             self.state.complete_progress(key);
                         }
-                        self.state.enqueue(group, &reply.text);
+                        let source = output::message_key("Agent", &reply.id, &reply.text);
+                        if !self.state.source_known(group, &source) {
+                            self.state
+                                .enqueue_tracked(group, &reply.text, None, vec![source]);
+                        }
                     }
                     self.state
                         .mappings
@@ -1090,13 +1094,21 @@ impl Bridge {
             }
             while let Some(result) = readers.join_next().await {
                 match result {
-                    Ok(Ok((target, Ok(history)))) => {
+                    Ok(Ok((target, Ok(mut history)))) => {
+                        history
+                            .recent_messages
+                            .retain(|message| !self.state.source_known(&target, &message.key()));
                         if history
                             .activity_at
                             .is_some_and(|at| at <= now() && at >= cutoff)
                             && let Some(excerpt) = history.catch_up()
                         {
-                            replies.push((target, excerpt));
+                            let messages = history
+                                .recent_messages
+                                .iter()
+                                .map(|message| message.key())
+                                .collect();
+                            replies.push((target, excerpt, messages));
                         }
                     }
                     _ => unavailable += 1,
@@ -1109,9 +1121,13 @@ impl Bridge {
             self.state.last_confirmed_send_at = reference;
         }
         let count = replies.len();
-        for (target, text) in replies {
-            self.state
-                .enqueue_manual(&target, &text, &format!("sync:{request}:{target}"));
+        for (target, text, messages) in replies {
+            self.state.enqueue_tracked(
+                &target,
+                &text,
+                Some(&format!("sync:{request}:{target}")),
+                messages,
+            );
         }
         let response = if sync {
             let window = if reference.is_some() {
@@ -1120,10 +1136,10 @@ impl Bridge {
                 "in the past hour (no confirmed send history is available)"
             };
             format!(
-                "Sync: queued the last three conversation messages (or fewer if unavailable), labelled You or Agent, for {count} conversation(s) active {window}, each in its own White Noise chat. {unavailable} history reader(s) unavailable. Mute settings are unchanged; no prompt was sent."
+                "Sync: queued up to three new conversation messages, labelled You or Agent, for {count} conversation(s) active {window}, each in its own White Noise chat. Already sent or queued messages are skipped. {unavailable} history reader(s) unavailable. Mute settings are unchanged; no prompt was sent."
             )
         } else {
-            "White Noise shortcuts:\n/help — show this list in this chat.\n/sync — send the last three conversation messages (or fewer), labelled You or Agent, together in each eligible chat. A conversation qualifies if active since one hour before the last confirmed new outgoing message across all linked chats. With no confirmed send history, use the past hour. The excerpt may include older context; tool output and unfinished agent replies are excluded. Mute settings stay unchanged; no agent is prompted.\n/status — show this session's connection and status; this can resume forwarding globally.\nunmute or /unmute — enable forwarding for all chats without prompting an agent.\n\nOther text prompts the linked agent when idle and resumes global forwarding. Local terminal prompts mute all chats.\n\nDecision replies: use a listed number, exact option label, or /answer 2. If a question shows a code, include that code as requested. Other dialogs need the terminal.".into()
+            "White Noise shortcuts:\n/help — show this list in this chat.\n/sync — send unseen messages among the last three conversation messages, labelled You or Agent, together in each eligible chat. Messages already confirmed sent or queued by the bridge are skipped, including earlier syncs and normal assistant forwarding. A conversation qualifies if active since one hour before the last confirmed new outgoing message across all linked chats. With no confirmed send history, use the past hour. The excerpt may include older context; tool output and unfinished agent replies are excluded. Mute settings stay unchanged; no agent is prompted.\n/status — show this session's connection and status; this can resume forwarding globally.\nunmute or /unmute — enable forwarding for all chats without prompting an agent.\n\nOther text prompts the linked agent when idle and resumes global forwarding. Local terminal prompts mute all chats.\n\nDecision replies: use a listed number, exact option label, or /answer 2. If a question shows a code, include that code as requested. Other dialogs need the terminal.".into()
         };
         self.state
             .enqueue_manual(group, &response, &format!("command:{request}"));

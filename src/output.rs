@@ -41,8 +41,22 @@ pub struct SessionHistory {
 
 #[derive(Clone, Debug)]
 pub struct ConversationMessage {
+    pub id: String,
     pub speaker: &'static str,
     pub text: String,
+}
+
+impl ConversationMessage {
+    pub fn key(&self) -> String {
+        message_key(self.speaker, &self.id, &self.text)
+    }
+}
+
+pub(crate) fn message_key(speaker: &str, id: &str, text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(
+        serde_json::to_vec(&(speaker, id, text)).expect("strings serialize"),
+    ))
 }
 
 impl SessionHistory {
@@ -58,9 +72,15 @@ impl SessionHistory {
     }
 }
 
-fn record_message(recent: &mut Vec<ConversationMessage>, speaker: &'static str, text: &str) {
-    if !text.trim().is_empty() {
+fn record_message(
+    recent: &mut Vec<ConversationMessage>,
+    speaker: &'static str,
+    id: &str,
+    text: &str,
+) {
+    if !id.is_empty() && !text.trim().is_empty() {
         recent.push(ConversationMessage {
+            id: id.into(),
             speaker,
             text: text.into(),
         });
@@ -212,7 +232,7 @@ fn history_from_data(export: &Export) -> SessionHistory {
                     .collect::<Vec<_>>()
                     .join("\n");
                 let id = format!("opencode:{}", info.id);
-                record_message(&mut recent_messages, "You", &text);
+                record_message(&mut recent_messages, "You", &info.id, &text);
                 user_inputs.push(if message.parts.is_empty() {
                     crate::activity::UserInput::pending(id)
                 } else {
@@ -251,7 +271,7 @@ fn history_from_data(export: &Export) -> SessionHistory {
             .collect::<Vec<_>>()
             .join("\n");
         if !text.trim().is_empty() {
-            record_message(&mut recent_messages, "Agent", &text);
+            record_message(&mut recent_messages, "Agent", &info.id, &text);
             out.push(FinalMessage {
                 id: info.id.clone(),
                 text,

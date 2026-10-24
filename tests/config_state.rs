@@ -28,6 +28,48 @@ fn state_round_trip_keeps_the_session_group_mapping() {
 }
 
 #[test]
+fn source_delivery_requires_all_chunks_and_survives_restart_per_group() {
+    let mut state = BridgeState::default();
+    state.enqueue_tracked(
+        "one",
+        &"🦄".repeat(20000),
+        Some("sync:request"),
+        vec!["source-key".into()],
+    );
+    assert!(state.outbox.len() > 1);
+    assert!(state.source_known("one", "source-key"));
+    assert!(!state.source_known("two", "source-key"));
+    let first = state.outbox[0].id.clone();
+    state.confirm_send(&first);
+    assert!(state.delivered_messages.is_empty());
+    let mut state: BridgeState =
+        serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+    assert!(state.source_known("one", "source-key"));
+    while let Some(item) = state.outbox.first() {
+        let id = item.id.clone();
+        state.confirm_send(&id);
+    }
+    assert_eq!(state.delivered_messages["one"], vec!["source-key"]);
+    assert!(!state.source_known("two", "source-key"));
+    let restored: BridgeState =
+        serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+    assert!(restored.source_known("one", "source-key"));
+}
+
+#[test]
+fn legacy_state_and_outbox_do_not_invent_source_delivery_records() {
+    let mut state = BridgeState::default();
+    state.enqueue("group", "old queued answer");
+    let mut json = serde_json::to_value(&state).unwrap();
+    json.as_object_mut().unwrap().remove("delivered_messages");
+    let mut state: BridgeState = serde_json::from_value(json).unwrap();
+    let id = state.outbox[0].id.clone();
+    state.confirm_send(&id);
+    assert!(state.outbox.is_empty());
+    assert!(state.delivered_messages.is_empty());
+}
+
+#[test]
 fn completed_progress_keeps_tasks_from_current_and_previous_working_labels() {
     for label in ["> working...", "> working"] {
         let mut state = BridgeState::with_mapping("session", "ab".repeat(16));

@@ -33,12 +33,12 @@ pub(super) fn snapshot(
         let payload = &row["payload"];
         if row["type"] == "event_msg" && payload["type"] == "user_message" {
             let text = payload["message"].as_str().unwrap_or("");
-            super::record_message(&mut recent_messages, "You", text);
             let id = format!(
                 "codex:user:{}:{}",
                 user_inputs.len(),
                 row["timestamp"].as_str().unwrap_or("")
             );
+            super::record_message(&mut recent_messages, "You", &id, text);
             user_inputs.push(crate::activity::UserInput::new(id, text));
         }
         if ((row["type"] == "event_msg"
@@ -95,7 +95,7 @@ pub(super) fn snapshot(
             .ok_or_else(|| anyhow::anyhow!("Codex completion lacks its turn ID"))?;
         let id = format!("codex:{turn}");
         if seen.insert(id.clone()) {
-            super::record_message(&mut recent_messages, "Agent", text);
+            super::record_message(&mut recent_messages, "Agent", &id, text);
             replies.push(FinalMessage {
                 turn: Some(id.clone()),
                 id,

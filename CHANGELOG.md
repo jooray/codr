@@ -4,6 +4,7 @@
 
 ### Changed
 
+- `/sync` skips unchanged messages already confirmed sent or queued in that chat, including previous catch-ups and ordinary assistant forwarding. Per-source delivery records survive restarts and are confirmed only after every long-message chunk succeeds. The latest-three limit and shared time cutoff stay unchanged.
 - `/sync` includes each eligible conversation's last three user/completed assistant text messages, labelled You or Agent and grouped in conversation order. The shared cutoff still selects conversations; excerpts can include older context and unanswered user prompts. Tool output and unfinished replies are excluded. `/help` describes the current behavior, fallback, and mute settings.
 
 ## [0.6.2] - 2026-10-23 (Linux preview)
