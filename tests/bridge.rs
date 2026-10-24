@@ -411,6 +411,7 @@ async fn shortcut_help_is_a_short_command_list() {
     );
     assert_eq!(help.lines().count(), 7);
     assert!(help.starts_with("codr shortcuts:\n"));
+    assert!(help.contains("/sync         Get up to 3 messages"));
     assert!(help.ends_with("/unmute       Resume all chats"));
     assert!(help.lines().all(|line| line.chars().count() <= 65));
 }

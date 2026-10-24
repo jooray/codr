@@ -1231,7 +1231,7 @@ impl Bridge {
             status.push('.');
             status
         } else {
-            "codr shortcuts:\n/help         Show commands\n/sync         Up to 3 new messages per chat\n/status       Status (resumes forwarding)\n/queue        Queue status\n/clear-queue  Cancel waiting tasks\n/unmute       Resume all chats".into()
+            "codr shortcuts:\n/help         Show commands\n/sync         Get up to 3 messages\n/status       Status (resumes forwarding)\n/queue        Queue status\n/clear-queue  Cancel waiting tasks\n/unmute       Resume all chats".into()
         };
         self.state
             .enqueue_manual(group, &response, &format!("command:{request}"));
