@@ -180,15 +180,32 @@ impl Decision {
 fn main_column(visible: &str) -> String {
     // OpenCode's default wide sidebar has two padding cells before its version footer.
     // Slice by display cells, not UTF-8 offsets, so wrapped Unicode options still match.
-    let boundary = visible.lines().rev().find_map(|line| {
-        let prefix = &line[..line.rfind("• OpenCode ")?];
-        if !prefix.ends_with("  ") {
-            return None;
-        }
-        UnicodeWidthStr::width(prefix)
-            .checked_sub(2)
-            .filter(|column| *column >= 20)
-    });
+    let boundary = visible
+        .lines()
+        .rev()
+        .find_map(|line| {
+            let prefix = &line[..line.rfind("• OpenCode ")?];
+            if !prefix.ends_with("  ") {
+                return None;
+            }
+            UnicodeWidthStr::width(prefix)
+                .checked_sub(2)
+                .filter(|column| *column >= 20)
+        })
+        .or_else(|| {
+            // V2 can replace the version footer with the repository path. Accept
+            // only the bottom gutter-only row, not a path in transcript content.
+            let line = visible.lines().rev().find(|line| !line.trim().is_empty())?;
+            let tail = line.trim_start().strip_prefix('┃')?;
+            let location = tail.trim_start();
+            if !location.starts_with("~/") && !location.starts_with('/') {
+                return None;
+            }
+            let prefix = &line[..line.len() - location.len()];
+            UnicodeWidthStr::width(prefix)
+                .checked_sub(2)
+                .filter(|column| *column >= 20)
+        });
     let Some(boundary) = boundary else {
         return visible.into();
     };

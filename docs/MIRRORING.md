@@ -1,7 +1,7 @@
 # Source and release mirrors
 
-[GitHub](https://github.com/tidley/codr) is primary for **codr** source, issues, pull requests, reviews, CI, and releases.
-Contributors do not need Nostr or ngit.
+[GitHub](https://github.com/tidley/codr) is primary for **codr** source, issues, CI, and releases.
+Pull requests and their reviews are welcome on GitHub or ngit. Contributors choose one route; duplicate PRs are not required. GitHub contributors do not need Nostr or ngit, and ngit contributors do not need a GitHub account.
 The [ngit repository](https://gitworkshop.dev/npub19at4nqjjymca2lh3v546vcg5ktun3al4c5xu2pts3ewckv0y70ys0gupzr/relay.ngit.dev/codr)
 provides independent access to approved source and published release builds.
 Blossom hosts the mirrored release files.
@@ -53,6 +53,6 @@ Tom must approve each signing request in Amber. Never export signing secrets or 
 An approval timeout or rejection is not a successful publication.
 CI can finish before the mirror because publication needs this approval and download verification.
 
-Keep existing ngit issues, PRs, comments, and attribution. Use GitHub for new collaboration.
+Keep existing ngit issues, PRs, comments, and attribution. Accept new PRs on either host; use GitHub for new issues. Integrate approved source through GitHub first, then mirror the approved refs without requiring duplicate PRs.
 Do not duplicate discussions or close old records solely because the hosting policy changed.
 See [Contributing](../CONTRIBUTING.md).

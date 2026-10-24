@@ -46,6 +46,25 @@ pub fn audio(message: &Value) -> bool {
     })
 }
 
+pub fn images(message: &Value) -> bool {
+    message["media"].as_array().is_some_and(|items| {
+        !items.is_empty()
+            && items.len() <= 4
+            && items.iter().all(|item| {
+                matches!(
+                    item["media_type"]
+                        .as_str()
+                        .unwrap_or("")
+                        .split(';')
+                        .next()
+                        .unwrap_or("")
+                        .trim(),
+                    "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+                )
+            })
+    })
+}
+
 #[derive(Debug)]
 pub struct Prepared {
     pub prompt: String,

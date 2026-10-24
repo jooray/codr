@@ -6,6 +6,45 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
+#[test]
+fn sync_section_breaks_only_appear_between_messages_and_keep_their_text() {
+    let messages = [
+        output::ConversationMessage {
+            id: "one".into(),
+            speaker: "You",
+            text: "First paragraph\n\nSecond paragraph".into(),
+        },
+        output::ConversationMessage {
+            id: "two".into(),
+            speaker: "Agent",
+            text: "Reply 🐇".into(),
+        },
+        output::ConversationMessage {
+            id: "three".into(),
+            speaker: "You",
+            text: "Follow-up".into(),
+        },
+    ];
+    for count in 0..=3 {
+        let history = output::SessionHistory {
+            recent_messages: messages[..count].to_vec(),
+            ..Default::default()
+        };
+        let excerpt = history.catch_up();
+        if count == 0 {
+            assert!(excerpt.is_none());
+            continue;
+        }
+        let excerpt = excerpt.unwrap();
+        assert_eq!(excerpt.matches("\n\n---\n\n").count(), count - 1);
+        assert!(excerpt.starts_with("**You:**\n"));
+        assert!(excerpt.ends_with(&messages[count - 1].text));
+        for message in &messages[..count] {
+            assert!(excerpt.contains(&format!("**{}:**\n{}", message.speaker, message.text)));
+        }
+    }
+}
+
 #[tokio::test]
 async fn sync_excerpt_keeps_three_messages_in_order_across_all_transcript_readers() {
     let session = "00000000-0000-0000-0000-000000000001";
@@ -127,9 +166,9 @@ async fn sync_excerpt_keeps_three_messages_in_order_across_all_transcript_reader
             assert_eq!(
                 history.catch_up().as_deref(),
                 Some(if additional_user {
-                    "**You:**\nFollow-up\n\n**Agent:**\nLatest answer\n\n**You:**\nNewest prompt"
+                    "**You:**\nFollow-up\n\n---\n\n**Agent:**\nLatest answer\n\n---\n\n**You:**\nNewest prompt"
                 } else {
-                    "**Agent:**\nEarlier answer\n\n**You:**\nFollow-up\n\n**Agent:**\nLatest answer"
+                    "**Agent:**\nEarlier answer\n\n---\n\n**You:**\nFollow-up\n\n---\n\n**Agent:**\nLatest answer"
                 }),
                 "{provider}"
             );

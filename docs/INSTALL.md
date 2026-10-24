@@ -32,7 +32,7 @@ The phone account must publish a compatible Marmot KeyPackage before the bridge 
 Run these commands as your normal user, not root:
 
 ```bash
-herdr plugin install tidley/codr --ref v0.6.0
+herdr plugin install tidley/codr --ref v0.7.0
 herdr plugin action invoke local.white-noise.setup
 ```
 
@@ -48,6 +48,28 @@ The Setup action opens a **herdr** tab. Enter your own White Noise public `npub`
 6. Starts the transport and bridge, then prints the bridge's public `npub` and local result.
 
 The dedicated connector uses a pinned MDK revision with **codr**'s founding-admin and media-recovery patch. See [connector source and provenance](../patches/README.md). Setup does not replace a shared `wn-agent` executable.
+
+### Pat, your bridge identity
+
+Fresh setup names a newly created bridge account **Pat** in White Noise. This publishes only the public profile name and display name, not your project names or other private details. Each new session chat introduces Pat and points you to `/help`.
+
+The display name is not proof of identity. Continue to verify invitations against the full bridge `npub` printed by setup. Existing and reused accounts keep their profile names and keys. Existing chats are not greeted again.
+
+Setup records profile publication before sending it. If confirmation is lost, setup reports `default_profile_status: unconfirmed` and does not automatically publish again. The same bridge identity can still deliver messages; inspect its profile before retrying a profile change.
+
+### Optional portr desktop/SSH access
+
+The normal phone-only installation does not enable the desktop endpoint or require SSH. In builds with portr support, fresh interactive setup asks **Enable optional portr desktop/SSH access? [y/N]**; press Enter to leave it off.
+
+For non-interactive setup, opt in explicitly:
+
+```sh
+python3 scripts/setup.py --npub "$OWNER_NPUB" --portr
+```
+
+Omit `--portr`, or use `--no-portr`, for phone-only setup. The optional setting is `portr_enabled = true`; an absent setting means disabled. The separate **portr** desktop application handles the SSH connection. Codr does not install the app, an SSH server, a VPN, or SSH keys. See the [desktop endpoint guide](PORTER.md).
+
+Re-running setup without either option preserves the stored preference. On an existing installation, an explicit change is validated and saved without an extra worker restart for this setting; setup reports that a restart is required. Apply it only after active work is idle. Other explicitly requested setup operations, such as a connector upgrade, retain the service behavior described below. `--check` cannot be combined with a desktop change option.
 
 The binary installer selects the **codr** version from the installed plugin checkout. A pinned installation uses that exact version's assets and checksums. A missing release asset or checksum stops installation rather than falling back to unverified code.
 
@@ -91,7 +113,7 @@ launchctl kickstart -k "gui/$(id -u)/io.github.tidley.codr.herdr-white-noise-bri
 ```bash
 herdr plugin list
 herdr plugin unlink local.white-noise
-herdr plugin install tidley/codr --ref v0.6.0
+herdr plugin install tidley/codr --ref v0.7.0
 ```
 
 Unlinking leaves the local checkout and account state in place. Do not delete the MDK home or reset the bridge to perform an upgrade.
@@ -158,7 +180,7 @@ Before changing the host:
 Set `OWNER_NPUB` to the public key supplied by the user. Export the selected `HERDR_SOCKET_PATH` before running **herdr** commands.
 
 ```bash
-herdr plugin install tidley/codr --ref v0.6.0 --yes
+herdr plugin install tidley/codr --ref v0.7.0 --yes
 PLUGIN_ROOT="$(herdr plugin list --plugin local.white-noise --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["plugins"][0]["plugin_root"])')"
 python3 "$PLUGIN_ROOT/scripts/setup.py" --npub "$OWNER_NPUB" --herdr-socket "$HERDR_SOCKET_PATH"
 ```

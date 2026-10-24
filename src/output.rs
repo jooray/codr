@@ -68,7 +68,7 @@ impl SessionHistory {
                 .iter()
                 .map(|message| format!("**{}:**\n{}", message.speaker, message.text))
                 .collect::<Vec<_>>()
-                .join("\n\n")
+                .join("\n\n---\n\n")
         })
     }
 }
@@ -366,7 +366,11 @@ async fn run_export(bin: &Path, session: &str, api: u8) -> Result<Export> {
     }
 }
 
-async fn run_command(bin: &Path, args: &[&str], max_bytes: u64) -> Result<std::fs::File> {
+pub(crate) async fn run_command(
+    bin: &Path,
+    args: &[&str],
+    max_bytes: u64,
+) -> Result<std::fs::File> {
     // Regular files avoid OpenCode's observed stdout-pipe truncation. They are anonymous and owner-only.
     let mut output = tempfile::tempfile()?;
     let mut errors = tempfile::tempfile()?;

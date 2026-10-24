@@ -24,7 +24,8 @@ pub struct Bridge {
     phone: String,
     media_job: Option<tokio::task::JoinHandle<Result<crate::media::Prepared>>>,
     reads: crate::reads::Reads,
-    last_snapshot: Vec<Agent>,
+    pub(crate) last_snapshot: Vec<Agent>,
+    pub(crate) porter_updates: tokio::sync::watch::Sender<Value>,
 }
 
 impl Drop for Bridge {
@@ -65,23 +66,39 @@ impl Bridge {
             media_job: None,
             reads: crate::reads::Reads::default(),
             last_snapshot: vec![],
+            porter_updates: tokio::sync::watch::channel(Value::Null).0,
         };
         bridge.refresh_forwarding()?;
         Ok(bridge)
     }
 
     pub fn save(&self) -> Result<()> {
-        self.state.save(&self.config.state_path)
+        self.state.save(&self.config.state_path)?;
+        crate::porter::publish(self);
+        Ok(())
     }
 
     fn refresh_forwarding(&mut self) -> Result<()> {
         let control = forwarding::load(&self.config.state_path)?;
         if self.state.forwarding_revision.as_deref() != Some(&control.revision) {
+            let before = self.state.clone();
             // Preserve the old outbox on the first upgrade, unless a mode was already selected.
             let reset = self.state.forwarding_revision.is_some()
                 || control.revision != "initial"
                 || !control.enabled;
+            let mut cancelled_images = Vec::new();
             if reset {
+                cancelled_images.extend(
+                    self.state
+                        .outbox
+                        .iter()
+                        .filter(|item| !item.manual)
+                        .flat_map(|item| {
+                            item.attachments
+                                .iter()
+                                .map(|attachment| attachment.path.clone())
+                        }),
+                );
                 self.state.outbox.retain(|item| item.manual);
                 for mapping in self.state.mappings.values_mut() {
                     mapping.response_id = None;
@@ -98,7 +115,21 @@ impl Bridge {
             self.state.forwarding_enabled = control.enabled && !reset;
             self.state.forwarding_resume_pending = control.enabled && reset;
             self.state.forwarding_revision = Some(control.revision);
-            self.save()?;
+            if let Err(error) = self.save() {
+                self.state = before;
+                return Err(error);
+            }
+            // Delete only after cancellation is durable, and keep shared/manual references.
+            for path in cancelled_images {
+                if !self
+                    .state
+                    .outbox
+                    .iter()
+                    .any(|item| item.attachments.iter().any(|a| a.path == path))
+                {
+                    crate::outbound_images::remove_snapshot(&self.config.state_path, &path);
+                }
+            }
         }
         Ok(())
     }
@@ -300,7 +331,7 @@ impl Bridge {
         let mut failed = HashSet::new();
         let mut outbox = self.state.outbox.clone();
         // Durable replies and their continuations precede best-effort progress.
-        outbox.sort_by_key(|item| (!item.manual, item.response.is_some()));
+        outbox.sort_by_key(|item| (item.working_notice, !item.manual, item.response.is_some()));
         for item in outbox {
             self.refresh_forwarding()?;
             if !item.manual && (!self.state.forwarding_enabled || self.activity_unresolved()) {
@@ -312,6 +343,19 @@ impl Bridge {
                 .iter()
                 .any(|pending| pending.id == item.id)
             {
+                continue;
+            }
+            if item.working_notice
+                && !self.agents.iter().any(|(key, agent)| {
+                    agent.agent_status == "working"
+                        && self.state.mappings.get(key).is_some_and(|mapping| {
+                            mapping.active
+                                && mapping.group_id_hex.as_deref() == Some(item.group.as_str())
+                        })
+                })
+            {
+                self.state.confirm_send(&item.id);
+                self.save()?;
                 continue;
             }
             if failed.contains(&item.group) {
@@ -418,12 +462,53 @@ impl Bridge {
                 }
                 continue;
             }
-            match self.marmot.marmot(json!({"type":"send_final","account_id_hex":self.config.account_id_hex,"group_id_hex":item.group,"text":item.text,"reply_to_message_id_hex":null,"idempotency_key":item.id})).await {
-                Ok(response) if response["type"] == "final_sent" && response["message_ids_hex"].as_array().is_some_and(|ids|!ids.is_empty() && ids.iter().all(|id| id.as_str().is_some_and(|id| !id.is_empty()))) => {
+            let request = if item.attachments.is_empty() {
+                json!({"type":"send_final","account_id_hex":self.config.account_id_hex,"group_id_hex":item.group,"text":item.text,"reply_to_message_id_hex":null,"idempotency_key":item.id})
+            } else {
+                json!({"type":"send_media","account_id_hex":self.config.account_id_hex,"group_id_hex":item.group,"attachments":item.attachments,"caption":null,"idempotency_key":item.id})
+            };
+            let send = self.marmot.marmot(request);
+            let result = if item.working_notice {
+                tokio::time::timeout(Duration::from_secs(3), send)
+                    .await
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("Working notice timed out")))
+            } else {
+                send.await
+            };
+            match result {
+                Ok(response)
+                    if response["type"] == "final_sent"
+                        && response["message_ids_hex"].as_array().is_some_and(|ids| {
+                            !ids.is_empty()
+                                && ids
+                                    .iter()
+                                    .all(|id| id.as_str().is_some_and(|id| !id.is_empty()))
+                        }) =>
+                {
                     self.state.last_confirmed_send_at = Some(now());
-                    self.state.confirm_send(&item.id); self.save()?;
+                    self.state.confirm_send(&item.id);
+                    self.save()?;
+                    for attachment in &item.attachments {
+                        if !self.state.outbox.iter().any(|pending| {
+                            pending
+                                .attachments
+                                .iter()
+                                .any(|other| other.path == attachment.path)
+                        }) {
+                            crate::outbound_images::remove_snapshot(
+                                &self.config.state_path,
+                                &attachment.path,
+                            );
+                        }
+                    }
                 }
-                _ => { failed.insert(item.group); }
+                _ if item.working_notice => {
+                    self.state.confirm_send(&item.id);
+                    self.save()?;
+                }
+                _ => {
+                    failed.insert(item.group);
+                }
             }
         }
         ensure!(failed.is_empty(), "Some group deliveries remain pending");
@@ -605,6 +690,7 @@ impl Bridge {
             let known: HashSet<_> = self.state.mappings[key].final_ids.iter().cloned().collect();
             for reply in history.finals {
                 if !known.contains(&reply.id) {
+                    self.state.mappings.get_mut(key).unwrap().last_received_at = now();
                     if !self.state.mappings[key].prompt_queue.is_empty()
                         && self.state.mappings[key].queue_flight.is_none()
                     {
@@ -619,9 +705,21 @@ impl Bridge {
                             self.state.complete_progress(key);
                         }
                         let source = output::message_key("Agent", &reply.id, &reply.text);
-                        if !self.state.source_known(group, &source) {
-                            self.state
-                                .enqueue_tracked(group, &reply.text, None, vec![source]);
+                        if self.state.forwarding_enabled && !self.state.source_known(group, &source)
+                        {
+                            let text = reply.text.clone();
+                            let cwd = std::path::PathBuf::from(&agent.cwd);
+                            let spool = crate::outbound_images::spool(&self.config.state_path);
+                            let prepared = tokio::task::spawn_blocking(move || {
+                                crate::outbound_images::prepare(&text, &cwd, &spool)
+                            })
+                            .await??;
+                            self.state.enqueue_images(
+                                group,
+                                &prepared.text,
+                                prepared.attachments,
+                                vec![source],
+                            );
                         }
                     }
                     self.state
@@ -707,6 +805,20 @@ impl Bridge {
                 }
             }
             self.state.mappings.insert(key.to_owned(), m);
+            let kind = agent
+                .agent_session
+                .as_ref()
+                .map(|s| s.agent.as_str())
+                .unwrap_or(&agent.agent);
+            if self
+                .state
+                .pending_chat_agents
+                .get(&agent.terminal_id)
+                .is_some_and(|suffix| suffix == kind)
+            {
+                self.state.mappings.get_mut(key).unwrap().group_agent_suffix =
+                    self.state.pending_chat_agents.remove(&agent.terminal_id);
+            }
             self.save()?;
         }
         self.baseline_forwarding(key, agent).await?;
@@ -723,7 +835,8 @@ impl Bridge {
             self.observe_activity(key, &history)?;
         }
         self.refresh_forwarding()?;
-        let name = agent.group_name();
+        let name =
+            agent.group_name_with_suffix(self.state.mappings[key].group_agent_suffix.as_deref());
         let description = agent.group_description();
         let m = &self.state.mappings[key];
         // Muting suppresses messages, not group invitations or metadata updates.
@@ -747,7 +860,7 @@ impl Bridge {
                         let group = response["group_id_hex"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| anyhow::anyhow!("Missing group ID"))?.to_owned();
                         let m = self.state.mappings.get_mut(key).unwrap(); m.group_id_hex = Some(group.clone()); m.creating = false;
                         m.group_name = Some(name.clone()); m.group_description = Some(description.clone());
-                        self.state.enqueue(&group, &format!("Connected to herdr: {}. Send a message here to prompt this session. Use /status for its state.", agent.title()));
+                        self.state.enqueue(&group, &format!("Hi, I'm Pat. I'll be delivering messages between White Noise and herdr for you. Type /help from any message to see what commands are available.\n\nConnected to herdr: {}.", agent.title()));
                         self.save()?;
                     }
                     Err(error) => {
@@ -784,6 +897,7 @@ impl Bridge {
                 if resumed {
                     self.state
                         .update_response(key, &group, "> working...", false);
+                    self.state.enqueue_working_notice(&group);
                 }
             } else if status_changed
                 && !agent.settled()
@@ -983,7 +1097,9 @@ impl Bridge {
     }
 
     fn activity_unresolved(&self) -> bool {
-        self.config.auto_forwarding
+        !forwarding::load(&self.config.state_path)
+            .is_ok_and(|control| control.mode == forwarding::Mode::On)
+            && self.config.auto_forwarding
             && self
                 .state
                 .mappings
@@ -1071,9 +1187,26 @@ impl Bridge {
                 self.reads.finish(&key);
                 continue;
             }
+            if let Some(message) = &prompt.media
+                && !message["_codr_prepared_text"].is_string()
+            {
+                if self.state.media_pending.len() < 16 {
+                    self.state.media_pending.push(
+                        json!({"marmot_agent_control":PROTOCOL,"type":"inbound_message",
+                        "account_id_hex":self.config.account_id_hex,"group_id_hex":prompt.group,
+                        "message":message,"_codr_queued_image":true}),
+                    );
+                    if self.save().is_err() {
+                        self.state.media_pending.pop();
+                    }
+                }
+                self.reads.finish(&key);
+                continue;
+            }
             let event = json!({"marmot_agent_control":PROTOCOL,"type":"inbound_message","account_id_hex":self.config.account_id_hex,
-                "group_id_hex":prompt.group,"message":{"message_id_hex":prompt.id,"sender":{"account_id_hex":self.phone},"text":prompt.text}});
-            if let Err(error) = Box::pin(self.route_inbound(&event, false, true)).await
+                "group_id_hex":prompt.group,"message":{"message_id_hex":prompt.id,"sender":{"account_id_hex":self.phone},"text":prompt.prompt_text()}});
+            if let Err(error) =
+                Box::pin(self.route_inbound(&event, prompt.media.is_some(), true)).await
                 && !error.is::<crate::reads::Pending>()
             {
                 eprintln!("A queued prompt remains paused; other chats can continue.");
@@ -1153,10 +1286,7 @@ impl Bridge {
                     }
                 }
             }
-            let cutoff = reference
-                .unwrap_or(requested_at)
-                .min(requested_at)
-                .saturating_sub(3600);
+            let cutoff = requested_at.saturating_sub(3600);
             let limit = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
             let mut readers = tokio::task::JoinSet::new();
             for (mapping_key, mapping) in &self.state.mappings {
@@ -1224,23 +1354,23 @@ impl Bridge {
         }
         let response = if sync {
             let mut status = if count == 0 {
-                "Sync: nothing new".into()
+                "Recent: nothing new".into()
             } else {
                 format!(
-                    "Sync: {count} {} queued",
+                    "Recent: {count} {} queued",
                     if count == 1 { "chat" } else { "chats" }
                 )
             };
             if unavailable > 0 {
                 status.push_str(&format!("; {unavailable} unavailable"));
             }
-            if reference.is_none() {
-                status.push_str(" (past-hour fallback)");
-            }
             status.push('.');
             status
         } else {
-            "codr shortcuts:\n/help         Show commands\n/sync         Get up to 3 messages\n/status       Status (resumes forwarding)\n/queue        Queue status\n/clear-queue  Cancel waiting tasks\n/unmute       Resume all chats".into()
+            format!(
+                "# codr commands\n\n### General\n\n**`/help`**  \nShow commands\n\n**`/status`**  \nConnection, state, queue and unmute\n\n**`/recent`**  \nGet newest 3 of all active <1h\n\n### Projects & Agents\n\n**`/new`**  \nSet up a project\n\n**`/agent`**  \nChoose agent (separate chat)\n\n**`/model`**  \nChoose model\n\n### Tasks\n\n**`/queue`**  \nView pending deliveries\n\n**`/cancel`**  \nInterrupt the current task\n\n### Sync\n\n**`/unmute`**  \nUnmute all chats and return to automatic sync\n\n**`/sync auto|on|off`**  \nSet persistent sync mode\nCurrent sync mode: {}",
+                forwarding::load(&self.config.state_path)?.mode.label()
+            )
         };
         self.state
             .enqueue_manual(group, &response, &format!("command:{request}"));
@@ -1255,6 +1385,81 @@ impl Bridge {
             return Err(error);
         }
         Ok(())
+    }
+
+    async fn cancel_task(&mut self, key: &str, group: &str, id: &str, plain: bool) -> Result<()> {
+        if !plain {
+            return crate::launch::reply(
+                self,
+                key,
+                group,
+                id,
+                "Send /cancel as complete standalone text without attachments or a voice transcript.",
+            );
+        }
+        let record = self
+            .agents
+            .get(key)
+            .or(self.state.mappings[key].agent_record.as_ref())
+            .cloned();
+        let Some(record) = record else {
+            return crate::launch::reply(
+                self,
+                key,
+                group,
+                id,
+                "This session has ended. No interrupt was sent.",
+            );
+        };
+        let current = herdr::get(&self.herdr, &record).await?;
+        ensure!(
+            current.key() == key,
+            "The mapped session changed; no interrupt was sent"
+        );
+        if current.settled() {
+            return crate::launch::reply(
+                self,
+                key,
+                group,
+                id,
+                "No task is running in this chat. No interrupt was sent.",
+            );
+        }
+        ensure!(
+            matches!(current.agent_status.as_str(), "working" | "blocked"),
+            "Agent state is unavailable; no interrupt was sent"
+        );
+        let before = self.state.clone();
+        self.state
+            .mappings
+            .get_mut(key)
+            .unwrap()
+            .seen_messages
+            .push(id.into());
+        if let Err(error) = self.save() {
+            self.state = before;
+            return Err(error);
+        }
+        let response = self
+            .herdr
+            .herdr("agent.interrupt", json!({"target":current.pane_id}))
+            .await;
+        let message = match response {
+            Ok(response) if response["result"]["type"] == "ok" => {
+                "Interrupt sent to the current task. Accepted deliveries and chat history were kept."
+            }
+            Err(error) if error.downcast_ref::<crate::wire::NotSubmitted>().is_some() => {
+                self.state = before;
+                self.save()?;
+                return Err(error);
+            }
+            _ => {
+                "The interrupt could not be confirmed. Inspect the agent before trying again. No automatic retry will run."
+            }
+        };
+        self.state
+            .enqueue_manual(group, message, &format!("cancel:{group}:{id}"));
+        self.save()
     }
 
     async fn route_inbound(&mut self, event: &Value, prepared: bool, queued: bool) -> Result<()> {
@@ -1293,9 +1498,34 @@ impl Bridge {
                     .first()
                     .is_some_and(|prompt| prompt.id == id
                         && prompt.group == group
-                        && msg["text"].as_str() == Some(&prompt.text)),
+                        && msg["text"].as_str() == Some(prompt.prompt_text())),
                 "Queued prompt identity changed"
             );
+        }
+        if !queued
+            && !prepared
+            && let Some(prompt) = self
+                .state
+                .mappings
+                .get_mut(&key)
+                .unwrap()
+                .prompt_queue
+                .iter_mut()
+                .find(|prompt| prompt.id == id && prompt.group == group && prompt.media.is_some())
+        {
+            if !crate::media::complete_refs(prompt.media.as_ref().unwrap())
+                && crate::media::complete_refs(msg)
+            {
+                prompt.media = Some(msg.clone());
+                if let Some(pending) = self.state.media_pending.iter_mut().find(|pending| {
+                    pending["group_id_hex"] == group && pending["message"]["message_id_hex"] == id
+                }) {
+                    pending["message"] = msg.clone();
+                    pending["_codr_retry_at"] = json!(0);
+                }
+                self.save()?;
+            }
+            return Ok(());
         }
         if !queued
             && self.state.mappings[&key]
@@ -1326,7 +1556,87 @@ impl Bridge {
                 .as_array()
                 .is_none_or(|items| items.is_empty())
             && msg["media"].as_array().is_none_or(|items| items.is_empty());
-        if output::permission::is_reply(text, self.state.mappings[&key].permission.is_some()) {
+        if !prepared && !queued && text.trim().eq_ignore_ascii_case("/cancel") {
+            return self.cancel_task(&key, group, id, plain_command).await;
+        }
+        let immediate_text =
+            !queued && plain_command && text != "/status" && !text.trim().is_empty();
+        if !prepared
+            && !queued
+            && text
+                .split_whitespace()
+                .next()
+                .is_some_and(|command| command.eq_ignore_ascii_case("/sync"))
+        {
+            if !plain_command {
+                return crate::launch::reply(
+                    self,
+                    &key,
+                    group,
+                    id,
+                    "Send /sync as complete standalone text without attachments or a voice transcript.",
+                );
+            }
+            let args: Vec<_> = text.split_whitespace().collect();
+            let mode = match args.as_slice() {
+                [_] => None,
+                [_, mode] if mode.eq_ignore_ascii_case("auto") => Some(forwarding::Mode::Auto),
+                [_, mode] if mode.eq_ignore_ascii_case("on") => Some(forwarding::Mode::On),
+                [_, mode] if mode.eq_ignore_ascii_case("off") => Some(forwarding::Mode::Off),
+                _ => {
+                    return crate::launch::reply(
+                        self,
+                        &key,
+                        group,
+                        id,
+                        "Use /sync auto, /sync on, or /sync off. /unmute clears the override.",
+                    );
+                }
+            };
+            let control = if let Some(mode) = mode {
+                forwarding::set_mode(&self.config.state_path, mode)?
+            } else {
+                forwarding::load(&self.config.state_path)?
+            };
+            self.refresh_forwarding()?;
+            return crate::launch::reply(
+                self,
+                &key,
+                group,
+                id,
+                &format!(
+                    "Current sync mode: {}.\n/sync auto — Automatic\n/sync on — Always on\n/sync off — Always off\n/unmute — Clear override and resume automatic sync",
+                    control.mode.label()
+                ),
+            );
+        }
+        if plain_command
+            && (text.trim().eq_ignore_ascii_case("/unmute")
+                || text.trim().eq_ignore_ascii_case("unmute"))
+        {
+            forwarding::set_mode(&self.config.state_path, forwarding::Mode::Auto)?;
+        }
+        if !prepared
+            && !queued
+            && (crate::launch_flow::is_command(text)
+                || (!text.trim().is_empty()
+                    && !text.trim().starts_with('/')
+                    && self.state.mappings[&key]
+                        .launch
+                        .as_ref()
+                        .is_some_and(|request| request.phase == crate::launch::Phase::Awaiting))
+                || self.state.mappings[&key]
+                    .launch_draft
+                    .as_ref()
+                    .is_some_and(|draft| crate::launch_flow::short_reply(draft, text).is_some()))
+        {
+            self.refresh_forwarding()?;
+            return crate::launch_flow::handle(self, &key, group, id, text, plain_command).await;
+        }
+        if !prepared
+            && !crate::media::images(msg)
+            && output::permission::is_reply(text, self.state.mappings[&key].permission.is_some())
+        {
             ensure!(!queued, "Permission replies cannot be queued");
             return self
                 .reply_permission(&key, group, id, text, plain_command)
@@ -1341,13 +1651,10 @@ impl Bridge {
             let mapping = self.state.mappings.get_mut(&key).unwrap();
             let count = mapping.prompt_queue.len();
             let response = if text.trim().eq_ignore_ascii_case("/clear-queue") {
-                mapping.prompt_queue.clear();
-                format!(
-                    "Cleared {count} waiting prompt(s). Running or uncertain prompts were not cancelled."
-                )
+                "/clear-queue has been retired. Phone text is sent directly. Use /cancel to interrupt the current task. Existing accepted deliveries were kept.".into()
             } else {
                 format!(
-                    "Queue: {count} waiting prompt(s), {}. FIFO text prompts run when the agent is idle and forwarding is enabled. /clear-queue cancels only waiting prompts.",
+                    "Pending deliveries: {count}, {}. New phone text is handed directly to the agent. Media preparation and previously accepted deliveries are preserved.",
                     if mapping
                         .queue_flight
                         .as_ref()
@@ -1371,11 +1678,11 @@ impl Bridge {
             return Ok(());
         }
         if plain_command
-            && (text.trim().eq_ignore_ascii_case("/sync")
+            && (text.trim().eq_ignore_ascii_case("/recent")
                 || text.trim().eq_ignore_ascii_case("/help"))
         {
             return self
-                .chat_command(&key, group, id, text.trim().eq_ignore_ascii_case("/sync"))
+                .chat_command(&key, group, id, text.trim().eq_ignore_ascii_case("/recent"))
                 .await;
         }
         self.refresh_forwarding()?;
@@ -1426,7 +1733,9 @@ impl Bridge {
             self.agents.contains_key(&key) || !self.state.mappings[&key].active,
             "Session identity is uncertain; phone input deferred"
         );
-        if let Some(agent) = self.agents.get(&key).cloned() {
+        if let Some(agent) = self.agents.get(&key).cloned()
+            && (self.state.forwarding_enabled || !immediate_text)
+        {
             self.baseline_forwarding(&key, &agent).await?;
         }
         if !queued
@@ -1459,13 +1768,16 @@ impl Bridge {
             }
             self.save()?;
         }
+        let queue_image = !prepared
+            && crate::media::images(msg)
+            && msg["text_truncated"] != true
+            && msg["attachments_truncated"] != true;
         if !queued
             && !prepared
-            && plain_command
-            && text != "/status"
-            && !text.trim().is_empty()
+            && queue_image
             && self.agents.contains_key(&key)
-            && (self.state.mappings[&key].pending_prompt
+            && (queue_image
+                || self.state.mappings[&key].pending_prompt
                 || self.state.mappings[&key].queue_flight.is_some()
                 || !self.state.mappings[&key].prompt_queue.is_empty()
                 || !self.agents[&key].settled()
@@ -1477,25 +1789,27 @@ impl Bridge {
         {
             let before = self.state.clone();
             let mapping = self.state.mappings.get_mut(&key).unwrap();
-            let response = if mapping.prompt_queue.len() >= 16 || text.len() > 30000 {
+            let accepted = mapping.prompt_queue.len() < 16 && text.len() <= 30000;
+            let response = if !accepted {
                 "Queue limit reached (16 waiting prompts, 30000 UTF-8 bytes per prompt). No prompt was queued.".into()
             } else {
                 mapping.prompt_queue.push(crate::state::QueuedPrompt {
                     id: id.into(),
                     group: group.into(),
                     text: text.into(),
+                    media: queue_image.then(|| msg.clone()),
                 });
                 if !self.agents[&key].settled() {
                     mapping.pending_prompt = true;
                 }
-                format!(
-                    "Queued prompt at position {}. It will run when this chat's agent is idle and forwarding is enabled.",
-                    mapping.prompt_queue.len()
-                )
+                format!("Queued prompt at position {}.", mapping.prompt_queue.len())
             };
             mapping.seen_messages.push(id.into());
             self.state
                 .enqueue_manual(group, &response, &format!("queued:{group}:{id}"));
+            if accepted && self.agents[&key].agent_status == "working" {
+                self.state.enqueue_working_notice(group);
+            }
             if let Err(error) = self.save() {
                 self.state = before;
                 return Err(error);
@@ -1512,7 +1826,7 @@ impl Bridge {
         {
             let agent = self.agents[&key].clone();
             match herdr::get(&self.herdr, &agent).await {
-                Ok(current) if current.settled() => {}
+                Ok(current) if current.key() == key && (current.settled() || immediate_text) => {}
                 Err(error) if error.downcast_ref::<crate::wire::NotSubmitted>().is_some() => {
                     self.herdr_available = false;
                     return Err(error);
@@ -1535,6 +1849,12 @@ impl Bridge {
                 .as_array()
                 .is_some_and(|items| !items.is_empty())
             && !media_busy
+            && (self.state.mappings[&key].prompt_queue.is_empty()
+                || (crate::media::audio(msg)
+                    && self
+                        .agents
+                        .get(&key)
+                        .is_some_and(|agent| agent.agent_status == "blocked")))
             && self.state.media_pending.len() < 16
             && self.agents.get(&key).is_some_and(|agent| {
                 (agent.settled()
@@ -1561,6 +1881,7 @@ impl Bridge {
             return self.save();
         }
         let phone_history = if (self.config.auto_forwarding || queued)
+            && (!immediate_text || self.state.forwarding_enabled)
             && text != "/status"
             && !text.trim().is_empty()
             && msg["text_truncated"] != true
@@ -1592,6 +1913,22 @@ impl Bridge {
         } else {
             None
         };
+        if immediate_text && let Some(agent) = self.agents.get(&key) {
+            let current = herdr::get(&self.herdr, agent).await?;
+            ensure!(
+                current.key() == key,
+                "The mapped session changed; phone input was not submitted"
+            );
+            if current.agent_status == "blocked" {
+                return crate::launch::reply(
+                    self,
+                    &key,
+                    group,
+                    id,
+                    "The agent is waiting for interactive input and cannot accept a prompt. Answer its decision or use /cancel. No prompt was queued.",
+                );
+            }
+        }
         // Persist consumption before terminal input: uncertain prompts must not run twice.
         let before_consumption = queued.then(|| self.state.clone());
         let queued_prompt = if queued {
@@ -1644,19 +1981,39 @@ impl Bridge {
         } else if !msg["media"].as_array().is_none_or(|a| a.is_empty()) {
             Some("Media could not be queued. The session may be busy or ended. Wait for it to become idle and try again.".into())
         } else if let Some(agent) = self.agents.get(&key).cloned() {
-            if media_busy || self.state.mappings[&key].pending_prompt || !agent.settled() {
+            if !immediate_text
+                && (media_busy || self.state.mappings[&key].pending_prompt || !agent.settled())
+            {
                 Some("The agent is busy or blocked. Wait for it to become idle before sending another prompt.".into())
             } else if text.trim().is_empty() {
                 Some("Send a non-empty text message.".into())
             } else {
                 let mapping = self.state.mappings.get_mut(&key).unwrap();
+                let was_pending = mapping.pending_prompt;
+                let new_flight = immediate_text && mapping.queue_flight.is_none();
+                if new_flight {
+                    mapping.queue_flight = Some(crate::state::QueueFlight {
+                        before_final: phone_history
+                            .as_ref()
+                            .and_then(|history| history.finals.last().map(|reply| reply.id.clone()))
+                            .or_else(|| mapping.final_ids.last().cloned()),
+                        confirmed: false,
+                    });
+                }
                 mapping.pending_prompt = true;
                 if let Some(history) = phone_history {
                     mapping.activity.start_phone(id, text, &history.user_inputs);
+                } else if immediate_text && self.config.auto_forwarding {
+                    mapping.activity.start_phone_current(id, text);
                 }
                 self.save()?;
                 match herdr::prompt(&self.herdr, &agent, text).await {
-                    Ok(response) => {
+                    Ok(response) if response["result"]["type"]=="agent_prompted" => {
+                        if new_flight {
+                            let mapping=self.state.mappings.get_mut(&key).unwrap();
+                            mapping.queue_flight.as_mut().unwrap().confirmed=true;
+                            mapping.completion_pending=true;
+                        }
                         if queued {
                             ensure!(
                                 response["result"]["type"] == "agent_prompted",
@@ -1674,7 +2031,7 @@ impl Bridge {
                             .confirm_phone(id);
                         self.save()?;
                         if self.config.edit_responses {
-                            if self.state.mappings[&key].response_id.is_some() {
+                            if !was_pending && self.state.mappings[&key].response_id.is_some() {
                                 self.state.update_response(
                                     &key,
                                     group,
@@ -1682,14 +2039,17 @@ impl Bridge {
                                     true,
                                 );
                             }
-                            self.state.begin_response(&key, group);
+                            if !was_pending || self.state.mappings[&key].response_id.is_none() {self.state.begin_response(&key, group);}
                         }
+                        if immediate_text && agent.agent_status=="working" {self.state.enqueue_working_notice(group);}
                         None
                     }
+                    Ok(_) => Some("The prompt could not be confirmed. It will not be retried. Inspect the agent before submitting again.".into()),
                     Err(error) => {
                         if error.downcast_ref::<crate::wire::NotSubmitted>().is_some() {
                             let m = self.state.mappings.get_mut(&key).unwrap();
-                            m.pending_prompt = false;
+                            m.pending_prompt = was_pending;
+                            if new_flight {m.queue_flight=None;}
                             m.activity.cancel_phone(id);
                             if let Some(prompt) = queued_prompt {
                                 m.queue_flight = None;
@@ -1752,10 +2112,37 @@ impl Bridge {
                             .values_mut()
                             .find(|m| m.group_id_hex.as_deref() == Some(group))
                         {
-                            if let Some(id) = event["message"]["message_id_hex"].as_str() {
+                            let queued_image = event["_codr_queued_image"] == true;
+                            if queued_image
+                                && mapping.prompt_queue.first().is_some_and(|prompt| {
+                                    Some(prompt.id.as_str())
+                                        == event["message"]["message_id_hex"].as_str()
+                                })
+                            {
+                                mapping.prompt_queue.remove(0);
+                            } else if queued_image {
+                                // Cleared waiting images must never become agent input.
+                                self.save()?;
+                                return Ok(());
+                            }
+                            if let Some(id) = event["message"]["message_id_hex"].as_str()
+                                && !mapping.seen_messages.iter().any(|seen| seen == id)
+                            {
                                 mapping.seen_messages.push(id.into());
                             }
-                            self.state.enqueue(group, "Media processing failed. No prompt was sent. Check the local media/transcription service and send the message again.");
+                            let notice = "Media processing failed. No prompt was sent. Check the local media/transcription service and send the message again.";
+                            if queued_image {
+                                self.state.enqueue_manual(
+                                    group,
+                                    notice,
+                                    &format!(
+                                        "media-failed:{group}:{}",
+                                        event["message"]["message_id_hex"].as_str().unwrap_or("")
+                                    ),
+                                );
+                            } else {
+                                self.state.enqueue(group, notice);
+                            }
                         }
                         self.save()?;
                     }
@@ -1769,6 +2156,26 @@ impl Bridge {
             })
         {
             let mut event = self.state.media_pending[index].clone();
+            if event["_codr_queued_image"] == true {
+                if let Some(prompt) = self
+                    .state
+                    .mappings
+                    .values_mut()
+                    .filter(|mapping| {
+                        mapping.group_id_hex.as_deref() == event["group_id_hex"].as_str()
+                    })
+                    .filter_map(|mapping| mapping.prompt_queue.first_mut())
+                    .find(|prompt| {
+                        Some(prompt.id.as_str()) == event["message"]["message_id_hex"].as_str()
+                    })
+                    && let Some(message) = &mut prompt.media
+                {
+                    message["_codr_prepared_text"] = event["_codr_prepared_text"].clone();
+                }
+                self.state.media_pending.remove(index);
+                self.save()?;
+                return Ok(());
+            }
             event["message"]["text"] = event["_codr_prepared_text"].clone();
             event["message"]["media"] = json!([]);
             let result = self.route_inbound(&event, true, false).await;
@@ -1790,10 +2197,39 @@ impl Bridge {
             }
             routing_result = result;
         }
+        if self.media_job.is_none() {
+            let waiting: HashSet<_> = self
+                .state
+                .mappings
+                .values()
+                .filter_map(|mapping| {
+                    mapping
+                        .prompt_queue
+                        .first()
+                        .filter(|prompt| prompt.media.is_some())
+                        .map(|prompt| (prompt.group.clone(), prompt.id.clone()))
+                })
+                .collect();
+            let before = self.state.media_pending.len();
+            self.state.media_pending.retain(|event| {
+                event["_codr_queued_image"] != true
+                    || waiting.contains(&(
+                        event["group_id_hex"].as_str().unwrap_or("").to_owned(),
+                        event["message"]["message_id_hex"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_owned(),
+                    ))
+            });
+            if self.state.media_pending.len() != before {
+                self.save()?;
+            }
+        }
         if self.media_job.is_none()
             && let Some(index) = self.state.media_pending.iter().position(|event| {
                 !event["_codr_prepared_text"].is_string()
                     && event["_codr_retry_at"].as_u64().unwrap_or(0) <= now()
+                    && (event["_codr_queued_image"] != true || self.state.forwarding_enabled)
             })
         {
             // A deferred message must not block preparation for other chats.
@@ -2208,7 +2644,7 @@ impl Bridge {
                 .as_ref()
                 .filter(|a| a.tab_label.is_some() || live.contains_key(&key))
             {
-                agent.group_name()
+                agent.group_name_with_suffix(mapping.group_agent_suffix.as_deref())
             } else {
                 let label = old
                     .strip_prefix("[cd] ")
@@ -2273,7 +2709,8 @@ impl Bridge {
     /// Keep a live group's title and description in step with herdr. A title the
     /// user changed is never overwritten, and an uncertain profile update is never retried.
     async fn sync_group_profile(&mut self, key: &str, agent: &Agent, group: &str) {
-        let desired_name = agent.group_name();
+        let desired_name =
+            agent.group_name_with_suffix(self.state.mappings[key].group_agent_suffix.as_deref());
         let desired_description = agent.group_description();
         let (last_name, last_description) = {
             let mapping = &self.state.mappings[key];
@@ -2393,7 +2830,12 @@ impl Bridge {
         Ok(info)
     }
 
-    pub async fn run(&mut self) -> Result<()> {
+    pub async fn run(&mut self, porter_enabled: bool) -> Result<()> {
+        let porter_listener = if porter_enabled {
+            Some(crate::porter::listen(&self.config.state_path)?)
+        } else {
+            None
+        };
         self.reads.background = true;
         let reads_ready = self.reads.notify.clone();
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Value>(256);
@@ -2419,6 +2861,11 @@ impl Bridge {
         recovery_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
+                Ok(stream) = crate::porter::accept(&porter_listener) => {
+                    if crate::porter::serve(self, stream).await.is_err() {
+                        eprintln!("Porter request failed; no automatic mutation retry.");
+                    }
+                },
                 _ = tokio::signal::ctrl_c() => {
                     subscriber.abort();
                     if let Some(job) = self.media_job.take() { job.abort(); }
@@ -2453,6 +2900,7 @@ impl Bridge {
             if self.flush().await.is_err() {
                 eprintln!("MDK send unavailable; private outbox retained for retry.");
             }
+            crate::porter::publish(self);
         }
     }
 }

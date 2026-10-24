@@ -69,7 +69,9 @@ fn sync_excerpt_tracks_database_user_and_assistant_messages_after_updates() {
             .history
             .catch_up()
             .as_deref(),
-        Some("**Agent:**\nEarlier answer\n\n**You:**\nFollow-up\n\n**Agent:**\nLatest answer")
+        Some(
+            "**Agent:**\nEarlier answer\n\n---\n\n**You:**\nFollow-up\n\n---\n\n**Agent:**\nLatest answer"
+        )
     );
     part(
         &db,
@@ -91,7 +93,9 @@ fn sync_excerpt_tracks_database_user_and_assistant_messages_after_updates() {
             .history
             .catch_up()
             .as_deref(),
-        Some("**Agent:**\nEarlier answer\n\n**You:**\nFollow-up\n\n**Agent:**\nUpdated answer")
+        Some(
+            "**Agent:**\nEarlier answer\n\n---\n\n**You:**\nFollow-up\n\n---\n\n**Agent:**\nUpdated answer"
+        )
     );
 }
 
@@ -706,6 +710,17 @@ async fn worker_uses_sqlite_without_a_cli_and_restart_keeps_final_deduplication(
             .final_ids
             .contains(&"new".into())
     );
+    let received = bridge.state.mappings[&agent.key()].last_received_at;
+    assert!(received > 0, "new replies record observation time");
+    // Use a distinct persisted time so a same-second rewrite cannot pass.
+    let received = 1;
+    bridge
+        .state
+        .mappings
+        .get_mut(&agent.key())
+        .unwrap()
+        .last_received_at = received;
+    bridge.save().unwrap();
     drop(bridge);
     let mut bridge = Bridge::open(config).unwrap();
     bridge
@@ -722,6 +737,11 @@ async fn worker_uses_sqlite_without_a_cli_and_restart_keeps_final_deduplication(
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     assert!(bridge.state.mappings[&agent.key()].last_export_at > 0);
+    assert_eq!(
+        bridge.state.mappings[&agent.key()].last_received_at,
+        received,
+        "unchanged history and restarts retain the original reply time"
+    );
     assert_eq!(
         bridge
             .state

@@ -14,6 +14,18 @@ pub struct QueuedPrompt {
     pub id: String,
     pub group: String,
     pub text: String,
+    /// Owner image message; prepared text is retained here until FIFO submission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<serde_json::Value>,
+}
+
+impl QueuedPrompt {
+    pub fn prompt_text(&self) -> &str {
+        self.media
+            .as_ref()
+            .and_then(|message| message["_codr_prepared_text"].as_str())
+            .unwrap_or(&self.text)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -31,6 +43,9 @@ pub struct Mapping {
     /// Last title this bridge applied or adopted for the group.
     #[serde(default)]
     pub group_name: Option<String>,
+    /// Agent label for a fresh session launched from an existing chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_agent_suffix: Option<String>,
     /// The group title was changed outside codr; never overwrite it automatically.
     #[serde(default)]
     pub group_name_locked: bool,
@@ -51,6 +66,9 @@ pub struct Mapping {
     pub agent_record: Option<crate::herdr::Agent>,
     #[serde(default)]
     pub last_export_at: u64,
+    /// Local observation time of a new final reply, not baseline history.
+    #[serde(default)]
+    pub last_received_at: u64,
     #[serde(default)]
     pub blocked_context_seq: Option<u64>,
     #[serde(default)]
@@ -79,6 +97,10 @@ pub struct Mapping {
     pub permission: Option<crate::output::permission::Permission>,
     #[serde(default)]
     pub permission_attempts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<crate::launch::Request>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_draft: Option<crate::launch_flow::Draft>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -105,6 +127,11 @@ pub struct Outgoing {
     pub id: String,
     pub group: String,
     pub text: String,
+    /// Best-effort activity refresh; never delays a durable answer.
+    #[serde(default)]
+    pub working_notice: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<crate::outbound_images::Attachment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response: Option<ResponseDelivery>,
     /// An explicit owner command may reply once even while automatic forwarding is muted.
@@ -128,6 +155,9 @@ pub struct BridgeState {
     /// Per-group source messages confirmed after every chunk in their batch was sent.
     #[serde(default)]
     pub delivered_messages: BTreeMap<String, Vec<String>>,
+    /// Terminal-bound naming intent, claimed when the fresh native session appears.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pending_chat_agents: BTreeMap<String, String>,
     #[serde(default = "forwarding_default")]
     pub forwarding_enabled: bool,
     #[serde(default)]
@@ -153,6 +183,7 @@ impl Default for BridgeState {
             outbox: vec![],
             last_confirmed_send_at: None,
             delivered_messages: BTreeMap::new(),
+            pending_chat_agents: BTreeMap::new(),
             forwarding_enabled: true,
             forwarding_revision: None,
             forwarding_resume_pending: false,
@@ -195,6 +226,25 @@ impl BridgeState {
             return;
         }
         self.enqueue_text(group, text, None);
+    }
+
+    /// Refresh the bottom of a chat, without duplicating a still-unsent notice.
+    pub fn enqueue_working_notice(&mut self, group: &str) {
+        let pending = self.outbox.iter().any(|item| {
+            item.group == group
+                && item.text.starts_with("> working")
+                && item
+                    .response
+                    .as_ref()
+                    .is_none_or(|response| response.target.is_none())
+        });
+        if !pending {
+            let start = self.outbox.len();
+            self.enqueue(group, "> working...");
+            if let Some(item) = self.outbox.get_mut(start) {
+                item.working_notice = true;
+            }
+        }
     }
 
     /// Queue an owner-requested reply with stable per-chunk transport idempotency keys.
@@ -264,6 +314,41 @@ impl BridgeState {
         }
     }
 
+    pub fn enqueue_images(
+        &mut self,
+        group: &str,
+        text: &str,
+        attachments: Vec<crate::outbound_images::Attachment>,
+        messages: Vec<String>,
+    ) {
+        if !self.forwarding_enabled {
+            return;
+        }
+        let start = self.outbox.len();
+        self.enqueue_tracked(group, text, None, messages.clone());
+        if !attachments.is_empty() {
+            let id = uuid::Uuid::new_v4().to_string();
+            let source = self
+                .outbox
+                .get(start)
+                .and_then(|item| item.source.clone())
+                .unwrap_or_else(|| SourceDelivery {
+                    batch: id.clone(),
+                    messages,
+                });
+            self.outbox.push(Outgoing {
+                id,
+                group: group.into(),
+                text: String::new(),
+                working_notice: false,
+                attachments,
+                response: None,
+                manual: false,
+                source: Some(source),
+            });
+        }
+    }
+
     fn enqueue_text(&mut self, group: &str, text: &str, request: Option<&str>) {
         // Keep each encrypted message below MDK's message-size ceiling.
         let mut rest = text;
@@ -280,6 +365,8 @@ impl BridgeState {
                 ),
                 group: group.into(),
                 text: rest[..end].into(),
+                working_notice: false,
+                attachments: vec![],
                 response: None,
                 manual: request.is_some(),
                 source: None,
@@ -305,6 +392,8 @@ impl BridgeState {
             id: id.clone(),
             group: group.into(),
             text: "> working...".into(),
+            working_notice: false,
+            attachments: vec![],
             response: Some(ResponseDelivery::default()),
             manual: false,
             source: None,
@@ -321,6 +410,8 @@ impl BridgeState {
             id: id.clone(),
             group: group.into(),
             text: "> transcribing".into(),
+            working_notice: false,
+            attachments: vec![],
             response: Some(ResponseDelivery {
                 durable: true,
                 ..ResponseDelivery::default()

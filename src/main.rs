@@ -15,7 +15,20 @@ struct Args {
 #[derive(Subcommand)]
 enum Action {
     /// Run in the foreground. herdr starts this worker through the plugin manifest.
-    Run,
+    Run {
+        /// Enable the optional same-user portr desktop endpoint for this run.
+        #[arg(long = "portr", alias = "porter", conflicts_with = "no_porter")]
+        porter: bool,
+        /// Disable the portr endpoint, including when enabled in configuration.
+        #[arg(long = "no-portr", alias = "no-porter")]
+        no_porter: bool,
+    },
+    /// Forward desktop JSON requests to the running plugin.
+    Porter {
+        /// Keep stdin/stdout open for multiplexed requests and change notifications.
+        #[arg(long)]
+        stream: bool,
+    },
     /// Print public routing state without message contents.
     Status,
     /// Validate live session history readers without changing bridge state.
@@ -65,6 +78,13 @@ async fn main() -> Result<()> {
         root.join("herdr-white-noise-bridge/config.toml")
     });
     let config = BridgeConfig::load(&config_path)?;
+    if let Some(Action::Porter { stream }) = &args.command {
+        return if *stream {
+            herdr_white_noise_bridge::porter::forward_stream(&config.state_path).await
+        } else {
+            herdr_white_noise_bridge::porter::forward(&config.state_path).await
+        };
+    }
     if matches!(args.command, Some(Action::CheckReaders)) {
         let checked = check_readers(config).await?;
         println!("{}", serde_json::json!({"checked_sessions":checked}));
@@ -110,8 +130,15 @@ async fn main() -> Result<()> {
     }
     let _lock = state::lock(&config.state_path)?;
     let mut bridge = Bridge::open(config)?;
-    match args.command.unwrap_or(Action::Run) {
-        Action::Run => bridge.run().await,
+    match args.command.unwrap_or(Action::Run {
+        porter: false,
+        no_porter: false,
+    }) {
+        Action::Run { porter, no_porter } => {
+            let enabled = !no_porter && (porter || bridge.config.portr_enabled);
+            bridge.run(enabled).await
+        }
+        Action::Porter { .. } => unreachable!(),
         Action::Notify { text, group } => {
             anyhow::ensure!(
                 bridge.state.forwarding_enabled,

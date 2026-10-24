@@ -5,6 +5,24 @@ fn input(id: &str, text: &str) -> UserInput {
 }
 
 #[test]
+fn staggered_echoes_of_multiple_phone_followups_keep_the_later_receipt() {
+    let mut state = Activity::default();
+    state.start_phone("one", "first", &[]);
+    state.confirm_phone("one");
+    state.start_phone("two", "second", &[]);
+    state.confirm_phone("two");
+    assert!(!state.observe(&[input("first-id", "first")]));
+    let mut state: Activity =
+        serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+    assert!(!state.observe(&[input("first-id", "first"), input("second-id", "second")]));
+    assert!(state.observe(&[
+        input("first-id", "first"),
+        input("second-id", "second"),
+        input("local", "something else")
+    ]));
+}
+
+#[test]
 fn first_history_is_a_baseline_and_new_ids_are_local_even_with_old_text() {
     let mut state = Activity::default();
     assert!(!state.observe(&[input("old", "hello")]));

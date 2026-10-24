@@ -1,15 +1,19 @@
 # **codr**
 
-**Source, issues, pull requests, CI, and releases:** [GitHub](https://github.com/tidley/codr).
-Contributors do not need Nostr or ngit. [Contributing](CONTRIBUTING.md)
+**Primary source, issues, CI, and releases:** [GitHub](https://github.com/tidley/codr).
+**Pull requests are welcome on GitHub or ngit.** Choose either route; duplicate PRs are not required. GitHub contributors do not need Nostr or ngit. [Contributing](CONTRIBUTING.md)
 
 [ngit](https://gitworkshop.dev/npub19at4nqjjymca2lh3v546vcg5ktun3al4c5xu2pts3ewckv0y70ys0gupzr/relay.ngit.dev/codr)
 provides an independent source and release mirror. Release mirrors use unchanged GitHub assets with verified SHA-256 checksums.
 [Mirror policy and verification](docs/MIRRORING.md)
 
-**codr** connects coding agent sessions in [**herdr**](https://github.com/herdrdev/herdr) to [White Noise](https://github.com/marmot-protocol/whitenoise-android), with one encrypted chat per session. It forwards prompts to the mapped agent and returns completed replies to the same chat.
+**codr** connects coding agent sessions in [**herdr**](https://github.com/herdrdev/herdr) to [White Noise](https://github.com/marmot-protocol/whitenoise-android), with one encrypted chat per session. Send a message from your phone to continue coding, create a project, choose an agent or model, and read the replies in the same chat.
 
 Supported agents: OpenCode, Codex, and Claude Code on Linux and macOS.
+
+New bridge accounts introduce themselves as **Pat**, your messenger between White Noise and herdr. Verify the full bridge public key printed by setup, not its display name.
+
+The separate **portr** desktop app can optionally connect over SSH. Its codr endpoint is off by default; phone-only installs do not need it. [Optional desktop setup](docs/INSTALL.md#optional-portr-desktopssh-access)
 
 <img src="docs/screenshots/herdr-phone-progress.png" width="1280" alt="herdr with the Garden planner task checklist beside matching working status and editable tasks in White Noise">
 
@@ -17,18 +21,21 @@ Supported agents: OpenCode, Codex, and Claude Code on Linux and macOS.
 
 ## Behaviour
 
-- Chat names pair the **herdr** tab and workspace: `[cd] review (Acme)`. Descriptions contain workspace and agent details.
+- Chat names pair the **herdr** tab and workspace: `review (Acme)`. Descriptions contain workspace and agent details.
 - Status notices, optional editable checklists, and final replies appear as separate messages.
+- Phone text is handed straight to the agent, including while it is working. The agent handles its own input; codr does not interrupt it or wait for idle. Send `/cancel` when you do want to interrupt the current task.
+- `/new` guides you through workspace, folder, installed agent, and model selection. Reply with numbers, use `0` to cancel, and type the displayed workspace name to confirm the final preview.
+- Choose the default model or browse a provider's full model list. OpenCode uses its authenticated model catalogue; variants are selected separately. `/agent` opens a separate chat without moving old history.
 - Supported OpenCode questions accept a number or option label as a reply.
 - New groups make your configured account an admin, so you can invite participants and rename the group. Only the owner can prompt the agent. [Group setup](docs/REFERENCE.md#shared-chats-and-owner-only-control)
-- Local prompts automatically mute all sessions. A new owner message from your phone enables forwarding again.
+- In automatic sync mode, local prompts mute all chats and an owner phone message resumes them. `/sync on` or `/sync off` keeps your explicit choice across restarts; `/unmute` restores automatic mode.
 
 ## Install
 
 Needs Linux x86_64 or aarch64 or macOS on Apple silicon or Intel, a per-user service manager (systemd or launchd), Python 3.11+, Git, and **herdr** 0.9.1+. No Rust toolchain required.
 
 ```sh
-herdr plugin install tidley/codr --ref v0.6.0
+herdr plugin install tidley/codr --ref v0.7.0
 herdr plugin action invoke local.white-noise.setup
 ```
 
@@ -42,17 +49,28 @@ Or give your coding agent this prompt, with your own public key:
 
 ## Usage
 
-**Linux preview:** [v0.6.2](https://github.com/tidley/codr/releases/tag/v0.6.2) adds `/sync`, `/help`, muted invitation and naming fixes, and MDK 0.14 for Linux x86-64 and ARM64. **Before upgrading, stop the services and make a private, device-local backup of the complete connector home and secret-store credentials. MDK 0.14 storage migration is one-way; downgrade to 0.13 is unsupported.** Install with `herdr plugin install tidley/codr --ref v0.6.2`, then run Setup. This is an opt-in prerelease; macOS users should keep `v0.6.0`. [Preview notes →](docs/releases/0.6.2.md)
+**Upgrading from 0.6.0 or an older MDK 0.13 installation?** 0.7.0 uses MDK 0.14. Before first opening that storage with the new connector, stop the services and keep a private, device-local backup of the complete connector home and secret-store credentials. The migration is one-way; downgrading to MDK 0.13 is unsupported. Setup refuses an automatic cross-cohort upgrade. Follow the [upgrade guide](docs/INSTALL.md) and [0.7.0 notes](docs/releases/0.7.0.md); do not bypass the backup gate. Existing MDK 0.14 installations retain their account and chat history.
 
 1. Check the inviter against the bridge public key printed by setup, then accept the session's chat invitation.
 2. Send `/status` to check the connection. Send a prompt to continue that session.
 3. Read the reply in the same chat. For a supported decision, reply `1`, `2`, or an exact option label.
 
-Send `unmute` (or `/unmute`) by itself in any linked chat to resume forwarding for **all chats**, without prompting an agent.
+| Command | What it does |
+| --- | --- |
+| `/help` | Show commands and the current sync mode. |
+| `/status` | Show connection, state and pending deliveries; resume sync in automatic mode. |
+| `/recent` | Get the newest three text messages from each chat active in the past hour, skipping messages already delivered or pending. |
+| `/new` | Set up a project, with a final name confirmation. |
+| `/agent` | Choose an agent in a separate session and chat. |
+| `/model` | Choose a model; OpenCode supports a confirmed idle-session change in place. |
+| `/cancel` | Interrupt the current task, keeping chat history and accepted deliveries. |
+| `/queue` | Inspect pending media and deliveries accepted before the update. |
+| `/unmute` | Resume all chats and clear a forced sync mode. |
+| `/sync auto\|on\|off` | Use automatic sync, always on, or always off. The choice persists across restarts. |
 
-Send `/sync` for a one-time catch-up: use one hour before the last confirmed message sent across **all linked White Noise chats** as the shared cutoff, then send unseen messages among each eligible conversation's last three text messages together to its own chat, labelled **You** or **Agent** in conversation order. Messages already confirmed sent or queued by the bridge are skipped, including earlier syncs and normal assistant forwarding. Older context can be included; tool output and unfinished agent replies are excluded. With no confirmed send history, use the past hour. Send `/help` to list commands in the current chat. These two commands do not change mute settings or prompt agents.
+In 0.7.0, **`/recent` replaces the old catch-up `/sync` command**. It sends each eligible chat's excerpt to that chat, with **You** and **Agent** labels. Help and recent-message retrieval do not prompt agents or change sync mode.
 
-Ordinary text prompts sent while an agent is busy join a persistent FIFO queue for that chat. They run one at a time after the previous completed reply is collected. Use `/queue` to inspect the waiting count and `/clear-queue` to cancel waiting prompts; these commands do not unmute or cancel a running task. Queues survive restarts and pause while forwarding is muted, the session is unavailable, or submission is uncertain. Supported decision answers bypass the queue. The queue holds up to 16 text prompts per chat; image and voice handling is unchanged.
+New phone text does not join a worker-scheduled task queue. Messages are delivered without an interrupt; a backend can still use its own native inbox. A blocked permission or decision requires its supported answer or `/cancel`, not an arbitrary prompt. Media still needs download/transcription, and existing accepted deliveries are preserved across upgrades. `/clear-queue` is retired and does not discard those deliveries. A lost submission acknowledgement is never automatically retried.
 
 Handoff is automatic. Manual controls remain available through **herdr**'s **White Noise forwarding: At desk / Away** action. [Controls and limits →](docs/REFERENCE.md#at-desk--away-forwarding)
 
@@ -68,11 +86,28 @@ OpenCode can use incremental, read-only SQLite reads instead of full exports. [R
 
 **Limits:** Decision replies support OpenCode single-choice questions with 1–9 options. Other dialogs need the terminal. Avoid simultaneous terminal/phone answers. [Decision compatibility](docs/REFERENCE.md#answer-decisions-from-the-phone) · [Media and audio](docs/REFERENCE.md#images-and-voice-messages)
 
+**Agent screenshots:** A new completed reply containing `![Screenshot](path/to/screenshot.png)` sends the image as an encrypted White Noise attachment. Files must be inside that session's working directory or `/tmp/opencode`. Ordinary links are not uploaded. Existing installations need the connector's private outbound-media spool enabled; see [outbound images](docs/REFERENCE.md#images-from-the-agent).
+
 ## Roadmap
 
 [Planned work and completed items](docs/REFERENCE.md#roadmap).
 
 ## Screenshots
+
+### 0.7.0 phone controls
+
+Project setup, provider selection, and help rendered in the native White Noise Linux app. These offline examples use fictional, fixture-injected messages, not live agent handoffs. [Capture details](docs/REFERENCE.md#screenshot-provenance).
+
+<img src="docs/screenshots/codr-v070-workspaces-chat.png" width="640" alt="Step 1 of 4: choose Garden planner or create a new workspace, with 0 to cancel">
+
+<img src="docs/screenshots/codr-v070-model-providers-chat.png" width="640" alt="Step 4 of 4: choose the backend default or browse OpenAI, Claude, or Free models, with 0 to cancel">
+
+<details>
+<summary>Commands and persistent sync mode</summary>
+
+<img src="docs/screenshots/codr-v070-help-chat.png" width="640" alt="codr help with project commands, cancel, recent messages, and automatic sync mode">
+
+</details>
 
 <details>
 <summary>A shared project, images, voice, decisions, and multiple chats</summary>

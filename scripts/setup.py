@@ -104,6 +104,42 @@ def local_accounts(path):
             time.sleep(0.25)
 
 
+def publish_pat_profile(socket_path, result, record_path):
+    """Name only a newly created identity, journalling before the public profile write."""
+    account = result["account_id_hex"]
+    if not isinstance(account, str) or not re.fullmatch(r"[0-9a-f]{64}", account):
+        raise SetupError("Invalid bridge account for profile publication")
+    previous = json.loads(record_path.read_text()) if record_path.exists() else {}
+    if previous and (not isinstance(previous, dict) or previous.get("account_id_hex") != account):
+        raise SetupError("Stored bootstrap identity differs from the selected bridge account")
+    result = {**previous, **result}
+    status = previous.get("default_profile_status")
+    if status is not None:
+        if status not in ("pending", "unconfirmed", "published", "preserved"):
+            raise SetupError("Stored profile publication needs inspection")
+        result["default_profile_status"] = "unconfirmed" if status == "pending" else status
+        return result
+    if result.get("created") is not True:
+        result["default_profile_status"] = "preserved"
+        return result
+    result["default_profile_status"] = "pending"
+    result["default_profile_name"] = "Pat"
+    private_write(record_path, json.dumps(result, indent=2) + "\n")
+    try:
+        response = control_request(socket_path, {"marmot_agent_control": "marmot.agent-control.v2",
+            "type": "account_publish_profile", "account_id_hex": account, "name": "Pat", "display_name": "Pat"})
+        expected = {"marmot_agent_control": "marmot.agent-control.v2", "type": "profile_published",
+            "account_id_hex": account, "name": "Pat", "display_name": "Pat"}
+        if not isinstance(response, dict) or any(response.get(key) != value for key, value in expected.items()):
+            raise SetupError("Pat profile publication was not confirmed")
+    except (SetupError, OSError, ValueError):
+        result["default_profile_status"] = "unconfirmed"
+        return result
+    result["default_profile_status"] = "published"
+    private_write(record_path, json.dumps(result, indent=2) + "\n")
+    return result
+
+
 def ensure_mdk(runner):
     dedicated = connector_path(version())
     if not dedicated.exists():
@@ -298,15 +334,17 @@ def setup_lock(directory):
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
-def configure(owner, herdr_socket=None, runner=run, check=False, enable_audio=None):
+def configure(owner, herdr_socket=None, runner=run, check=False, enable_audio=None, enable_portr=None):
     if check:
-        return _configure(owner, herdr_socket, runner, check, enable_audio)
+        return _configure(owner, herdr_socket, runner, check, enable_audio, enable_portr)
     directory = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "herdr-white-noise-bridge"
     with setup_lock(directory):
-        return _configure(owner, herdr_socket, runner, check, enable_audio)
+        return _configure(owner, herdr_socket, runner, check, enable_audio, enable_portr)
 
 
-def _configure(owner, herdr_socket, runner, check, enable_audio):
+def _configure(owner, herdr_socket, runner, check, enable_audio, enable_portr):
+    if check and enable_portr is not None:
+        raise SetupError("--check cannot apply --portr or --no-portr")
     platform_name()
     home = Path.home()
     config_root = Path(os.environ.get("XDG_CONFIG_HOME", home / ".config")).resolve()
@@ -332,6 +370,35 @@ def _configure(owner, herdr_socket, runner, check, enable_audio):
             raise SetupError("Existing configuration targets another herdr server; nothing was replaced")
         runner([str(bridge), "--config", str(config_path), "status"])
         checked = check_readers(bridge, config_path, runner)
+        portr_changed = False
+        if not check and enable_portr is not None and existing.get("portr_enabled", False) != enable_portr:
+            text = config_path.read_text()
+            value = str(enable_portr).lower()
+            expected = {**existing, "portr_enabled": enable_portr}
+            if "portr_enabled" in existing:
+                # Matching text can be inside a multiline setting; choose by parsed meaning.
+                pattern = r"(?m)^([ \t]*portr_enabled[ \t]*=[ \t]*)(?:true|false)([ \t]*(?:#[^\n]*)?)$"
+                for match in re.finditer(pattern, text):
+                    candidate = text[:match.start()] + match[1] + value + match[2] + text[match.end():]
+                    try:
+                        if tomllib.loads(candidate) == expected:
+                            text = candidate
+                            break
+                    except tomllib.TOMLDecodeError:
+                        continue
+                else:
+                    raise SetupError("Could not change portr_enabled; inspect the configuration")
+            else:
+                text += ("" if text.endswith("\n") else "\n") + f"portr_enabled = {value}\n"
+            if tomllib.loads(text) != expected:
+                raise SetupError("Portr setting would change other configuration; nothing was written")
+            with tempfile.TemporaryDirectory(prefix="codr-portr-check-") as temporary:
+                candidate = Path(temporary) / "config.toml"
+                candidate.write_text(text)
+                runner([str(bridge), "--config", str(candidate), "status"])
+            private_write(config_path, text)
+            existing["portr_enabled"] = enable_portr
+            portr_changed = True
         if not check:
             upgrade_transport(existing, config_root, runner)
         if not check and enable_audio:
@@ -358,12 +425,15 @@ def _configure(owner, herdr_socket, runner, check, enable_audio):
         report = {"configuration": str(config_path), "existing_configuration_preserved": True,
                   "bridge_account_id": existing["account_id_hex"], "phone_round_trip": "requires user confirmation",
                   "checked_session_readers": checked, "reader_validation": "passed" if checked else "deferred: no live supported sessions"}
+        report["portr_enabled"] = existing.get("portr_enabled", False)
+        report["portr_restart_required"] = portr_changed
         bootstrap_file = Path(existing["wn_agent_socket"]).parent.parent / "codr-bootstrap.json"
         if bootstrap_file.exists():
             bootstrap = json.loads(bootstrap_file.read_text())
             if bootstrap.get("account_id_hex") != existing["account_id_hex"]:
                 raise SetupError("Stored bootstrap identity differs from the configured bridge account")
             report["bridge_npub"] = bootstrap["npub"]
+            report["default_profile_status"] = bootstrap.get("default_profile_status", "preserved")
         return report
     if check:
         raise SetupError("No existing codr configuration to check")
@@ -403,9 +473,14 @@ def _configure(owner, herdr_socket, runner, check, enable_audio):
     mdk_home = home / ".marmot-agents/herdr"
     mdk_socket = mdk_home / "dev/wn-agent.sock"
     state_path = Path(os.environ.get("XDG_STATE_HOME", home / ".local/state")) / "herdr-white-noise-bridge/state.json"
+    image_spool = state_path.with_suffix(".outbound-media")
+    image_spool.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if image_spool.is_symlink() or not image_spool.is_dir() or image_spool.stat().st_mode & 0o077:
+        raise SetupError("The outbound image spool must be a private directory")
     manager.install(services.Service("wn-agent-herdr", "MDK transport for herdr White Noise remote",
         [mdk, "--home", mdk_home, "--socket", mdk_socket,
-         "--relay", "wss://relay.eu.whitenoise.chat", "--relay", "wss://relay.us.whitenoise.chat"]))
+         "--relay", "wss://relay.eu.whitenoise.chat", "--relay", "wss://relay.us.whitenoise.chat",
+         "--media-allowed-root", image_spool]))
     manager.install(services.Service("herdr-white-noise-bridge", "herdr White Noise remote plugin worker",
         [bridge, "--config", config_path, "run"], environment={"PATH": services.worker_path()}))
     mdk_home.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -427,15 +502,21 @@ def _configure(owner, herdr_socket, runner, check, enable_audio):
         "codex_home": Path(os.environ.get("CODEX_HOME", home / ".codex")).resolve(),
         "claude_home": Path(os.environ.get("CLAUDE_CONFIG_DIR", home / ".claude")).resolve(),
         "transcribe_command": transcribe_command}
+    # Old release binaries reject unknown fields; phone-only setup needs no desktop setting.
+    if enable_portr is True:
+        values["portr_enabled"] = True
     with tempfile.TemporaryDirectory(prefix="codr-config-check-") as temporary:
         candidate = Path(temporary) / "config.toml"
         candidate.write_text(toml_text(values))
         runner([str(bridge), "--config", str(candidate), "status"])
+    result = publish_pat_profile(mdk_socket, result, mdk_home / "codr-bootstrap.json")
     private_write(mdk_home / "codr-bootstrap.json", json.dumps(result, indent=2) + "\n")
     private_write(config_path, toml_text(values))
     manager.start("herdr-white-noise-bridge")
     manager.is_active(["wn-agent-herdr", "herdr-white-noise-bridge"])
     return {"configuration": str(config_path), "bridge_npub": result["npub"], "herdr_socket": str(herdr_socket),
+            "default_profile_status": result["default_profile_status"], "default_profile_name": result.get("default_profile_name"),
+            "portr_enabled": values.get("portr_enabled", False), "portr_restart_required": False,
             "detected_sessions": len(snapshot["agents"]), "supported_agents": sorted(available),
             "checked_session_readers": checked, "reader_validation": "passed" if checked else "deferred: no live supported sessions",
             "phone_round_trip": "requires user confirmation"}
@@ -449,12 +530,27 @@ def main():
     audio = parser.add_mutually_exclusive_group()
     audio.add_argument("--phonon", dest="enable_audio", action="store_true", default=None, help="Install or reuse the local Phonon-2 worker, including on an existing installation")
     audio.add_argument("--no-audio", dest="enable_audio", action="store_false", help="Skip audio setup on a fresh installation")
+    desktop = parser.add_mutually_exclusive_group()
+    desktop.add_argument("--portr", dest="enable_portr", action="store_true", default=None,
+        help="Enable the optional portr desktop/SSH endpoint; does not install SSH or the desktop app")
+    desktop.add_argument("--no-portr", dest="enable_portr", action="store_false", default=None,
+        help="Disable the optional desktop endpoint (fresh installations default to disabled)")
     args = parser.parse_args()
     config = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "herdr-white-noise-bridge/config.toml"
     if not args.npub and not config.exists() and sys.stdin.isatty():
         args.npub = input("Your White Noise public npub: ").strip()
+    if not args.check and not config.exists() and args.enable_portr is None and sys.stdin.isatty():
+        try:
+            args.enable_portr = input("Enable optional portr desktop/SSH access? [y/N]: ").strip().lower() in ("y", "yes")
+        except EOFError:
+            args.enable_portr = False
     try:
-        print(json.dumps(configure(args.npub, args.herdr_socket, check=args.check, enable_audio=args.enable_audio), indent=2))
+        report = configure(args.npub, args.herdr_socket, check=args.check, enable_audio=args.enable_audio, enable_portr=args.enable_portr)
+        print(json.dumps(report, indent=2))
+        if report.get("default_profile_status") == "unconfirmed":
+            print("Pat's profile publication was not confirmed. The existing identity was kept; inspect its profile before trying another publication. Phone setup can still be used.")
+        if report.get("portr_restart_required"):
+            print("Portr setting saved. Apply it by restarting only the codr worker after all active work is idle. Setup did not restart the worker for this setting.")
         print("Accept a verified bridge invitation in White Noise, then send /status and a harmless test prompt.")
     except (SetupError, InstallError, OSError, ValueError, KeyError) as error:
         print(f"codr setup: {error}", file=sys.stderr)

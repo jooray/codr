@@ -1,8 +1,12 @@
 pub mod activity;
 pub mod bridge;
+pub mod catalogue;
 pub mod config;
 pub mod herdr;
+pub mod launch;
+pub mod launch_flow;
 pub mod media;
+pub mod outbound_images;
 pub mod output;
 mod reads;
 pub mod state;
@@ -10,3 +14,4 @@ pub mod wire;
 pub use config::BridgeConfig;
 pub use state::BridgeState;
 pub mod forwarding;
+pub mod porter;

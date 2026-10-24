@@ -82,9 +82,14 @@ impl Activity {
                     .count()
                     != 1
         });
-        // A submission can explain only the first new input batch after its checkpoint.
-        self.phone
-            .retain(|phone| !fresh.iter().any(|input| !phone.before.contains(&input.id)));
+        // A busy agent may record already-delivered follow-ups in separate batches.
+        // A genuine local/ambiguous input still invalidates outstanding attribution.
+        self.phone.retain(|phone| {
+            !local
+                && !fresh.iter().any(|input| {
+                    input.fingerprint == phone.fingerprint && !phone.before.contains(&input.id)
+                })
+        });
         observed.extend(fresh.into_iter().map(|input| input.id.clone()));
         local
     }
@@ -105,9 +110,14 @@ impl Activity {
 
     pub fn start_phone(&mut self, receipt: &str, text: &str, inputs: &[UserInput]) {
         self.baseline(inputs);
+        self.start_phone_current(receipt, text);
+    }
+
+    pub fn start_phone_current(&mut self, receipt: &str, text: &str) {
+        let before = self.observed.get_or_insert_with(Vec::new).clone();
         self.phone.push(PhoneInput {
             receipt: receipt.into(),
-            before: inputs.iter().map(|input| input.id.clone()).collect(),
+            before,
             fingerprint: UserInput::new(String::new(), text).fingerprint,
             confirmed: false,
         });

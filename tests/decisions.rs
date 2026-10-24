@@ -200,6 +200,60 @@ fn a_wide_opencode_sidebar_does_not_hide_the_active_question() {
 }
 
 #[test]
+fn a_v2_repository_footer_does_not_make_the_current_question_look_stale() {
+    let decision = pending();
+    let lines = [
+        "  ┃ Questions",
+        "  ┃",
+        "  ┃ Which next step?",
+        "  ┃ 1. Proceed",
+        "  ┃ Continue with the plan",
+        "  ┃ 2. Review",
+        "  ┃ Review the alternatives",
+        "  ┃ 3. Type your own answer",
+        "  ┃",
+        "  ┃ ↑↓ select enter submit esc dismiss",
+        "  ┃",
+    ];
+    for directory in ["~/code/example:main", "/srv/projects/example:dev"] {
+        let visible = lines
+            .iter()
+            .enumerate()
+            .map(|(index, line)| {
+                format!(
+                    "{line:<80}  {}",
+                    if index == lines.len() - 1 {
+                        directory
+                    } else {
+                        "sidebar content"
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            decision.matches_visible(&visible),
+            "A sidebar repository footer is not part of the dialog"
+        );
+        assert!(
+            !decision.matches_visible(&visible.replace("Which next step?", "Another question?"))
+        );
+        assert!(!decision.matches_visible(
+            &visible.replace("Continue with the plan", "A different description")
+        ));
+        assert!(!decision.matches_visible(&visible.replace(
+            "↑↓ select enter submit esc dismiss",
+            "Allow permission? enter confirm"
+        )));
+        assert!(
+            !decision.matches_visible(
+                &visible.replace("  ┃ ↑↓", "  ┃ Custom text being edited\n  ┃ ↑↓")
+            )
+        );
+    }
+}
+
+#[test]
 fn joined_emoji_keep_their_display_width_when_the_sidebar_is_removed() {
     let mut decision = pending();
     decision.questions[0].question = format!("{}?", "👩‍💻".repeat(20));

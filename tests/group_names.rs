@@ -38,7 +38,7 @@ fn group_name_uses_the_herdr_tab_label_instead_of_repository_or_topic() {
         "foreground_cwd":"/repos/other-project", "terminal_title_stripped":"OC | A chat topic"
     }))
     .unwrap();
-    assert_eq!(agent.group_name(), "[cd] review");
+    assert_eq!(agent.group_name(), "review");
 }
 
 #[test]
@@ -48,7 +48,36 @@ fn group_name_appends_the_workspace_label() {
         "tab_id":"w1:t1", "tab_label":"review", "workspace_id":"w1", "workspace_label":"Acme"
     }))
     .unwrap();
-    assert_eq!(agent.group_name(), "[cd] review (Acme)");
+    assert_eq!(agent.group_name(), "review (Acme)");
+}
+
+#[test]
+fn fresh_agent_suffix_goes_inside_the_workspace_parentheses() {
+    let agent: Agent=serde_json::from_value(json!({"pane_id":"w1:p1","terminal_id":"t1","agent":"codex","agent_status":"idle","tab_label":"review","workspace_label":"Acme"})).unwrap();
+    for suffix in ["codex", "claude", "opencode"] {
+        assert_eq!(
+            agent.group_name_with_suffix(Some(suffix)),
+            format!("review (Acme - {suffix})")
+        );
+    }
+    assert_eq!(agent.group_name(), "review (Acme)");
+}
+
+#[test]
+fn fresh_agent_suffix_survives_unicode_title_shortening_and_missing_workspace() {
+    let mut agent: Agent=serde_json::from_value(json!({"pane_id":"w1:p1","terminal_id":"t1","agent":"codex","agent_status":"idle","tab_label":"review","workspace_label":"🐇".repeat(300)})).unwrap();
+    let name = agent.group_name_with_suffix(Some("codex"));
+    assert!(name.len() <= 256);
+    assert!(name.ends_with(" - codex)"));
+    agent.workspace_label = None;
+    assert_eq!(
+        agent.group_name_with_suffix(Some("codex")),
+        "review (codex)"
+    );
+    agent.tab_label = Some("🐇".repeat(300));
+    let name = agent.group_name_with_suffix(Some("claude"));
+    assert!(name.len() <= 256);
+    assert!(name.ends_with(" (claude)"));
 }
 
 #[test]
@@ -59,7 +88,7 @@ fn empty_workspace_labels_leave_the_name_unchanged() {
             "tab_id":"w1:t1", "tab_label":"review", "workspace_label": workspace
         }))
         .unwrap();
-        assert_eq!(agent.group_name(), "[cd] review");
+        assert_eq!(agent.group_name(), "review");
     }
 }
 
@@ -71,7 +100,7 @@ fn a_long_workspace_is_shortened_before_the_tab_label() {
     }))
     .unwrap();
     let name = agent.group_name();
-    assert!(name.starts_with("[cd] review ("));
+    assert!(name.starts_with("review ("));
     assert!(name.ends_with(')'));
     assert!(name.len() <= 256);
 }
@@ -84,7 +113,7 @@ fn workspace_control_characters_are_removed() {
     }))
     .unwrap();
     let name = agent.group_name();
-    assert_eq!(name, "[cd] review (AcmeTeam)");
+    assert_eq!(name, "review (AcmeTeam)");
     assert!(!name.chars().any(char::is_control));
 }
 
@@ -95,7 +124,7 @@ fn old_agent_records_without_labels_fall_back_to_the_tab_id() {
         "tab_id":"w1:t2", "cwd":"/repos/weather"
     }))
     .unwrap();
-    assert_eq!(agent.group_name(), "[cd] w1:t2");
+    assert_eq!(agent.group_name(), "w1:t2");
 }
 
 #[test]
@@ -106,7 +135,7 @@ fn tab_names_are_control_free_and_fit_the_mdk_utf8_byte_limit() {
     }))
     .unwrap();
     let name = agent.group_name();
-    assert!(name.starts_with("[cd] 🐇"));
+    assert!(name.starts_with('🐇'));
     assert!(name.len() <= 256);
     assert!(!name.chars().any(char::is_control));
 }
@@ -130,7 +159,7 @@ async fn snapshot_joins_each_agent_with_its_own_tab_label() {
         reader.get_mut().write_all(&bytes).await.unwrap();
     });
     let agents = herdr::snapshot(&Socket { path }).await.unwrap();
-    assert_eq!(agents[0].group_name(), "[cd] Build (Workbench)");
+    assert_eq!(agents[0].group_name(), "Build (Workbench)");
     assert!(
         agents[0]
             .group_description()
