@@ -38,6 +38,14 @@ Report missing files, checksum failures, incomplete metadata, or failed publicat
 Keep original GitHub releases and assets unchanged.
 The install hook still uses GitHub Releases. Independent downloads use the verified ngit release records and Blossom URLs.
 
+## CI evidence
+
+A matching source ref does not prove that CI passed.
+Keep the original GitHub CI run links and their exact source commits.
+Mirror existing CI evidence through the repository's supported ngit tooling.
+If that tooling has no import path, report the CI evidence mirror as blocked.
+Do not rebuild solely for mirroring, invent CI results, or create releases for test builds.
+
 ## Signing and collaboration
 
 On Tom's DevBox, use the configured `devbox-amber` remote signer.
