@@ -94,8 +94,25 @@ OpenCode can use incremental, read-only SQLite reads instead of full exports. [R
 
 ## Screenshots
 
+### 0.7.0 in the stock Android app
+
+Captured through ADB on a connected Pixel 5, using fictional demo data and a real **White Noise ↔ codr ↔ herdr** connection. No desktop substitute or rendered test fixtures. [Capture details](docs/REFERENCE.md#screenshot-provenance).
+
+<img src="docs/screenshots/codr-v070-android-workspaces.png" width="320" alt="Stock White Noise Android app showing the real four-step workspace menu, with Garden planner, Create new workspace, and 0. Cancel">
+<img src="docs/screenshots/codr-v070-android-model-providers.png" width="320" alt="Stock White Noise Android app showing the real model-provider menu and the acknowledgement after cancelling with 0">
+
 <details>
-<summary>A shared project, images, voice, decisions, and multiple chats</summary>
+<summary>Pat's introduction, commands, and sync mode</summary>
+
+The long help reply appears at two scroll positions in the same chat.
+
+<img src="docs/screenshots/codr-v070-android-help-top.png" width="320" alt="Pat's actual introduction and the top of codr help in the stock Android app">
+<img src="docs/screenshots/codr-v070-android-help-sync.png" width="320" alt="The lower part of codr help with cancel, unmute, and persistent sync controls in the stock Android app">
+
+</details>
+
+<details>
+<summary>Earlier demos: a shared project, images, voice, decisions, and multiple chats</summary>
 
 **Shared chat with owner-only agent control**
 

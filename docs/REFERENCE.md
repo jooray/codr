@@ -445,6 +445,25 @@ Without `--group`, the command sends the notice to every mapped group. The comma
 
 ## Screenshot provenance
 
+### 0.7.0 stock Android captures
+
+The four `codr-v070-android-*.png` images show the stock White Noise app on a connected Pixel 5. ADB captured the physical screen. The installed package is `dev.ipf.whitenoise.android`, version `2026.10.14` (22). Its APK SHA-256 is `c959e2d1a454c1ddde574c49dd03b60d60fb33df2b4f81e5fcedf5844995c87c`. No app installation, modification, or data clearing occurred.
+
+The existing fictional Alex documentation profile was verified through its full public key in the app's Share & Connect screen. A fresh Pat bridge identity used a separate MDK 0.14 connector home and separate codr state. Real **herdr** 0.9.1 hosted a separate Garden planner workspace and a real, idle OpenCode session. The bridge ran the 0.7.0 candidate from source commit `9222978d6049218c5dfe100c4f169356275dc20b`. Normal bridge services and coding sessions stayed running.
+
+ADB entered `/help`, `/new`, `1`, `reminder-demo`, `1`, and `0` through the native composer. The real connector recorded all six phone inputs. codr produced the help, workspace, agent, provider, and cancellation replies over encrypted messaging. No UI or replies were injected. The wizard was cancelled before confirmation. No new project or additional agent was created, and the native OpenCode session had no model messages. These captures verify controls and discovery, not a completed coding task or interruption of running work.
+
+Each published image is an unscaled 1080 × 2145 crop of a 1080 × 2340 device capture. Only system status and navigation bars were removed. Native RGBA pixel comparisons passed for all four crops. The PNGs contain no text or EXIF metadata. The images contain fictional demo conversations, not private chats. Help appears at two native scroll positions. Native message order is unchanged. Automatic device rotation was restored after capture.
+
+```text
+b22b64074e2b7d1d9a06a33be6812b13a96d6c5b0b1a1d6a313e8e3d5398d14e  codr-v070-android-workspaces.png
+242826018aa439608867e3f87c36fdbb44321bc75ac83d8a3f72dc3e77f18c38  codr-v070-android-model-providers.png
+15fbb0cc14844c6a10d4e69312df7b5a00aa75371c810c73831f0eddec8a055d  codr-v070-android-help-top.png
+60ca70457af64b1d941d599d4b80149ff039e67f9589ae92086010e692bde5b7  codr-v070-android-help-sync.png
+```
+
+### Earlier end-to-end examples
+
 The earlier gallery contains side-by-side composites of real **herdr** 0.9.1, OpenCode 1.19.3, and White Noise Android interfaces.
 
 All seven images use the same fictional Garden planner project. The desktop replays matching history imported into an isolated OpenCode installation. The phone uses a dedicated Alex demo profile. A synthetic **herdr**/OpenCode fixture supplies agent state and scripted replies through the real **codr** bridge and an isolated MDK transport.
