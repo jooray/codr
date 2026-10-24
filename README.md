@@ -15,10 +15,6 @@ New bridge accounts introduce themselves as **Pat**, your messenger between Whit
 
 The separate **portr** desktop app can optionally connect over SSH. Its codr endpoint is off by default; phone-only installs do not need it. [Optional desktop setup](docs/INSTALL.md#optional-portr-desktopssh-access)
 
-<img src="docs/screenshots/herdr-phone-progress.png" width="1280" alt="herdr with the Garden planner task checklist beside matching working status and editable tasks in White Noise">
-
-*Real interfaces, encrypted messages, and local speech-to-text. Fictional participants and scripted agent replies. Editable checklists require `edit_responses = true`. [Capture details](docs/REFERENCE.md#screenshot-provenance).*
-
 ## Behaviour
 
 - Chat names pair the **herdr** tab and workspace: `review (Acme)`. Descriptions contain workspace and agent details.
@@ -92,9 +88,9 @@ OpenCode can use incremental, read-only SQLite reads instead of full exports. [R
 
 [Planned work and completed items](docs/REFERENCE.md#roadmap).
 
-## Screenshots
+## Features in action
 
-Real messages in the stock White Noise Android app, captured over ADB on a Pixel 5. The fictional Garden planner demo connects through **codr** to real **herdr** sessions. Each close-up shows one request followed by its reply. Click an image for the full app view. [Capture details](docs/REFERENCE.md#screenshot-provenance).
+Explore the fictional Garden planner project through real **herdr** and White Noise interfaces. Phone close-ups show real command replies in the stock Android app; click them for the full app view. Side-by-side demos use scripted agent replies, encrypted messages, and local speech-to-text. [Capture details](docs/REFERENCE.md#screenshot-provenance).
 
 ### Start a project
 
@@ -108,36 +104,47 @@ Send **`/model`** in an idle OpenCode chat to browse providers. The current mode
 
 <a href="docs/screenshots/codr-v070-android-model-full.png"><img src="docs/screenshots/codr-v070-android-model.png" width="520" alt="The phone sends /model, then codr replies with OpenAI, Claude, and Free provider choices"></a>
 
-<details>
-<summary>Earlier demos: a shared project, images, voice, decisions, and multiple chats</summary>
+### Follow progress
 
-**Shared chat with owner-only agent control**
+Read working status and task progress in the session chat. Editable checklists require `edit_responses = true`.
+
+<img src="docs/screenshots/herdr-phone-progress.png" width="1280" alt="herdr with the Garden planner task checklist beside matching working status and editable tasks in White Noise">
+
+### Share a project
 
 Alex invited Sam to the Garden planner chat. Sam can discuss the project, but only Alex's messages reach the agent.
 
 <img src="docs/screenshots/herdr-phone-shared.png" width="1280" alt="Alex, Sam, and codr in a three-member White Noise chat, with only Alex's request shown in herdr">
 
-**Image attachment**
+### Send an image
+
+Attach a design from your phone so the agent can review the downloaded image.
 
 <img src="docs/screenshots/herdr-phone-image.png" width="1280" alt="A watering-reminder design uploaded in White Noise beside its downloaded local image path and scripted review in OpenCode">
 
-**Voice transcription**
+### Send a voice message
+
+Record a message on your phone; local speech-to-text turns it into an agent prompt.
 
 <img src="docs/screenshots/herdr-phone-voice.png" width="1280" alt="A White Noise audio message and transcribing status beside the actual Phonon-2 transcript sent to the demo agent">
 
-**Decision response**
+### Answer a decision
+
+Reply with a number to answer a supported OpenCode question without returning to the terminal.
 
 <img src="docs/screenshots/herdr-phone-decisions.png" width="1280" alt="A ten-minute snooze decision in OpenCode beside the White Noise question card, phone reply 1, and choice confirmation">
 
-**Review output**
+### Read a review
+
+Read the agent's review in the same chat, alongside the matching herdr session.
 
 <img src="docs/screenshots/herdr-phone-review.png" width="1280" alt="The herdr review tab beside its White Noise chat, both showing checks for the Garden planner watering reminder">
 
-**Session chats in a project folder**
+### Keep sessions separate
+
+Each herdr session has its own chat. Group related chats in a White Noise project folder.
 
 <img src="docs/screenshots/herdr-phone-conversations.png" width="1280" alt="Six Garden planner session tabs in herdr beside their six matching chats in a White Noise Garden folder">
-
-</details>
 
 ---
 
