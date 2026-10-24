@@ -15,6 +15,7 @@ pub mod codex;
 pub mod decision;
 mod native;
 pub mod opencode;
+pub mod permission;
 pub mod tasks;
 
 pub fn supported(agent: &str) -> bool {
@@ -519,6 +520,7 @@ pub struct SessionSnapshot {
     pub history: SessionHistory,
     pub tasks: Option<tasks::TaskList>,
     pub decision: Option<decision::Decision>,
+    pub permission: Option<permission::Permission>,
 }
 
 /// Fixed diagnostics never include transcript content, IDs, paths, or CLI stderr.
@@ -572,6 +574,14 @@ pub(crate) async fn read_opencode_snapshot(
         } else {
             decision::from_data(&export).ok().flatten()
         },
+        permission: if api == EXPORT_V2 {
+            permission::read(&config.opencode_bin, &session.value)
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        },
     })
 }
 
@@ -604,6 +614,7 @@ pub async fn read_snapshot(
                     history,
                     tasks,
                     decision: None,
+                    permission: None,
                 })
             })
             .await

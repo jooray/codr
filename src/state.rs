@@ -75,6 +75,10 @@ pub struct Mapping {
     pub prompt_queue: Vec<QueuedPrompt>,
     #[serde(default)]
     pub queue_flight: Option<QueueFlight>,
+    #[serde(default)]
+    pub permission: Option<crate::output::permission::Permission>,
+    #[serde(default)]
+    pub permission_attempts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

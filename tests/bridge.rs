@@ -2745,6 +2745,194 @@ async fn forwarding_command(config: &BridgeConfig, mode: &str) -> std::process::
         .unwrap()
 }
 
+fn permission_export(path: &std::path::Path) -> std::path::PathBuf {
+    let request_path = path.with_file_name("permission.json");
+    std::fs::write(
+        &request_path,
+        json!({"id":"per_test","sessionID":"ses_1","action":"shell",
+        "resources":["git commit -m 'Test change'"],"save":["git commit *"],
+        "source":{"type":"tool","messageID":"msg_permission","id":"tool_permission"},
+        "metadata":{"command":"git commit -m 'Test change'"}})
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(path, r#"#!/usr/bin/env python3
+import json, pathlib, sys
+root=pathlib.Path(__file__).parent
+args=sys.argv[1:]
+if args[0]=='--pure': sys.exit(2)
+if args[0]=='session':
+ print(json.dumps({'messages':[{'type':'user','id':'user','text':'Task'}]}));sys.exit(0)
+if args[:2]==['api','get']:
+ if args[2].endswith('/form'): print('{"data":[]}');sys.exit(0)
+ request=json.loads((root/'permission.json').read_text())
+ if args[2]=='/api/session/ses_1/permission': print(json.dumps({'data':[] if request is None else [request]}));sys.exit(0)
+ if request and args[2]=='/api/session/ses_1/permission/'+request['id']: print(json.dumps({'data':request}));sys.exit(0)
+ sys.exit(1)
+if args[:2]==['api','post']:
+ body=json.loads(args[args.index('--data')+1])
+ with (root/'permission-posts.jsonl').open('a') as f: f.write(json.dumps({'path':args[2],'body':body})+'\n')
+ if (root/'drop-permission-ack').exists():sys.exit(1)
+ sys.exit(0)
+sys.exit(2)
+"#).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    request_path
+}
+
+#[tokio::test]
+async fn permission_card_uses_request_bound_once_or_reject_without_keys_prompts_or_unmuting() {
+    for (verb, expected) in [("/allow", "once"), ("/reject", "reject")] {
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path());
+        permission_export(&config.opencode_bin);
+        let mut blocked = agent();
+        blocked.agent_status = "blocked".into();
+        blocked.state_change_seq = 2;
+        let calls = Arc::new(Mutex::new(vec![]));
+        let herdr =
+            peer_for_agent(&config.herdr_socket, false, calls.clone(), blocked.clone()).await;
+        let mut bridge = Bridge::open(config.clone()).unwrap();
+        bridge.state.mappings.insert(
+            blocked.key(),
+            activity_mapping(blocked.clone(), &"bb".repeat(16)),
+        );
+        bridge.reconcile(vec![blocked.clone()]).await.unwrap();
+        let card = bridge
+            .state
+            .outbox
+            .iter()
+            .find(|item| item.text.starts_with("Permission ["))
+            .expect("The blocked permission must produce a phone approval card")
+            .text
+            .clone();
+        assert!(card.contains("git commit -m 'Test change'"));
+        assert!(!card.contains("Always allow"));
+        let code = card
+            .lines()
+            .find_map(|line| line.strip_prefix("/allow "))
+            .unwrap();
+        herdr_white_noise_bridge::forwarding::set(&config.state_path, false).unwrap();
+        let mut event = inbound(HEX, "permission-reply");
+        event["message"]["text"] = json!(format!("{verb} {code}"));
+        bridge.inbound(&event).await.unwrap();
+        assert!(!bridge.state.forwarding_enabled);
+        assert!(
+            bridge.state.mappings[&blocked.key()]
+                .prompt_queue
+                .is_empty()
+        );
+        let posts: Vec<Value> = std::fs::read_to_string(root.path().join("permission-posts.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(
+            posts[0]["path"],
+            "/api/session/ses_1/permission/per_test/reply"
+        );
+        assert_eq!(posts[0]["body"], json!({"decision":expected}));
+        assert!(!calls.lock().unwrap().iter().any(|call| call["method"] == "agent.send_keys" || call["method"] == "agent.prompt"));
+        drop(bridge);
+        let mut bridge = Bridge::open(config.clone()).unwrap();
+        bridge.reconcile(vec![blocked]).await.unwrap();
+        event["message"]["message_id_hex"] = json!("another-reply-to-same-permission");
+        bridge.inbound(&event).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("permission-posts.jsonl"))
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
+        herdr.abort();
+    }
+}
+
+#[tokio::test]
+async fn permission_replies_fail_closed_for_stale_foreign_malformed_and_uncertain_requests() {
+    for scenario in [
+        "changed",
+        "gone",
+        "foreign",
+        "wrong-code",
+        "persistent",
+        "numeric",
+        "attachment",
+        "unknown-result",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path());
+        let request_path = permission_export(&config.opencode_bin);
+        let mut blocked = agent();
+        blocked.agent_status = "blocked".into();
+        blocked.state_change_seq = 2;
+        let calls = Arc::new(Mutex::new(vec![]));
+        let herdr =
+            peer_for_agent(&config.herdr_socket, false, calls.clone(), blocked.clone()).await;
+        let mut bridge = Bridge::open(config.clone()).unwrap();
+        bridge.state.mappings.insert(
+            blocked.key(),
+            activity_mapping(blocked.clone(), &"bb".repeat(16)),
+        );
+        bridge.reconcile(vec![blocked.clone()]).await.unwrap();
+        let card = bridge
+            .state
+            .outbox
+            .iter()
+            .find(|item| item.text.starts_with("Permission ["))
+            .unwrap()
+            .text
+            .clone();
+        let code = card
+            .lines()
+            .find_map(|line| line.strip_prefix("/allow "))
+            .unwrap();
+        let mut event = inbound(HEX, "permission-fail-closed");
+        event["message"]["text"] = json!(format!("/allow {code}"));
+        match scenario {
+            "changed" => {
+                let mut request: Value =
+                    serde_json::from_slice(&std::fs::read(&request_path).unwrap()).unwrap();
+                request["metadata"]["command"] = json!("different command");
+                std::fs::write(&request_path, request.to_string()).unwrap();
+            }
+            "gone" => std::fs::write(&request_path, "null").unwrap(),
+            "foreign" => event["message"]["sender"]["account_id_hex"] = json!("cc".repeat(32)),
+            "wrong-code" => event["message"]["text"] = json!("/allow pwrong"),
+            "persistent" => event["message"]["text"] = json!(format!("/allow-always {code}")),
+            "numeric" => event["message"]["text"] = json!("2"),
+            "attachment" => event["message"]["attachments"] = json!([{"name":"input.txt"}]),
+            "unknown-result" => {
+                std::fs::write(root.path().join("drop-permission-ack"), "").unwrap()
+            }
+            _ => unreachable!(),
+        }
+        bridge.inbound(&event).await.unwrap();
+        drop(bridge);
+        let mut bridge = Bridge::open(config.clone()).unwrap();
+        bridge.reconcile(vec![blocked.clone()]).await.unwrap();
+        event["message"]["message_id_hex"] = json!("permission-second-attempt");
+        bridge.inbound(&event).await.unwrap();
+        let posts =
+            std::fs::read_to_string(root.path().join("permission-posts.jsonl")).unwrap_or_default();
+        assert_eq!(
+            posts.lines().count(),
+            usize::from(scenario == "unknown-result"),
+            "{scenario}"
+        );
+        assert!(
+            bridge.state.mappings[&blocked.key()]
+                .prompt_queue
+                .is_empty(),
+            "{scenario}"
+        );
+        assert!(!calls.lock().unwrap().iter().any(|call| call["method"] == "agent.send_keys" || call["method"] == "agent.prompt"), "{scenario}");
+        herdr.abort();
+    }
+}
+
 fn decision_export(path: &std::path::Path, id: &str, question: &str) {
     let data = json!({"messages":[
         {"info":{"id":"user-decision","role":"user"},"parts":[]},
@@ -2766,6 +2954,56 @@ fn decision_terminal(question: &str) -> String {
     format!(
         "PRIVATE TOOL OUTPUT\n{question}\n1. Proceed\n   Continue with the plan\n2. Review\n   Review the alternatives\n3. Type your own answer\n↑↓ select enter submit esc dismiss\n"
     )
+}
+
+#[tokio::test]
+async fn a_permission_card_does_not_intercept_a_later_numeric_question_answer_after_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    permission_export(&config.opencode_bin);
+    let mut blocked = agent();
+    blocked.agent_status = "blocked".into();
+    blocked.state_change_seq = 2;
+    let observed = Arc::new(Mutex::new(blocked.clone()));
+    let calls = Arc::new(Mutex::new(vec![]));
+    let herdr = decision_herdr(
+        &config.herdr_socket,
+        observed.clone(),
+        Arc::new(Mutex::new(decision_terminal("Which next step?"))),
+        calls.clone(),
+    )
+    .await;
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge.state.mappings.insert(
+        blocked.key(),
+        activity_mapping(blocked.clone(), &"bb".repeat(16)),
+    );
+    bridge.reconcile(vec![blocked.clone()]).await.unwrap();
+    assert!(bridge.state.mappings[&blocked.key()].permission.is_some());
+    drop(bridge);
+    decision_export(
+        &config.opencode_bin,
+        "question-after-permission",
+        "Which next step?",
+    );
+    blocked.state_change_seq += 1;
+    *observed.lock().unwrap() = blocked.clone();
+    let mut bridge = Bridge::open(config).unwrap();
+    bridge.reconcile(vec![blocked.clone()]).await.unwrap();
+    assert!(bridge.state.mappings[&blocked.key()].permission.is_none());
+    let mut answer = inbound(HEX, "later-numeric-question");
+    answer["message"]["text"] = json!("1");
+    bridge.inbound(&answer).await.unwrap();
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call["method"] == "agent.send_keys")
+            .count(),
+        1
+    );
+    herdr.abort();
 }
 
 async fn decision_herdr(

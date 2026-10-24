@@ -241,6 +241,7 @@ impl Reader {
                 history: super::history_from_data(&export),
                 tasks: super::tasks::from_data(&export),
                 decision: super::decision::from_data(&export).ok().flatten(),
+                permission: None,
             };
         }
         cache.cursor = latest;

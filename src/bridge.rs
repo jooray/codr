@@ -836,6 +836,9 @@ impl Bridge {
             .agent_session
             .as_ref()
             .is_some_and(|session| session.agent == "opencode");
+        if agent.agent_status != "blocked" {
+            self.state.mappings.get_mut(key).unwrap().permission = None;
+        }
         if self.state.forwarding_enabled && agent.agent_status == "blocked" && opencode {
             let mapping = &self.state.mappings[key];
             if mapping.blocked_context_seq != Some(agent.state_change_seq)
@@ -850,7 +853,7 @@ impl Bridge {
                     .reads
                     .read(&self.config, agent, self.state.forwarding_revision.clone())
                     .await
-                    .map(|snapshot| snapshot.decision.clone());
+                    .map(|snapshot| (snapshot.decision.clone(), snapshot.permission.clone()));
                 self.state
                     .mappings
                     .get_mut(key)
@@ -860,9 +863,15 @@ impl Bridge {
                     .mappings
                     .get_mut(key)
                     .unwrap()
-                    .decision_refresh_pending = !matches!(&decision, Ok(Some(_)));
+                    .decision_refresh_pending = !matches!(&decision, Ok((Some(_), None)));
+                if matches!(&decision, Ok((_, None))) {
+                    self.state.mappings.get_mut(key).unwrap().permission = None;
+                }
                 match decision {
-                    Ok(Some(decision)) => {
+                    Ok((_, Some(permission))) => {
+                        self.announce_permission(key, &group, permission)?;
+                    }
+                    Ok((Some(decision), None)) => {
                         self.announce_decision(key, &group, decision)?;
                     }
                     _ if self.state.mappings[key].blocked_context_seq
@@ -1317,6 +1326,12 @@ impl Bridge {
                 .as_array()
                 .is_none_or(|items| items.is_empty())
             && msg["media"].as_array().is_none_or(|items| items.is_empty());
+        if output::permission::is_reply(text, self.state.mappings[&key].permission.is_some()) {
+            ensure!(!queued, "Permission replies cannot be queued");
+            return self
+                .reply_permission(&key, group, id, text, plain_command)
+                .await;
+        }
         if plain_command
             && (text.trim().eq_ignore_ascii_case("/queue")
                 || text.trim().eq_ignore_ascii_case("/clear-queue"))
@@ -1815,6 +1830,162 @@ impl Bridge {
             self.state
                 .enqueue(event["group_id_hex"].as_str().unwrap_or(""), text);
         }
+    }
+
+    fn announce_permission(
+        &mut self,
+        key: &str,
+        group: &str,
+        mut permission: output::permission::Permission,
+    ) -> Result<()> {
+        self.state.mappings.get_mut(key).unwrap().decision = None;
+        if let Some(previous) = self.state.mappings[key].permission.as_ref()
+            && previous.request == permission.request
+        {
+            permission = previous.clone();
+        }
+        if self.state.mappings[key]
+            .permission_attempts
+            .contains(&permission.token())
+        {
+            permission.submitted = true;
+        }
+        if !permission.announced && !permission.submitted {
+            self.state.enqueue(group, &permission.text());
+            permission.announced = true;
+        }
+        self.state.mappings.get_mut(key).unwrap().permission = Some(permission);
+        self.save()
+    }
+
+    fn permission_notice(&mut self, key: &str, group: &str, id: &str, text: &str) -> Result<()> {
+        let before = self.state.clone();
+        self.state
+            .mappings
+            .get_mut(key)
+            .unwrap()
+            .seen_messages
+            .push(id.into());
+        self.state
+            .enqueue_manual(group, text, &format!("permission:{group}:{id}"));
+        if let Err(error) = self.save() {
+            self.state = before;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn reply_permission(
+        &mut self,
+        key: &str,
+        group: &str,
+        id: &str,
+        text: &str,
+        typed: bool,
+    ) -> Result<()> {
+        self.refresh_forwarding()?;
+        let Some((reply, code)) = output::permission::parse_reply(text).filter(|_| typed) else {
+            return self.permission_notice(
+                key,
+                group,
+                id,
+                "Use typed /allow CODE or /reject CODE. Persistent rules stay terminal-only.",
+            );
+        };
+        let Some(permission) = self.state.mappings[key]
+            .permission
+            .clone()
+            .filter(|permission| permission.announced)
+        else {
+            return self.permission_notice(
+                key,
+                group,
+                id,
+                "No permission card is available. Check the terminal.",
+            );
+        };
+        if !permission.token().eq_ignore_ascii_case(code) {
+            return self.permission_notice(
+                key,
+                group,
+                id,
+                "Permission code does not match. Use the current card.",
+            );
+        }
+        if permission.submitted
+            || self.state.mappings[key]
+                .permission_attempts
+                .contains(&permission.token())
+        {
+            return self.permission_notice(
+                key,
+                group,
+                id,
+                "A reply was already attempted. Check the terminal.",
+            );
+        }
+        let Some(agent) = self.agents.get(key).cloned() else {
+            return self.permission_notice(
+                key,
+                group,
+                id,
+                "Session is unavailable. No permission reply sent.",
+            );
+        };
+        let Some(session) = agent
+            .agent_session
+            .as_ref()
+            .filter(|session| session.agent == "opencode" && session.kind == "id")
+        else {
+            return self.permission_notice(key, group, id, "This permission needs the terminal.");
+        };
+        if herdr::get(&self.herdr, &agent).await?.agent_status != "blocked" {
+            return self.permission_notice(key, group, id, "Permission is no longer waiting.");
+        }
+        let fresh = output::permission::read_request(
+            &self.config.opencode_bin,
+            &session.value,
+            permission.id(),
+        )
+        .await;
+        if !fresh.is_ok_and(|fresh| fresh.request == permission.request) {
+            return self.permission_notice(
+                key,
+                group,
+                id,
+                "Permission changed or could not be verified. No reply sent.",
+            );
+        }
+        if herdr::get(&self.herdr, &agent).await?.agent_status != "blocked" {
+            return self.permission_notice(key, group, id, "Permission is no longer waiting.");
+        }
+        // Durable intent precedes the only mutation. Unknown results must never auto-retry.
+        let before = self.state.clone();
+        let mapping = self.state.mappings.get_mut(key).unwrap();
+        mapping.permission_attempts.push(permission.token());
+        mapping.permission.as_mut().unwrap().submitted = true;
+        mapping.seen_messages.push(id.into());
+        if let Err(error) = self.save() {
+            self.state = before;
+            return Err(error);
+        }
+        let result = output::permission::reply(
+            &self.config.opencode_bin,
+            &session.value,
+            permission.id(),
+            reply,
+        )
+        .await;
+        self.state.enqueue_manual(
+            group,
+            if result.is_ok() {
+                "Permission reply sent."
+            } else {
+                "Permission reply not confirmed. Check the terminal; no automatic retry."
+            },
+            &format!("permission:{group}:{id}"),
+        );
+        self.save()
     }
 
     fn announce_decision(
