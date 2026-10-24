@@ -253,6 +253,10 @@ Do not share the existing `wn-opencode` connector home. That adapter can also an
 
 ## GitHub builds
 
+GitHub is primary for source, issues, pull requests, reviews, CI, and releases. Contributors do not need Nostr or ngit.
+The ngit repository mirrors approved source refs and published release files. Blossom hosts the exact, unchanged release assets.
+See [source and release mirror verification](MIRRORING.md). Existing ngit discussions remain available without automatic duplication or closure.
+
 GitHub Actions runs Rust formatting, tests, Clippy, and isolated installer/setup tests on Linux, plus the Rust and Python test suites on macOS, for pushes and pull requests. Version tags build separate bridge and connector archives for Linux and macOS on x86_64 and aarch64. Linux bridges use musl; Linux connectors use native glibc. macOS binaries are ad-hoc signed. Archives and SHA-256 checksums are published to [GitHub Releases](https://github.com/tidley/codr/releases). See the [connector requirements](INSTALL.md#requirements).
 
 The installer selects the bridge and connector release from the plugin checkout. It never silently substitutes a newer release. The dedicated connector is built from the pinned upstream MDK revision and published patch in [connector source](../patches/README.md). Each connector archive includes source provenance and the upstream license.
