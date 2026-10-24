@@ -99,6 +99,10 @@ first 0.14 start. The migration rekeys databases and changes their schema; an ol
 cannot reopen them. See [migration precautions](../patches/README.md). Do not restore
 old MLS state automatically after the new connector has received traffic.
 
+Setup stores the OpenCode executable's PATH entry, such as `/opt/homebrew/bin/opencode`, instead of Homebrew's versioned Cellar path. If an upgrade removes an absolute configured path and a replacement is installed, rerun setup: it validates session readers with the replacement before saving it, then restarts the worker. A failed restart restores the original configuration so setup can retry. `--check` reports an available repair without writing or restarting.
+
+Bare command names such as `opencode` keep their normal PATH lookup. Claude-only and Codex-only installations do not require OpenCode, including on repeat setup and `--check`. If OpenCode is unavailable, validation still fails when a live session needs its reader; without such a session, validation can be deferred.
+
 The binary installer replaces **codr**'s executable atomically. A running worker continues with its previous executable until restarted. Run setup first to select the matching connector. After that, a separately replaced bridge executable can be applied by restarting only the **codr** worker when work and group creation have settled:
 
 ```bash
@@ -158,7 +162,7 @@ For Codex profiles, `codex_home` selects the directory containing `sessions` and
 
 If a supported agent appears without a native session ID, check its **herdr** integration. Enable the matching **herdr** integration when needed rather than guessing a transcript from its terminal title or repository. **codr** does not copy credentials or reconfigure the model provider.
 
-Native transcript reads are bounded to 128 MiB per file and 16 MiB per record. Missing, ambiguous, or unsupported transcript data stays unavailable for final-reply extraction. Claude Code must record an explicit `end_turn` stop reason; the bridge retries later if the writer has not persisted it yet.
+Native transcript records are bounded to 16 MiB. Codex transcripts are bounded to 128 MiB per file. Claude Code transcripts have no file limit. The bridge parses a Claude Code transcript once and then parses only the bytes appended since the last read. It parses the whole file again when the file is replaced or its last parsed bytes change. Missing, ambiguous, or unsupported transcript data stays unavailable for final-reply extraction. Claude Code must record an explicit `end_turn` stop reason; the bridge retries later if the writer has not persisted it yet.
 
 See [Recovery and diagnostics](REFERENCE.md#recovery-and-diagnostics) for uncertain group creation or prompt submissions. Do not blindly repeat those operations.
 

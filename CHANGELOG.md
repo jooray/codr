@@ -34,6 +34,10 @@
 
 ### Fixed
 
+- Keep stable executable paths across Homebrew upgrades and report missing OpenCode executables without exposing transcript data.
+- Preserve optional OpenCode support for Claude-only and Codex-only installations, including repeat setup and check mode. Bare commands retain PATH lookup.
+- Validate replacement session readers before saving an OpenCode repair. Restore the old configuration after a failed worker restart so setup can retry the repair.
+- Read Claude transcripts larger than 128 MiB and parse only appended bytes, retaining the bounded 32-entry transcript cache and eviction order.
 - OpenCode V2 decision replies no longer reject a matching live question when the sidebar shows a repository-path footer instead of the older version footer. The bridge still checks the current request identity, exact question and options, visible selection controls, and unchanged terminal session before sending a choice.
 
 ## [0.6.2] - 2026-10-23 (Linux preview)
