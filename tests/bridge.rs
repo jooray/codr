@@ -207,7 +207,7 @@ async fn shortcut_help_replies_in_its_own_chat_while_muted_without_herdr() {
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0]["group_id_hex"], "bb".repeat(16));
     let text = sent[0]["text"].as_str().unwrap();
-    for shortcut in ["/help", "/sync", "/status", "/unmute", "/answer"] {
+    for shortcut in ["/help", "/sync", "/status", "/unmute"] {
         assert!(text.contains(shortcut));
     }
     drop(bridge);
@@ -402,7 +402,6 @@ async fn shortcut_help_is_a_short_command_list() {
         "/queue",
         "/clear-queue",
         "/unmute",
-        "/answer",
     ] {
         assert!(help.contains(command));
     }
@@ -410,7 +409,9 @@ async fn shortcut_help_is_a_short_command_list() {
         help.len() <= 450,
         "Help should be a command list, not the reference manual"
     );
-    assert!(help.lines().count() <= 11);
+    assert_eq!(help.lines().count(), 7);
+    assert!(help.starts_with("codr shortcuts:\n"));
+    assert!(help.ends_with("/unmute       Resume all chats"));
     assert!(help.lines().all(|line| line.chars().count() <= 65));
 }
 
@@ -2162,7 +2163,7 @@ async fn prompt_queue_background_checkpoint_never_starts_a_second_blocking_expor
     assert!(calls.lock().unwrap().iter().any(|call| {
         call["text"]
             .as_str()
-            .is_some_and(|text| text.starts_with("White Noise shortcuts:"))
+            .is_some_and(|text| text.starts_with("codr shortcuts:"))
     }));
     std::fs::write(release, "release").unwrap();
     for _ in 0..100 {
