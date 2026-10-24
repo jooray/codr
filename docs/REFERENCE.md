@@ -11,7 +11,7 @@ The bridge uses one dedicated MDK identity across all mapped groups. Setup keeps
 - New sessions create groups and invite the configured phone `npub`.
 - Group names pair the **herdr** tab label and workspace: `[cd] <tab name> (<workspace>)`, for example `[cd] review (Acme)`. A workspace without a label leaves `[cd] <tab name>`. Workspace and agent details also appear in the group description. Repository names and agent-generated conversation topics do not determine the chat name.
 - A phone message prompts only the agent mapped to that group.
-- Prompts sent while that agent is busy or blocked are not queued. Wait for idle and resend. Supported decision answers use their separate blocked-session route.
+- Ordinary text prompts sent while that agent is busy join its persistent FIFO queue. Supported decision answers use their separate blocked-session route. Use `/queue` to inspect waiting prompts and `/clear-queue` to cancel them.
 - Final replies come from completed stored agent messages. They exclude reasoning and tool output.
 - Working, idle, blocked, and ended notices appear in the group. Blocked notices can include a labelled terminal excerpt. Unsupported OpenCode blockers use a short notice. Separate `done` notices are suppressed; the final reply signals completion.
 - `/status` reports the mapped session state.
@@ -108,6 +108,8 @@ Send these as standalone text from the configured owner's account in a linked ch
 | `/help` | List the available commands and decision-reply syntax in this chat only. |
 | `/sync` | Send the last three conversation text messages (or fewer), labelled You or Agent and grouped in order, to each eligible conversation's own chat. Eligibility uses one hour before the last confirmed message across all linked White Noise chats. |
 | `/status` | Show the mapped session's status and connection. Like ordinary phone input, this can resume forwarding. |
+| `/queue` | Show this chat's waiting prompt count and in-flight or uncertain submission state without changing mute settings. |
+| `/clear-queue` | Cancel waiting text prompts in this chat without changing mute settings. Running or uncertain prompts are not cancelled. |
 | `unmute` or `/unmute` | Resume automatic forwarding globally without prompting an agent. |
 
 `/help` and `/sync` do not prompt agents, answer questions, create groups, or change mute settings. They work while muted or **herdr** is disconnected. Recently ended mapped conversations can participate in sync. The command chat receives a count of queued conversations and unavailable readers; a queued send does not prove phone receipt. Retrying the same inbound event does not resend the catch-up. A new `/sync` request skips unchanged source messages already confirmed sent or queued by the bridge, including previous syncs and ordinary assistant forwarding.
@@ -123,6 +125,16 @@ The time window selects conversations, not individual excerpt messages. Each eli
 Within that three-message excerpt, already delivered or pending messages are removed without backfilling older history. Delivery records are per chat and survive restarts. A source message is confirmed only after all of its batch's chunks receive valid MDK acknowledgements; failed or partial sends retain their queued retry keys. An identical text with a different source ID, or edited content under the same ID, is a new message version. Incoming phone messages are not themselves outgoing confirmations. Delivery tracking begins with this update: older sends without source records cannot be marked confirmed reliably and may appear once in the first catch-up after upgrade.
 
 Recognition ignores capitalization and surrounding whitespace for `/help` and `/sync`. Longer prose, attachment captions, voice transcripts, and truncated input are not these commands. Use a listed number, an exact option label, or `/answer 2` for a supported pending decision; include the question code when its card requests one.
+
+### Persistent text prompt queues
+
+An ordinary text prompt from the owner joins its chat's FIFO queue if the agent is busy, blocked without a supported decision answer, awaiting completion, processing media, or already has waiting prompts. The bridge saves acceptance and consumption together before confirming the queue position. Duplicate inbound events do not add tasks. An idle chat with no backlog keeps the existing immediate prompt path.
+
+Each chat can hold 16 waiting prompts of up to 30000 UTF-8 bytes each. A full queue or oversized waiting prompt gets a rejection notice, not silent eviction. Images and voice retain their existing preparation rules; this queue is for ordinary text. Supported decision replies are handled immediately instead of becoming future prompts.
+
+Queued tasks run independently per chat. Dispatch requires the same mapped native session, a fresh idle readiness check, enabled forwarding, and a readable supported transcript. The bridge waits for a completed reply before dispatching the next task; an early idle event alone is not completion. Muting pauses dispatch without discarding tasks. Ending a session retains its queue but does not reroute it to another session; restoring the same session can resume it. A new phone message or a local Away selection can resume forwarding and thus previously accepted work.
+
+The bridge saves submission intent before terminal input. A socket failure known to precede submission retains the task for retry. A lost acknowledgement, other uncertain result, or restart during submission pauses that chat and is never retried automatically. Inspect the terminal, then use local `clear-prompt` to release the hold; it does not resubmit the uncertain task. `/clear-queue` removes only waiting tasks, not in-flight work. `/queue` and `/clear-queue` are owner-only, case-insensitive standalone typed commands and work while muted or disconnected without prompting agents.
 
 ### Editable progress and separate final replies
 

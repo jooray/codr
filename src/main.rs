@@ -103,7 +103,7 @@ async fn main() -> Result<()> {
         for (key, m) in s.mappings {
             println!(
                 "{}",
-                serde_json::json!({"session":key,"group":m.group_id_hex,"creating_uncertain":m.creating,"active":m.active,"state":m.last_agent_status,"pending_prompt":m.pending_prompt,"forwarding_enabled":forwarding_enabled,"forwarding_resume_pending":resume_pending})
+                serde_json::json!({"session":key,"group":m.group_id_hex,"creating_uncertain":m.creating,"active":m.active,"state":m.last_agent_status,"pending_prompt":m.pending_prompt,"queued_prompts":m.prompt_queue.len(),"queue_submission_uncertain":m.queue_flight.as_ref().is_some_and(|flight| !flight.confirmed),"forwarding_enabled":forwarding_enabled,"forwarding_resume_pending":resume_pending})
             );
         }
         return Ok(());
@@ -163,6 +163,7 @@ async fn main() -> Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("Unknown session key"))?;
             mapping.pending_prompt = false;
             mapping.completion_pending = false;
+            mapping.queue_flight = None;
             if let Some(decision) = mapping.decision.as_mut() {
                 decision.submitted = false;
                 decision.announced = false;

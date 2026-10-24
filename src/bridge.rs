@@ -253,9 +253,18 @@ impl Bridge {
         history: Option<output::SessionHistory>,
     ) -> Result<()> {
         if let Some(history) = history {
+            self.finish_queued_prompt(key, &history);
             let mapping = self.state.mappings.get_mut(key).unwrap();
             mapping.activity.baseline(&history.user_inputs);
             let known: HashSet<_> = mapping.final_ids.iter().cloned().collect();
+            if mapping.queue_flight.is_none()
+                && history
+                    .finals
+                    .iter()
+                    .any(|reply| !known.contains(&reply.id))
+            {
+                mapping.pending_prompt = false;
+            }
             mapping.final_ids.extend(
                 history
                     .finals
@@ -275,7 +284,10 @@ impl Bridge {
         }
         let mapping = self.state.mappings.get_mut(key).unwrap();
         mapping.forwarding_baseline_pending = false;
-        if agent.settled() {
+        if agent.settled()
+            && mapping.queue_flight.is_none()
+            && (mapping.prompt_queue.is_empty() || !mapping.pending_prompt)
+        {
             mapping.pending_prompt = false;
             mapping.completion_pending = false;
         }
@@ -481,7 +493,14 @@ impl Bridge {
                     eprintln!("A session could not reconcile; other sessions remain available.");
                 }
             } else {
-                self.reads.finish(&key);
+                let mapping = &self.state.mappings[&key];
+                let queued_dispatch = !mapping.prompt_queue.is_empty()
+                    && !mapping.pending_prompt
+                    && mapping.queue_flight.is_none()
+                    && agent.settled();
+                if !queued_dispatch {
+                    self.reads.finish(&key);
+                }
             }
         }
         let ended: Vec<_> = self
@@ -531,7 +550,9 @@ impl Bridge {
             m.pending_prompt = false;
             m.completion_pending = false;
         }
-        self.save()
+        self.save()?;
+        self.process_prompt_queues().await;
+        Ok(())
     }
 
     async fn seed_native_history(&mut self, key: &str, agent: &Agent) -> Result<bool> {
@@ -569,6 +590,7 @@ impl Bridge {
             .is_some_and(|s| output::supported(&s.agent))
         {
             let history = self.read_history(agent).await?;
+            self.finish_queued_prompt(key, &history);
             self.observe_activity(key, &history)?;
             if !self.state.forwarding_enabled {
                 let mapping = self.state.mappings.get_mut(key).unwrap();
@@ -583,6 +605,11 @@ impl Bridge {
             let known: HashSet<_> = self.state.mappings[key].final_ids.iter().cloned().collect();
             for reply in history.finals {
                 if !known.contains(&reply.id) {
+                    if !self.state.mappings[key].prompt_queue.is_empty()
+                        && self.state.mappings[key].queue_flight.is_none()
+                    {
+                        self.state.mappings.get_mut(key).unwrap().pending_prompt = false;
+                    }
                     if reply
                         .turn
                         .as_ref()
@@ -899,8 +926,11 @@ impl Bridge {
                 }
             }
             if self.state.mappings[key].completion_pending {
-                let awaiting_final = self.config.edit_responses
-                    && self.state.mappings[key].response_id.is_some()
+                let awaiting_final = (self.state.mappings[key].queue_flight.is_some()
+                    || (!self.state.mappings[key].prompt_queue.is_empty()
+                        && self.state.mappings[key].pending_prompt)
+                    || (self.config.edit_responses
+                        && self.state.mappings[key].response_id.is_some()))
                     && agent
                         .agent_session
                         .as_ref()
@@ -986,7 +1016,61 @@ impl Bridge {
     }
 
     pub async fn inbound(&mut self, event: &Value) -> Result<()> {
-        self.route_inbound(event, false).await
+        self.route_inbound(event, false, false).await
+    }
+
+    fn finish_queued_prompt(&mut self, key: &str, history: &output::SessionHistory) {
+        let mapping = self.state.mappings.get_mut(key).unwrap();
+        if mapping.queue_flight.as_ref().is_some_and(|flight| {
+            flight.confirmed
+                && history
+                    .finals
+                    .last()
+                    .is_some_and(|reply| Some(&reply.id) != flight.before_final.as_ref())
+        }) {
+            mapping.queue_flight = None;
+            mapping.pending_prompt = false;
+        }
+    }
+
+    async fn process_prompt_queues(&mut self) {
+        let keys: Vec<_> = self.agents.keys().cloned().collect();
+        for key in keys {
+            if self.refresh_forwarding().is_err()
+                || !self.herdr_available
+                || !self.state.forwarding_enabled
+                || self.state.forwarding_resume_pending
+            {
+                return;
+            }
+            let Some(mapping) = self.state.mappings.get(&key) else {
+                continue;
+            };
+            let Some(prompt) = mapping.prompt_queue.first().cloned() else {
+                continue;
+            };
+            if mapping.pending_prompt
+                || mapping.queue_flight.is_some()
+                || !self.agents[&key].settled()
+                || mapping.group_id_hex.as_deref() != Some(&prompt.group)
+                || self
+                    .state
+                    .media_pending
+                    .iter()
+                    .any(|event| event["group_id_hex"] == prompt.group)
+            {
+                self.reads.finish(&key);
+                continue;
+            }
+            let event = json!({"marmot_agent_control":PROTOCOL,"type":"inbound_message","account_id_hex":self.config.account_id_hex,
+                "group_id_hex":prompt.group,"message":{"message_id_hex":prompt.id,"sender":{"account_id_hex":self.phone},"text":prompt.text}});
+            if let Err(error) = Box::pin(self.route_inbound(&event, false, true)).await
+                && !error.is::<crate::reads::Pending>()
+            {
+                eprintln!("A queued prompt remains paused; other chats can continue.");
+            }
+            self.reads.finish(&key);
+        }
     }
 
     /// Recover an old installation's last own message without treating the incoming
@@ -1139,7 +1223,7 @@ impl Bridge {
                 "Sync: queued up to three new conversation messages, labelled You or Agent, for {count} conversation(s) active {window}, each in its own White Noise chat. Already sent or queued messages are skipped. {unavailable} history reader(s) unavailable. Mute settings are unchanged; no prompt was sent."
             )
         } else {
-            "White Noise shortcuts:\n/help — show this list in this chat.\n/sync — send unseen messages among the last three conversation messages, labelled You or Agent, together in each eligible chat. Messages already confirmed sent or queued by the bridge are skipped, including earlier syncs and normal assistant forwarding. A conversation qualifies if active since one hour before the last confirmed new outgoing message across all linked chats. With no confirmed send history, use the past hour. The excerpt may include older context; tool output and unfinished agent replies are excluded. Mute settings stay unchanged; no agent is prompted.\n/status — show this session's connection and status; this can resume forwarding globally.\nunmute or /unmute — enable forwarding for all chats without prompting an agent.\n\nOther text prompts the linked agent when idle and resumes global forwarding. Local terminal prompts mute all chats.\n\nDecision replies: use a listed number, exact option label, or /answer 2. If a question shows a code, include that code as requested. Other dialogs need the terminal.".into()
+            "White Noise shortcuts:\n/help — show this list in this chat.\n/sync — send unseen messages among the last three conversation messages, labelled You or Agent, together in each eligible chat. Messages already confirmed sent or queued by the bridge are skipped, including earlier syncs and normal assistant forwarding. A conversation qualifies if active since one hour before the last confirmed new outgoing message across all linked chats. With no confirmed send history, use the past hour. The excerpt may include older context; tool output and unfinished agent replies are excluded. Mute settings stay unchanged; no agent is prompted.\n/queue — show this chat's waiting prompt count and submission state without changing mute settings.\n/clear-queue — cancel this chat's waiting prompts, not a running or uncertain prompt; mute settings stay unchanged.\n/status — show this session's connection, status, and waiting prompt count; this can resume forwarding globally.\nunmute or /unmute — enable forwarding for all chats. Previously queued tasks can then resume.\n\nOther text prompts the linked agent when idle, or joins this chat's persistent FIFO queue while busy. Up to 16 text prompts of 30000 UTF-8 bytes each can wait. Queue dispatch waits for a completed reply and pauses while muted, disconnected, ended, or submission is uncertain. Local terminal prompts mute all chats.\n\nDecision replies bypass the queue: use a listed number, exact option label, or /answer 2. If a question shows a code, include that code as requested. Other dialogs need the terminal.".into()
         };
         self.state
             .enqueue_manual(group, &response, &format!("command:{request}"));
@@ -1156,7 +1240,7 @@ impl Bridge {
         Ok(())
     }
 
-    async fn route_inbound(&mut self, event: &Value, prepared: bool) -> Result<()> {
+    async fn route_inbound(&mut self, event: &Value, prepared: bool, queued: bool) -> Result<()> {
         ensure!(
             event["marmot_agent_control"] == PROTOCOL,
             "MDK event protocol mismatch"
@@ -1185,10 +1269,22 @@ impl Bridge {
         let Some(id) = msg["message_id_hex"].as_str() else {
             return Ok(());
         };
-        if self.state.mappings[&key]
-            .seen_messages
-            .iter()
-            .any(|seen| seen == id)
+        if queued {
+            ensure!(
+                self.state.mappings[&key]
+                    .prompt_queue
+                    .first()
+                    .is_some_and(|prompt| prompt.id == id
+                        && prompt.group == group
+                        && msg["text"].as_str() == Some(&prompt.text)),
+                "Queued prompt identity changed"
+            );
+        }
+        if !queued
+            && self.state.mappings[&key]
+                .seen_messages
+                .iter()
+                .any(|seen| seen == id)
         {
             return Ok(());
         }
@@ -1214,6 +1310,44 @@ impl Bridge {
                 .is_none_or(|items| items.is_empty())
             && msg["media"].as_array().is_none_or(|items| items.is_empty());
         if plain_command
+            && (text.trim().eq_ignore_ascii_case("/queue")
+                || text.trim().eq_ignore_ascii_case("/clear-queue"))
+        {
+            self.refresh_forwarding()?;
+            let before = self.state.clone();
+            let mapping = self.state.mappings.get_mut(&key).unwrap();
+            let count = mapping.prompt_queue.len();
+            let response = if text.trim().eq_ignore_ascii_case("/clear-queue") {
+                mapping.prompt_queue.clear();
+                format!(
+                    "Cleared {count} waiting prompt(s). Running or uncertain prompts were not cancelled."
+                )
+            } else {
+                format!(
+                    "Queue: {count} waiting prompt(s), {}. FIFO text prompts run when the agent is idle and forwarding is enabled. /clear-queue cancels only waiting prompts.",
+                    if mapping
+                        .queue_flight
+                        .as_ref()
+                        .is_some_and(|flight| !flight.confirmed)
+                    {
+                        "paused: submission is uncertain; inspect the terminal and use local clear-prompt"
+                    } else if mapping.pending_prompt || mapping.queue_flight.is_some() {
+                        "a prompt is in flight"
+                    } else {
+                        "no prompt in flight"
+                    }
+                )
+            };
+            mapping.seen_messages.push(id.into());
+            self.state
+                .enqueue_manual(group, &response, &format!("queue-control:{group}:{id}"));
+            if let Err(error) = self.save() {
+                self.state = before;
+                return Err(error);
+            }
+            return Ok(());
+        }
+        if plain_command
             && (text.trim().eq_ignore_ascii_case("/sync")
                 || text.trim().eq_ignore_ascii_case("/help"))
         {
@@ -1222,8 +1356,16 @@ impl Bridge {
                 .await;
         }
         self.refresh_forwarding()?;
-        forwarding::wake(&self.config.state_path, group, id)?;
+        if !queued {
+            forwarding::wake(&self.config.state_path, group, id)?;
+        }
         self.refresh_forwarding()?;
+        if queued {
+            ensure!(
+                self.state.forwarding_enabled && !self.state.forwarding_resume_pending,
+                "Queue paused by forwarding controls"
+            );
+        }
         ensure!(
             self.herdr_available,
             "herdr unavailable; inbound message deferred until recovery"
@@ -1264,7 +1406,8 @@ impl Bridge {
         if let Some(agent) = self.agents.get(&key).cloned() {
             self.baseline_forwarding(&key, &agent).await?;
         }
-        if text != "/status"
+        if !queued
+            && text != "/status"
             && !text.trim().is_empty()
             && msg["text_truncated"] != true
             && msg["attachments_truncated"] != true
@@ -1273,6 +1416,9 @@ impl Bridge {
             && self.answer_decision(&key, &agent, group, id, text).await?
         {
             return Ok(());
+        }
+        if prepared && self.state.mappings[&key].queue_flight.is_some() {
+            anyhow::bail!("Prepared input waits for the queued prompt to complete");
         }
         // A final transcript record can lag herdr's idle state. Resolve it before
         // opening another response, so it cannot overwrite the next prompt's message.
@@ -1289,6 +1435,49 @@ impl Bridge {
                 mapping.completion_pending = false;
             }
             self.save()?;
+        }
+        if !queued
+            && !prepared
+            && plain_command
+            && text != "/status"
+            && !text.trim().is_empty()
+            && self.agents.contains_key(&key)
+            && (self.state.mappings[&key].pending_prompt
+                || self.state.mappings[&key].queue_flight.is_some()
+                || !self.state.mappings[&key].prompt_queue.is_empty()
+                || !self.agents[&key].settled()
+                || self
+                    .state
+                    .media_pending
+                    .iter()
+                    .any(|event| event["group_id_hex"] == group))
+        {
+            let before = self.state.clone();
+            let mapping = self.state.mappings.get_mut(&key).unwrap();
+            let response = if mapping.prompt_queue.len() >= 16 || text.len() > 30000 {
+                "Queue limit reached (16 waiting prompts, 30000 UTF-8 bytes per prompt). No prompt was queued.".into()
+            } else {
+                mapping.prompt_queue.push(crate::state::QueuedPrompt {
+                    id: id.into(),
+                    group: group.into(),
+                    text: text.into(),
+                });
+                if !self.agents[&key].settled() {
+                    mapping.pending_prompt = true;
+                }
+                format!(
+                    "Queued prompt at position {}. It will run when this chat's agent is idle and forwarding is enabled.",
+                    mapping.prompt_queue.len()
+                )
+            };
+            mapping.seen_messages.push(id.into());
+            self.state
+                .enqueue_manual(group, &response, &format!("queued:{group}:{id}"));
+            if let Err(error) = self.save() {
+                self.state = before;
+                return Err(error);
+            }
+            return Ok(());
         }
         if text != "/status"
             && !text.trim().is_empty()
@@ -1325,7 +1514,9 @@ impl Bridge {
             && !media_busy
             && self.state.media_pending.len() < 16
             && self.agents.get(&key).is_some_and(|agent| {
-                (agent.settled() && !self.state.mappings[&key].pending_prompt)
+                (agent.settled()
+                    && !self.state.mappings[&key].pending_prompt
+                    && self.state.mappings[&key].queue_flight.is_none())
                     || (agent.agent_status == "blocked" && crate::media::audio(msg))
             })
         {
@@ -1346,7 +1537,7 @@ impl Bridge {
             self.state.media_pending.push(pending);
             return self.save();
         }
-        let phone_history = if self.config.auto_forwarding
+        let phone_history = if (self.config.auto_forwarding || queued)
             && text != "/status"
             && !text.trim().is_empty()
             && msg["text_truncated"] != true
@@ -1363,7 +1554,12 @@ impl Bridge {
             }) {
             let revision = self.state.forwarding_revision.clone();
             let session = self.agents[&key].agent_session.as_ref().unwrap().clone();
-            let history = self.reads.fresh(&self.config, &session).await?.history;
+            let history = if queued && self.reads.background {
+                let agent = self.agents[&key].clone();
+                self.read_history(&agent).await?
+            } else {
+                self.reads.fresh(&self.config, &session).await?.history
+            };
             self.refresh_forwarding()?;
             ensure!(
                 self.state.forwarding_enabled && self.state.forwarding_revision == revision,
@@ -1374,18 +1570,51 @@ impl Bridge {
             None
         };
         // Persist consumption before terminal input: uncertain prompts must not run twice.
+        let before_consumption = queued.then(|| self.state.clone());
+        let queued_prompt = if queued {
+            ensure!(
+                !media_busy
+                    && !self.state.mappings[&key].pending_prompt
+                    && self.state.mappings[&key].queue_flight.is_none()
+                    && self.agents.get(&key).is_some_and(Agent::settled),
+                "Queued prompt is not ready"
+            );
+            ensure!(
+                phone_history.is_some(),
+                "Queue requires a supported transcript reader"
+            );
+            let mapping = self.state.mappings.get_mut(&key).unwrap();
+            mapping.queue_flight = Some(crate::state::QueueFlight {
+                before_final: phone_history
+                    .as_ref()
+                    .and_then(|history| history.finals.last())
+                    .map(|reply| reply.id.clone()),
+                confirmed: false,
+            });
+            Some(mapping.prompt_queue.remove(0))
+        } else {
+            None
+        };
         let m = self.state.mappings.get_mut(&key).unwrap();
-        m.seen_messages.push(id.into());
-        self.save()?;
+        if !queued {
+            m.seen_messages.push(id.into());
+        }
+        if let Err(error) = self.save() {
+            if let Some(before) = before_consumption {
+                self.state = before;
+            }
+            return Err(error);
+        }
         let response = if text == "/status" {
             Some(format!(
-                "> {} herdr session: {}.",
+                "> {} herdr session: {}. {} waiting prompt(s).",
                 self.state.mappings[&key].last_agent_status,
                 if self.agents.contains_key(&key) {
                     "connected"
                 } else {
                     "ended"
-                }
+                },
+                self.state.mappings[&key].prompt_queue.len()
             ))
         } else if msg["text_truncated"] == true || msg["attachments_truncated"] == true {
             Some("This offline message was truncated by MDK. No prompt was sent. Send a shorter text message.".into())
@@ -1404,7 +1633,16 @@ impl Bridge {
                 }
                 self.save()?;
                 match herdr::prompt(&self.herdr, &agent, text).await {
-                    Ok(_) => {
+                    Ok(response) => {
+                        if queued {
+                            ensure!(
+                                response["result"]["type"] == "agent_prompted",
+                                "Queued prompt acknowledgement was not confirmed"
+                            );
+                            let mapping = self.state.mappings.get_mut(&key).unwrap();
+                            mapping.queue_flight.as_mut().unwrap().confirmed = true;
+                            mapping.completion_pending = true;
+                        }
                         self.state
                             .mappings
                             .get_mut(&key)
@@ -1430,7 +1668,12 @@ impl Bridge {
                             let m = self.state.mappings.get_mut(&key).unwrap();
                             m.pending_prompt = false;
                             m.activity.cancel_phone(id);
-                            m.seen_messages.retain(|seen| seen != id);
+                            if let Some(prompt) = queued_prompt {
+                                m.queue_flight = None;
+                                m.prompt_queue.insert(0, prompt);
+                            } else {
+                                m.seen_messages.retain(|seen| seen != id);
+                            }
                             self.herdr_available = false;
                             self.save()?;
                             return Err(error);
@@ -1505,7 +1748,7 @@ impl Bridge {
             let mut event = self.state.media_pending[index].clone();
             event["message"]["text"] = event["_codr_prepared_text"].clone();
             event["message"]["media"] = json!([]);
-            let result = self.route_inbound(&event, true).await;
+            let result = self.route_inbound(&event, true, false).await;
             if self.state.mappings.values().any(|mapping| {
                 mapping.group_id_hex.as_deref() == event["group_id_hex"].as_str()
                     && mapping
@@ -1650,11 +1893,14 @@ impl Bridge {
             output::decision::read(&self.config, session).await?
         };
         let Some(active) = active else {
-            if looks_like_answer || previous.is_some() {
+            if looks_like_answer {
                 return self.decision_notice(key, group, id, "No supported decision is available yet. Wait for its question card or use the terminal. No answer was sent.");
             }
             return Ok(false);
         };
+        if !looks_like_answer && !active.looks_like_answer(text) {
+            return Ok(false);
+        }
         if previous
             .as_ref()
             .is_none_or(|previous| !previous.announced || !previous.same_request(&active))

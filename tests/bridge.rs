@@ -869,7 +869,7 @@ async fn sync_reference_records_new_progress_and_help_but_not_edits_or_inbound_r
 /// Neither shortcut can be invoked by a different account, sender, or chat.
 #[tokio::test]
 async fn shortcut_commands_preserve_owner_account_and_group_authorization() {
-    for command in ["/sync", "/help"] {
+    for command in ["/sync", "/help", "/queue", "/clear-queue"] {
         for invalid in ["owner", "account", "group", "self"] {
             let root = tempfile::tempdir().unwrap();
             let config = config(root.path());
@@ -1681,6 +1681,594 @@ async fn phone_echo_concatenation_controls_muting_and_late_final_delivery() {
 }
 
 #[tokio::test]
+async fn prompt_queue_is_fifo_persistent_and_waits_for_a_completed_reply() {
+    for edited_progress in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = config(root.path());
+        config.edit_responses = edited_progress;
+        input_history(&config, "ses_1", &[], None);
+        let calls = Arc::new(Mutex::new(vec![]));
+        let herdr = peer(&config.herdr_socket, false, calls.clone()).await;
+        let mut working = agent();
+        working.agent_status = "working".into();
+        working.state_change_seq = 2;
+        let mut bridge = Bridge::open(config.clone()).unwrap();
+        bridge.state.mappings.insert(
+            working.key(),
+            activity_mapping(working.clone(), &"bb".repeat(16)),
+        );
+        bridge.reconcile(vec![working.clone()]).await.unwrap();
+        for (id, text) in [
+            ("queued-first", "First task"),
+            ("queued-second", "Second task"),
+        ] {
+            let mut event = inbound(HEX, id);
+            event["message"]["text"] = json!(text);
+            bridge.inbound(&event).await.unwrap();
+            bridge.inbound(&event).await.unwrap();
+        }
+        assert_eq!(
+            serde_json::to_value(&bridge.state.mappings[&working.key()]).unwrap()["prompt_queue"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(
+            !calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|call| call["method"] == "agent.prompt")
+        );
+        drop(bridge);
+        let mut bridge = Bridge::open(config.clone()).unwrap();
+        bridge.reconcile(vec![working]).await.unwrap();
+        let mut idle = agent();
+        idle.state_change_seq = 3;
+        bridge.reconcile(vec![idle.clone()]).await.unwrap();
+        assert!(
+            !calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|call| call["method"] == "agent.prompt"),
+            "The prior task's final must be collected before dispatch"
+        );
+        input_history(
+            &config,
+            "ses_1",
+            &[("prior-input", "Prior task")],
+            Some(("prior-final", "Prior answer")),
+        );
+        bridge.reconcile(vec![idle.clone()]).await.unwrap();
+        let prompts = || {
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|call| call["method"] == "agent.prompt")
+                .map(|call| call["params"]["text"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(prompts(), ["First task"]);
+        bridge.reconcile(vec![idle.clone()]).await.unwrap();
+        assert_eq!(
+            prompts(),
+            ["First task"],
+            "A stale idle snapshot is not completion"
+        );
+        drop(bridge);
+        let mut bridge = Bridge::open(config.clone()).unwrap();
+        bridge.reconcile(vec![idle.clone()]).await.unwrap();
+        assert_eq!(
+            prompts(),
+            ["First task"],
+            "Restart must not resubmit an in-flight task"
+        );
+        input_history(
+            &config,
+            "ses_1",
+            &[("first-input", "First task")],
+            Some(("first-final", "First answer")),
+        );
+        bridge.reconcile(vec![idle]).await.unwrap();
+        assert_eq!(prompts(), ["First task", "Second task"]);
+        herdr.abort();
+    }
+}
+
+#[tokio::test]
+async fn prompt_queue_commands_inspect_and_clear_waiting_tasks_without_waking_or_prompting() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    input_history(&config, "ses_1", &[], None);
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    let mut working = agent();
+    working.agent_status = "working".into();
+    bridge.state.mappings.insert(
+        working.key(),
+        activity_mapping(working.clone(), &"bb".repeat(16)),
+    );
+    bridge.reconcile(vec![working]).await.unwrap();
+    bridge.inbound(&inbound(HEX, "queued-task")).await.unwrap();
+    herdr_white_noise_bridge::forwarding::set(&config.state_path, false).unwrap();
+    for (id, text) in [
+        ("inspect-queue", "/queue"),
+        ("cancel-queue", "/clear-queue"),
+    ] {
+        let mut event = inbound(HEX, id);
+        event["message"]["text"] = json!(text);
+        bridge.inbound(&event).await.unwrap();
+    }
+    assert!(!bridge.state.forwarding_enabled);
+    assert_eq!(
+        serde_json::to_value(&bridge.state.mappings[&agent().key()]).unwrap()["prompt_queue"],
+        json!([])
+    );
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    bridge.flush().await.unwrap();
+    assert!(calls.lock().unwrap().iter().any(|call| {
+        call["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("Cleared 1 waiting"))
+    }));
+    mdk.abort();
+}
+
+#[tokio::test]
+async fn prompt_queue_pauses_when_muted_or_ended_and_resumes_only_the_same_session() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    input_history(&config, "ses_1", &[], None);
+    let calls = Arc::new(Mutex::new(vec![]));
+    let herdr = peer(&config.herdr_socket, false, calls.clone()).await;
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    let mut mapping = activity_mapping(agent(), &"bb".repeat(16));
+    mapping
+        .prompt_queue
+        .push(herdr_white_noise_bridge::state::QueuedPrompt {
+            id: "queued".into(),
+            group: "bb".repeat(16),
+            text: "Retained task".into(),
+        });
+    mapping.seen_messages.push("queued".into());
+    bridge.state.mappings.insert(agent().key(), mapping);
+    bridge.save().unwrap();
+    herdr_white_noise_bridge::forwarding::set(&config.state_path, false).unwrap();
+    bridge.reconcile(vec![agent()]).await.unwrap();
+    bridge.reconcile(vec![]).await.unwrap();
+    assert!(
+        !calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call["method"] == "agent.prompt")
+    );
+    assert_eq!(bridge.state.mappings[&agent().key()].prompt_queue.len(), 1);
+    let mut other = agent();
+    other.agent_session.as_mut().unwrap().value = "ses_other".into();
+    input_history(&config, "ses_other", &[], None);
+    herdr_white_noise_bridge::forwarding::set(&config.state_path, true).unwrap();
+    bridge.reconcile(vec![other]).await.unwrap();
+    assert!(
+        !calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call["method"] == "agent.prompt")
+    );
+    bridge.reconcile(vec![agent()]).await.unwrap();
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call["method"] == "agent.prompt")
+            .count(),
+        1
+    );
+    herdr.abort();
+}
+
+#[tokio::test]
+async fn prompt_queue_uncertain_submission_is_never_retried_after_restart_or_a_final() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    input_history(&config, "ses_1", &[], None);
+    let calls = Arc::new(Mutex::new(vec![]));
+    let listener = UnixListener::bind(&config.herdr_socket).unwrap();
+    let received = calls.clone();
+    let herdr = tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = tokio::io::BufReader::new(stream);
+            let req = read_line(&mut reader).await.unwrap();
+            received.lock().unwrap().push(req.clone());
+            if req["method"] == "agent.prompt" {
+                continue;
+            } // Submission may have happened; acknowledgement is lost.
+            let response = json!({"id":req["id"],"result":{"agent":agent()}});
+            reader
+                .get_mut()
+                .write_all(format!("{response}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+    });
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    let mut mapping = activity_mapping(agent(), &"bb".repeat(16));
+    for id in ["first", "second"] {
+        mapping
+            .prompt_queue
+            .push(herdr_white_noise_bridge::state::QueuedPrompt {
+                id: id.into(),
+                group: "bb".repeat(16),
+                text: id.into(),
+            });
+        mapping.seen_messages.push(id.into());
+    }
+    bridge.state.mappings.insert(agent().key(), mapping);
+    bridge.reconcile(vec![agent()]).await.unwrap();
+    assert_eq!(bridge.state.mappings[&agent().key()].prompt_queue.len(), 1);
+    assert!(
+        !bridge.state.mappings[&agent().key()]
+            .queue_flight
+            .as_ref()
+            .unwrap()
+            .confirmed
+    );
+    drop(bridge);
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    input_history(
+        &config,
+        "ses_1",
+        &[("user", "first")],
+        Some(("reply", "Possibly submitted")),
+    );
+    let mut idle = agent();
+    idle.state_change_seq = 2;
+    bridge.reconcile(vec![idle.clone()]).await.unwrap();
+    bridge.reconcile(vec![idle]).await.unwrap();
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call["method"] == "agent.prompt")
+            .count(),
+        1
+    );
+    assert_eq!(bridge.state.mappings[&agent().key()].prompt_queue.len(), 1);
+    let mut clear = inbound(HEX, "clear-waiting-only");
+    clear["message"]["text"] = json!("/clear-queue");
+    bridge.inbound(&clear).await.unwrap();
+    assert!(
+        bridge.state.mappings[&agent().key()]
+            .prompt_queue
+            .is_empty()
+    );
+    assert!(
+        !bridge.state.mappings[&agent().key()]
+            .queue_flight
+            .as_ref()
+            .unwrap()
+            .confirmed
+    );
+    herdr.abort();
+}
+
+#[tokio::test]
+async fn prompt_queue_restores_head_when_submission_is_known_not_to_have_started() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    input_history(&config, "ses_1", &[], None);
+    let listener = UnixListener::bind(&config.herdr_socket).unwrap();
+    let path = config.herdr_socket.clone();
+    let preflight = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut reader = tokio::io::BufReader::new(stream);
+        let req = read_line(&mut reader).await.unwrap();
+        assert_eq!(req["method"], "agent.get");
+        std::fs::remove_file(path).unwrap();
+        let response = json!({"id":req["id"],"result":{"agent":agent()}});
+        reader
+            .get_mut()
+            .write_all(format!("{response}\n").as_bytes())
+            .await
+            .unwrap();
+    });
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    let mut mapping = activity_mapping(agent(), &"bb".repeat(16));
+    mapping
+        .prompt_queue
+        .push(herdr_white_noise_bridge::state::QueuedPrompt {
+            id: "retry-head".into(),
+            group: "bb".repeat(16),
+            text: "Retained task".into(),
+        });
+    mapping.seen_messages.push("retry-head".into());
+    bridge.state.mappings.insert(agent().key(), mapping);
+    bridge.reconcile(vec![agent()]).await.unwrap();
+    preflight.await.unwrap();
+    assert!(bridge.state.mappings[&agent().key()].queue_flight.is_none());
+    assert!(!bridge.state.mappings[&agent().key()].pending_prompt);
+    assert_eq!(bridge.state.mappings[&agent().key()].prompt_queue.len(), 1);
+    drop(bridge);
+    let calls = Arc::new(Mutex::new(vec![]));
+    let herdr = peer(&config.herdr_socket, false, calls.clone()).await;
+    let mut bridge = Bridge::open(config).unwrap();
+    bridge.reconcile(vec![agent()]).await.unwrap();
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call["method"] == "agent.prompt")
+            .count(),
+        1
+    );
+    herdr.abort();
+}
+
+#[tokio::test]
+async fn prompt_queue_limits_and_owner_checks_do_not_allow_commands_or_replays_to_add_tasks() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    input_history(&config, "ses_1", &[], None);
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    let mut working = agent();
+    working.agent_status = "working".into();
+    bridge.state.mappings.insert(
+        working.key(),
+        activity_mapping(working.clone(), &"bb".repeat(16)),
+    );
+    bridge.reconcile(vec![working]).await.unwrap();
+    bridge
+        .inbound(&inbound(&"22".repeat(32), "foreign"))
+        .await
+        .unwrap();
+    for i in 0..18 {
+        let event = inbound(HEX, &format!("waiting-{i}"));
+        bridge.inbound(&event).await.unwrap();
+        bridge.inbound(&event).await.unwrap();
+    }
+    for command in ["/help", "/queue", "/status", "/unmute"] {
+        let mut event = inbound(HEX, command);
+        event["message"]["text"] = json!(command);
+        bridge.inbound(&event).await.unwrap();
+    }
+    assert_eq!(bridge.state.mappings[&agent().key()].prompt_queue.len(), 16);
+    assert!(
+        bridge
+            .state
+            .outbox
+            .iter()
+            .any(|item| item.text.contains("Queue limit reached"))
+    );
+}
+
+#[tokio::test]
+async fn prompt_queue_background_checkpoint_never_starts_a_second_blocking_export() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let release = root.path().join("release");
+    let slow_started = root.path().join("slow-started");
+    let first = root.path().join("first-read");
+    std::fs::write(&config.opencode_bin, format!("#!/bin/sh\nif [ \"$1\" = api ]; then exit 2; fi\nif [ -e {first:?} ]; then touch {slow_started:?}; while [ ! -e {release:?} ]; do sleep 0.01; done; else touch {first:?}; fi\nprintf '%s' '{{\"messages\":[]}}'\n")).unwrap();
+    std::fs::set_permissions(&config.opencode_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let calls = Arc::new(Mutex::new(vec![]));
+    let herdr = peer(&config.herdr_socket, false, calls.clone()).await;
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    let mapping = activity_mapping(agent(), &"bb".repeat(16));
+    bridge.state.mappings.insert(agent().key(), mapping);
+    for _ in 0..100 {
+        bridge.poll_sessions(vec![agent()]).await.unwrap();
+        if bridge.state.mappings[&agent().key()].last_export_at > 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(bridge.state.mappings[&agent().key()].last_export_at > 0);
+    bridge
+        .state
+        .mappings
+        .get_mut(&agent().key())
+        .unwrap()
+        .prompt_queue
+        .push(herdr_white_noise_bridge::state::QueuedPrompt {
+            id: "queued".into(),
+            group: "bb".repeat(16),
+            text: "Next task".into(),
+        });
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        bridge.poll_sessions(vec![agent()]),
+    )
+    .await;
+    if result.is_err() {
+        std::fs::write(&release, "release").unwrap();
+    }
+    assert!(
+        result.is_ok(),
+        "Queue dispatch blocked on a second synchronous transcript export"
+    );
+    for _ in 0..100 {
+        if slow_started.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(slow_started.exists());
+    assert!(
+        !calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call["method"] == "agent.prompt")
+    );
+    // A queued dispatch checkpoint can remain slow while commands and delivery run.
+    let mut help = inbound(HEX, "help-during-slow-queue-read");
+    help["message"]["text"] = json!("/help");
+    tokio::time::timeout(std::time::Duration::from_secs(1), bridge.inbound(&help))
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(1), bridge.flush())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(calls.lock().unwrap().iter().any(|call| {
+        call["text"]
+            .as_str()
+            .is_some_and(|text| text.starts_with("White Noise shortcuts:"))
+    }));
+    std::fs::write(release, "release").unwrap();
+    for _ in 0..100 {
+        bridge.poll_sessions(vec![agent()]).await.unwrap();
+        if calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call["method"] == "agent.prompt")
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call["method"] == "agent.prompt")
+            .count(),
+        1
+    );
+    herdr.abort();
+    mdk.abort();
+}
+
+#[tokio::test]
+async fn prompt_queue_dispatches_with_background_readers_and_no_new_idle_event() {
+    let root = tempfile::tempdir().unwrap();
+    let mut config = config(root.path());
+    config.edit_responses = true;
+    input_history(&config, "ses_1", &[], None);
+    let calls = Arc::new(Mutex::new(vec![]));
+    let herdr = peer(&config.herdr_socket, false, calls.clone()).await;
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    let mut mapping = activity_mapping(agent(), &"bb".repeat(16));
+    for id in ["first", "second"] {
+        mapping
+            .prompt_queue
+            .push(herdr_white_noise_bridge::state::QueuedPrompt {
+                id: id.into(),
+                group: "bb".repeat(16),
+                text: id.into(),
+            });
+        mapping.seen_messages.push(id.into());
+    }
+    bridge.state.mappings.insert(agent().key(), mapping);
+    for _ in 0..100 {
+        bridge.poll_sessions(vec![agent()]).await.unwrap();
+        if calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call["method"] == "agent.prompt")
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call["method"] == "agent.prompt")
+            .count(),
+        1
+    );
+    input_history(
+        &config,
+        "ses_1",
+        &[("user", "first")],
+        Some(("first-final", "First reply")),
+    );
+    for _ in 0..100 {
+        bridge.poll_sessions(vec![agent()]).await.unwrap();
+        if calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call["method"] == "agent.prompt")
+            .count()
+            == 2
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call["method"] == "agent.prompt")
+            .count(),
+        2
+    );
+    herdr.abort();
+}
+
+#[tokio::test]
+async fn prompt_queue_busy_chat_does_not_block_another_chats_queue() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    input_history(&config, "ses_1", &[], None);
+    input_history(&config, "ses_other", &[], None);
+    let mut working = agent();
+    working.agent_status = "working".into();
+    let mut idle = agent();
+    idle.pane_id = "w1:p2".into();
+    idle.terminal_id = "term2".into();
+    idle.agent_session.as_mut().unwrap().value = "ses_other".into();
+    let calls = Arc::new(Mutex::new(vec![]));
+    let herdr = peer_for_agent(&config.herdr_socket, false, calls.clone(), idle.clone()).await;
+    let mut bridge = Bridge::open(config).unwrap();
+    for (agent, group) in [(&working, "bb".repeat(16)), (&idle, "dd".repeat(16))] {
+        let mut mapping = activity_mapping(agent.clone(), &group);
+        mapping
+            .prompt_queue
+            .push(herdr_white_noise_bridge::state::QueuedPrompt {
+                id: agent.pane_id.clone(),
+                group,
+                text: agent.pane_id.clone(),
+            });
+        bridge.state.mappings.insert(agent.key(), mapping);
+    }
+    bridge
+        .reconcile(vec![working.clone(), idle.clone()])
+        .await
+        .unwrap();
+    let prompts: Vec<_> = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|call| call["method"] == "agent.prompt")
+        .cloned()
+        .collect();
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(prompts[0]["params"]["target"], idle.pane_id);
+    assert_eq!(bridge.state.mappings[&working.key()].prompt_queue.len(), 1);
+    herdr.abort();
+}
+
+#[tokio::test]
 async fn background_reads_deliver_a_fast_session_and_accept_input_while_another_is_slow() {
     let root = tempfile::tempdir().unwrap();
     let config = config(root.path());
@@ -1775,7 +2363,7 @@ async fn completion_wakes_keep_uncertain_sessions_active_and_do_not_restart_work
     std::fs::write(
         &config.opencode_bin,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$3\" >> {starts:?}\nprintf '%s' '{{\"messages\":[]}}'\n"
+            "#!/bin/sh\nif [ \"$1\" = api ]; then exit 2; fi\nprintf '%s\\n' \"$3\" >> {starts:?}\nprintf '%s' '{{\"messages\":[]}}'\n"
         ),
     )
     .unwrap();
@@ -2225,8 +2813,21 @@ async fn a_phone_choice_answers_the_blocked_question_instead_of_becoming_a_promp
             .any(|call| { call["text"] == "> blocked Waiting for your decision." })
     );
     let mut answer = inbound(HEX, "choice-1");
+    let mut next_task = inbound(HEX, "task-during-decision");
+    next_task["message"]["text"] = json!("Do the next task after this decision");
+    bridge.inbound(&next_task).await.unwrap();
+    assert_eq!(
+        bridge.state.mappings[&agent().key()].prompt_queue.len(),
+        1,
+        "Ordinary text during a supported decision must queue, not be discarded as an invalid answer"
+    );
     answer["message"]["text"] = json!("1");
     bridge.inbound(&answer).await.unwrap();
+    assert_eq!(
+        bridge.state.mappings[&agent().key()].prompt_queue.len(),
+        1,
+        "The supported decision answer bypasses the queue"
+    );
     bridge.flush().await.unwrap();
     let selected: Vec<_> = calls
         .lock()
@@ -2387,11 +2988,9 @@ async fn only_a_new_authorised_phone_message_wakes_forwarding_for_all_sessions()
     bridge.inbound(&wake).await.unwrap();
     bridge.flush().await.unwrap();
     assert!(
-        calls
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|call| { call["text"] == "> idle herdr session: connected." })
+        calls.lock().unwrap().iter().any(|call| {
+            call["text"] == "> idle herdr session: connected. 0 waiting prompt(s)."
+        })
     );
     assert_eq!(
         serde_json::to_value(&bridge.state).unwrap()["forwarding_enabled"],

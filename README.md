@@ -48,6 +48,8 @@ Send `unmute` (or `/unmute`) by itself in any linked chat to resume forwarding f
 
 Send `/sync` for a one-time catch-up: use one hour before the last confirmed message sent across **all linked White Noise chats** as the shared cutoff, then send unseen messages among each eligible conversation's last three text messages together to its own chat, labelled **You** or **Agent** in conversation order. Messages already confirmed sent or queued by the bridge are skipped, including earlier syncs and normal assistant forwarding. Older context can be included; tool output and unfinished agent replies are excluded. With no confirmed send history, use the past hour. Send `/help` to list commands in the current chat. These two commands do not change mute settings or prompt agents.
 
+Ordinary text prompts sent while an agent is busy join a persistent FIFO queue for that chat. They run one at a time after the previous completed reply is collected. Use `/queue` to inspect the waiting count and `/clear-queue` to cancel waiting prompts; these commands do not unmute or cancel a running task. Queues survive restarts and pause while forwarding is muted, the session is unavailable, or submission is uncertain. Supported decision answers bypass the queue. The queue holds up to 16 text prompts per chat; image and voice handling is unchanged.
+
 Handoff is automatic. Manual controls remain available through **herdr**'s **White Noise forwarding: At desk / Away** action. [Controls and limits →](docs/REFERENCE.md#at-desk--away-forwarding)
 
 ## How it works

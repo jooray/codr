@@ -10,6 +10,20 @@ use std::{
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct QueuedPrompt {
+    pub id: String,
+    pub group: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct QueueFlight {
+    pub before_final: Option<String>,
+    /// False also covers a restart between durable intent and submission acknowledgement.
+    pub confirmed: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Mapping {
     pub group_id_hex: Option<String>,
     #[serde(default)]
@@ -57,6 +71,10 @@ pub struct Mapping {
     pub decision_refresh_pending: bool,
     #[serde(default)]
     pub activity: crate::activity::Activity,
+    #[serde(default)]
+    pub prompt_queue: Vec<QueuedPrompt>,
+    #[serde(default)]
+    pub queue_flight: Option<QueueFlight>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

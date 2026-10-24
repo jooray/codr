@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Persistent FIFO queues for owner text prompts sent while a chat's agent is busy. Queues survive restarts, run independently after completed replies, and pause on mute, disconnection, ended sessions, or uncertain submission. `/queue` inspects the waiting count; `/clear-queue` cancels waiting prompts without unmuting or cancelling in-flight work. Supported decision replies bypass the queue. Each chat accepts up to 16 waiting text prompts of 30000 UTF-8 bytes each.
+
 ### Changed
 
 - `/sync` skips unchanged messages already confirmed sent or queued in that chat, including previous catch-ups and ordinary assistant forwarding. Per-source delivery records survive restarts and are confirmed only after every long-message chunk succeeds. The latest-three limit and shared time cutoff stay unchanged.
