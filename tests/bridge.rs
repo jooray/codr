@@ -306,12 +306,10 @@ async fn shortcut_sync_sends_recent_excerpts_to_their_own_chats_without_unmuting
             .iter()
             .any(|c| c["group_id_hex"] == "ab".repeat(16) || c["group_id_hex"] == "ff".repeat(16))
     );
-    assert!(sent.iter().any(|c| {
-        c["text"]
-            .as_str()
-            .unwrap()
-            .contains("1 history reader(s) unavailable")
-    }));
+    assert!(
+        sent.iter()
+            .any(|c| { c["text"].as_str().unwrap().contains("1 unavailable") })
+    );
     assert!(sent.iter().any(|c| {
         c["text"]
             .as_str()
@@ -319,6 +317,19 @@ async fn shortcut_sync_sends_recent_excerpts_to_their_own_chats_without_unmuting
             .contains("**You:**\nLocal prompt")
     }));
     let count = sent.len();
+    let summary = sent
+        .iter()
+        .find(|call| call["text"].as_str().unwrap().starts_with("Sync:"))
+        .unwrap()["text"]
+        .as_str()
+        .unwrap();
+    assert!(
+        summary.len() <= 100,
+        "Sync status must fit a short phone notification"
+    );
+    assert!(!summary.contains('\n'));
+    assert!(summary.starts_with("Sync: 2 chats queued; 1 unavailable"));
+    assert!(summary.contains("past-hour fallback"));
     drop(bridge);
     let mut reopened = Bridge::open(config).unwrap();
     reopened.inbound(&event).await.unwrap();
@@ -373,7 +384,7 @@ async fn shortcut_sync_sends_last_three_conversation_messages_with_speaker_label
 }
 
 #[tokio::test]
-async fn shortcut_help_describes_three_message_sync_and_its_global_cutoff() {
+async fn shortcut_help_is_a_short_command_list() {
     let root = tempfile::tempdir().unwrap();
     let mut bridge = Bridge::open(config(root.path())).unwrap();
     bridge
@@ -384,10 +395,23 @@ async fn shortcut_help_describes_three_message_sync_and_its_global_cutoff() {
     event["message"]["text"] = json!("/help");
     bridge.inbound(&event).await.unwrap();
     let help = &bridge.state.outbox[0].text;
-    assert!(help.contains("last three"));
-    assert!(help.contains("all linked chats"));
-    assert!(help.contains("one hour before"));
-    assert!(help.contains("Mute settings stay unchanged"));
+    for command in [
+        "/help",
+        "/sync",
+        "/status",
+        "/queue",
+        "/clear-queue",
+        "/unmute",
+        "/answer",
+    ] {
+        assert!(help.contains(command));
+    }
+    assert!(
+        help.len() <= 450,
+        "Help should be a command list, not the reference manual"
+    );
+    assert!(help.lines().count() <= 11);
+    assert!(help.lines().all(|line| line.chars().count() <= 65));
 }
 
 #[tokio::test]
@@ -411,7 +435,15 @@ async fn shortcut_sync_includes_a_recent_user_message_without_an_assistant_reply
         .insert(agent().key(), activity_mapping(agent(), &"bb".repeat(16)));
     let mut event = inbound(HEX, "user-only-sync");
     event["message"]["text"] = json!("/sync");
+    bridge.state.last_confirmed_send_at = Some(now());
     bridge.inbound(&event).await.unwrap();
+    assert!(
+        bridge
+            .state
+            .outbox
+            .iter()
+            .any(|item| item.text == "Sync: 1 chat queued.")
+    );
     assert!(
         bridge
             .state
@@ -482,6 +514,13 @@ async fn shortcut_sync_does_not_resend_confirmed_or_pending_messages_after_resta
         excerpt_count(&bridge.state),
         0,
         "Confirmed messages survive restart"
+    );
+    assert!(
+        bridge
+            .state
+            .outbox
+            .iter()
+            .any(|item| item.text == "Sync: nothing new.")
     );
     data["messages"].as_array_mut().unwrap().push(json!({"info":{"id":"new-user","role":"user","time":{"created":now()*1000}},"parts":[{"type":"text","text":"New question"}]}));
     std::fs::write(&path, data.to_string()).unwrap();

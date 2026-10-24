@@ -1214,16 +1214,24 @@ impl Bridge {
             );
         }
         let response = if sync {
-            let window = if reference.is_some() {
-                "since one hour before the last confirmed message sent across all linked chats"
+            let mut status = if count == 0 {
+                "Sync: nothing new".into()
             } else {
-                "in the past hour (no confirmed send history is available)"
+                format!(
+                    "Sync: {count} {} queued",
+                    if count == 1 { "chat" } else { "chats" }
+                )
             };
-            format!(
-                "Sync: queued up to three new conversation messages, labelled You or Agent, for {count} conversation(s) active {window}, each in its own White Noise chat. Already sent or queued messages are skipped. {unavailable} history reader(s) unavailable. Mute settings are unchanged; no prompt was sent."
-            )
+            if unavailable > 0 {
+                status.push_str(&format!("; {unavailable} unavailable"));
+            }
+            if reference.is_none() {
+                status.push_str(" (past-hour fallback)");
+            }
+            status.push('.');
+            status
         } else {
-            "White Noise shortcuts:\n/help — show this list in this chat.\n/sync — send unseen messages among the last three conversation messages, labelled You or Agent, together in each eligible chat. Messages already confirmed sent or queued by the bridge are skipped, including earlier syncs and normal assistant forwarding. A conversation qualifies if active since one hour before the last confirmed new outgoing message across all linked chats. With no confirmed send history, use the past hour. The excerpt may include older context; tool output and unfinished agent replies are excluded. Mute settings stay unchanged; no agent is prompted.\n/queue — show this chat's waiting prompt count and submission state without changing mute settings.\n/clear-queue — cancel this chat's waiting prompts, not a running or uncertain prompt; mute settings stay unchanged.\n/status — show this session's connection, status, and waiting prompt count; this can resume forwarding globally.\nunmute or /unmute — enable forwarding for all chats. Previously queued tasks can then resume.\n\nOther text prompts the linked agent when idle, or joins this chat's persistent FIFO queue while busy. Up to 16 text prompts of 30000 UTF-8 bytes each can wait. Queue dispatch waits for a completed reply and pauses while muted, disconnected, ended, or submission is uncertain. Local terminal prompts mute all chats.\n\nDecision replies bypass the queue: use a listed number, exact option label, or /answer 2. If a question shows a code, include that code as requested. Other dialogs need the terminal.".into()
+            "White Noise shortcuts:\n/help         Show commands\n/sync         Up to 3 new messages per chat\n/status       Status (resumes forwarding)\n/queue        Queue status\n/clear-queue  Cancel waiting tasks\n/unmute       Resume all chats\n\nText queues while busy.\nDecisions: number, label, or /answer [code] choice.".into()
         };
         self.state
             .enqueue_manual(group, &response, &format!("command:{request}"));
