@@ -63,6 +63,9 @@ jobs:
   checks-macos:
     if: ${{ !inputs.linux_preview }}
     runs-on: macos-15
+    env:
+      # /var is a symlink; launch fixtures must use a physical, short temp root.
+      TMPDIR: /private/tmp
     steps:
       - uses: actions/checkout@v4
         with:
