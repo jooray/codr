@@ -155,6 +155,135 @@ fn export_script(path: &std::path::Path, text: &str, id: &str) {
 }
 
 #[tokio::test]
+async fn control_reply_deadline_is_durable_without_delaying_native_phone_input() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let mut observed = agent();
+    observed.agent_status = "working".into();
+    let calls = Arc::new(Mutex::new(vec![]));
+    let server = peer_for_agent(&config.herdr_socket, false, calls.clone(), observed.clone()).await;
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge.herdr_available = true;
+    bridge.agents.insert(observed.key(), observed.clone());
+    bridge.state.mappings.insert(
+        observed.key(),
+        activity_mapping(observed.clone(), &"bb".repeat(16)),
+    );
+    let at = now() + 3;
+    let mut help = inbound(HEX, "ordered-help");
+    help["message"]["text"] = json!("/help");
+    help["message"]["recorded_at"] = json!(at);
+    bridge.inbound(&help).await.unwrap();
+    let saved = BridgeState::load(&config.state_path).unwrap();
+    assert_eq!(
+        serde_json::to_value(&saved.mappings[&observed.key()]).unwrap()["manual_reply_after"],
+        json!(at + 1)
+    );
+    // A future outgoing deadline must never become a wait before native agent input.
+    let mut mapping = serde_json::to_value(&bridge.state.mappings[&observed.key()]).unwrap();
+    mapping["manual_reply_after"] = json!(now() + 3600);
+    bridge
+        .state
+        .mappings
+        .insert(observed.key(), serde_json::from_value(mapping).unwrap());
+    let mut text = inbound(HEX, "prompt-with-reply-pending");
+    text["message"]["recorded_at"] = json!(at);
+    tokio::time::timeout(std::time::Duration::from_secs(10), bridge.inbound(&text))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call["method"] == "agent.prompt")
+            .count(),
+        1
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn delayed_control_replies_survive_restart_without_blocking_other_chats() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let observed = agent();
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    let mut mapping =
+        serde_json::to_value(activity_mapping(observed.clone(), &"bb".repeat(16))).unwrap();
+    mapping["manual_reply_after"] = json!(now() + 3600);
+    bridge
+        .state
+        .mappings
+        .insert(observed.key(), serde_json::from_value(mapping).unwrap());
+    let group = "bb".repeat(16);
+    let other = "cc".repeat(16);
+    bridge
+        .state
+        .enqueue_manual(&group, "Delayed control reply", "ordered-control");
+    bridge
+        .state
+        .enqueue_manual(&other, "Other chat reply", "other-control");
+    bridge.save().unwrap();
+    drop(bridge);
+    let calls = Arc::new(Mutex::new(vec![]));
+    let server = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge.flush().await.unwrap();
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert_eq!(calls.lock().unwrap()[0]["group_id_hex"], other);
+    assert_eq!(bridge.state.outbox.len(), 1);
+    assert_eq!(bridge.state.outbox[0].id, "ordered-control:0");
+    let mut mapping = serde_json::to_value(&bridge.state.mappings[&observed.key()]).unwrap();
+    mapping["manual_reply_after"] = json!(now());
+    bridge
+        .state
+        .mappings
+        .insert(observed.key(), serde_json::from_value(mapping).unwrap());
+    bridge.save().unwrap();
+    bridge.flush().await.unwrap();
+    assert_eq!(calls.lock().unwrap().len(), 2);
+    assert_eq!(calls.lock().unwrap()[1]["group_id_hex"], group);
+    assert!(bridge.state.outbox.is_empty());
+    drop(bridge);
+    Bridge::open(config).unwrap().flush().await.unwrap();
+    assert_eq!(calls.lock().unwrap().len(), 2);
+    server.abort();
+}
+
+#[tokio::test]
+async fn control_reply_deadlines_ignore_foreign_replayed_and_implausibly_future_input() {
+    let root = tempfile::tempdir().unwrap();
+    let mut bridge = Bridge::open(config(root.path())).unwrap();
+    let observed = agent();
+    bridge.state.mappings.insert(
+        observed.key(),
+        activity_mapping(observed.clone(), &"bb".repeat(16)),
+    );
+    let mut help = inbound(&"22".repeat(32), "foreign-control");
+    help["message"]["text"] = json!("/help");
+    help["message"]["recorded_at"] = json!(now() + 3);
+    bridge.inbound(&help).await.unwrap();
+    assert_eq!(serde_json::to_value(&bridge.state.mappings[&observed.key()]).unwrap()["manual_reply_after"].as_u64().unwrap_or(0), 0);
+    help = inbound(HEX, "future-control");
+    help["message"]["text"] = json!("/help");
+    bridge.inbound(&help).await.unwrap();
+    assert_eq!(serde_json::to_value(&bridge.state.mappings[&observed.key()]).unwrap()["manual_reply_after"].as_u64().unwrap_or(0), 0);
+    let at = now() + 3;
+    help = inbound(HEX, "valid-control");
+    help["message"]["text"] = json!("/help");
+    help["message"]["recorded_at"] = json!(at);
+    bridge.inbound(&help).await.unwrap();
+    help["message"]["recorded_at"] = json!(now() + 5);
+    bridge.inbound(&help).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(&bridge.state.mappings[&observed.key()]).unwrap()["manual_reply_after"],
+        json!(at + 1)
+    );
+}
+
+#[tokio::test]
 async fn phone_followups_are_submitted_while_working_without_interrupting_or_closing_the_response()
 {
     let root = tempfile::tempdir().unwrap();

@@ -334,6 +334,14 @@ impl Bridge {
         outbox.sort_by_key(|item| (item.working_notice, !item.manual, item.response.is_some()));
         for item in outbox {
             self.refresh_forwarding()?;
+            if item.manual
+                && self.state.mappings.values().any(|mapping| {
+                    mapping.group_id_hex.as_deref() == Some(item.group.as_str())
+                        && now() < mapping.manual_reply_after
+                })
+            {
+                continue;
+            }
             if !item.manual && (!self.state.forwarding_enabled || self.activity_unresolved()) {
                 continue;
             }
@@ -1534,6 +1542,15 @@ impl Bridge {
                 .any(|seen| seen == id)
         {
             return Ok(());
+        }
+        // Whole-second transport timestamps need a later second, not a same-second tie.
+        // Bound clock skew so a bad sender timestamp cannot stall control replies.
+        if let Some(at) = msg["recorded_at"]
+            .as_u64()
+            .filter(|at| *at <= now().saturating_add(5))
+        {
+            let mapping = self.state.mappings.get_mut(&key).unwrap();
+            mapping.manual_reply_after = mapping.manual_reply_after.max(at.saturating_add(1));
         }
         if let Some(pending) = self.state.media_pending.iter_mut().find(|pending| {
             !prepared

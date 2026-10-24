@@ -62,6 +62,9 @@ pub struct Mapping {
     pub seen_messages: Vec<String>,
     pub cursor: Option<serde_json::Value>,
     pub joined_at: u64,
+    /// Earliest host second for control replies after an authorised phone input.
+    #[serde(default)]
+    pub manual_reply_after: u64,
     #[serde(default)]
     pub agent_record: Option<crate::herdr::Agent>,
     #[serde(default)]

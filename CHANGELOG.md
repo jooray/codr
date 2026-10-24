@@ -34,6 +34,7 @@
 
 ### Fixed
 
+- Keep control replies after owner inputs across whole-second timestamp ties and small clock differences. Persist the per-chat send deadline across restarts. Do not delay native agent input or replies in other chats.
 - Keep stable executable paths across Homebrew upgrades and report missing OpenCode executables without exposing transcript data.
 - Preserve optional OpenCode support for Claude-only and Codex-only installations, including repeat setup and check mode. Bare commands retain PATH lookup.
 - Validate replacement session readers before saving an OpenCode repair. Restore the old configuration after a failed worker restart so setup can retry the repair.

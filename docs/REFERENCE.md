@@ -153,6 +153,8 @@ Send these as standalone text from the configured owner's account in a linked ch
 | `/cancel` | Interrupt the current task in this chat through native herdr control, keeping history and accepted deliveries. Does not change sync mode. |
 | `unmute` or `/unmute` | Clear a forced mode and resume automatic sync for all chats without prompting an agent. |
 
+Control replies wait until the host clock passes the latest owner input's whole-second timestamp in that chat. This avoids timestamp ties and small clock differences that can place a reply above its request. The deadline survives restarts. Other chats and native agent input do not wait for it. Timestamps more than five seconds ahead do not extend the deadline, so an incorrect sender clock cannot hold control replies indefinitely. Larger clock differences still require clock correction; codr never changes device clocks or rewrites message timestamps.
+
 `/help` and `/recent` do not prompt agents, answer questions, create groups, or change sync mode. They work while muted or **herdr** is disconnected. Recently ended mapped conversations can participate in catch-up. The command chat receives a count of queued conversations and unavailable readers; a queued send does not prove phone receipt. Retrying the same inbound event does not resend the catch-up. A new `/recent` request skips unchanged source messages already confirmed sent or queued by the bridge, including previous catch-ups and ordinary assistant forwarding.
 
 The cutoff is one hour before the `/recent` request and is fixed for the whole batch. For example, `/recent` at 16:00 selects chats active since 15:00. The last confirmed outgoing-message clock is retained for delivery accounting, but no longer extends this activity window.
