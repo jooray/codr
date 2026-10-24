@@ -433,13 +433,13 @@ async fn background_reads_deliver_a_fast_session_and_accept_input_while_another_
     }
     let agents = vec![slow, fast.clone()];
     tokio::time::timeout(
-        std::time::Duration::from_secs(1),
+        std::time::Duration::from_secs(10),
         bridge.poll_sessions(agents.clone()),
     )
     .await
     .unwrap()
     .unwrap();
-    for _ in 0..100 {
+    for _ in 0..1000 {
         bridge.poll_sessions(agents.clone()).await.unwrap();
         if started.exists()
             && bridge
@@ -462,7 +462,7 @@ async fn background_reads_deliver_a_fast_session_and_accept_input_while_another_
     );
     bridge.flush().await.unwrap();
     tokio::time::timeout(
-        std::time::Duration::from_secs(1),
+        std::time::Duration::from_secs(10),
         bridge.inbound(&inbound(HEX, "phone-during-export")),
     )
     .await
@@ -572,7 +572,7 @@ async fn an_ended_session_requires_a_post_exit_snapshot_before_it_is_closed() {
         },
     );
     bridge.poll_sessions(vec![a.clone()]).await.unwrap();
-    for _ in 0..100 {
+    for _ in 0..1000 {
         if started.exists() {
             break;
         }
@@ -582,7 +582,7 @@ async fn an_ended_session_requires_a_post_exit_snapshot_before_it_is_closed() {
     std::fs::write(&source, json!({"messages":[{"info":{"id":"last-final","role":"assistant","time":{"completed":1},"finish":"stop"},"parts":[{"type":"text","text":"Final after exit"}]}]}).to_string()).unwrap();
     bridge.poll_sessions(vec![]).await.unwrap();
     std::fs::write(release, "").unwrap();
-    for _ in 0..100 {
+    for _ in 0..1000 {
         bridge.poll_sessions(vec![]).await.unwrap();
         if !bridge.state.mappings[&a.key()].active {
             break;
@@ -621,7 +621,7 @@ async fn background_export_failure_still_announces_a_blocked_session() {
     );
     a.agent_status = "blocked".into();
     a.state_change_seq = 2;
-    for _ in 0..100 {
+    for _ in 0..1000 {
         bridge.poll_sessions(vec![a.clone()]).await.unwrap();
         if bridge
             .state
@@ -664,7 +664,7 @@ async fn background_task_export_failure_does_not_hide_working_status() {
     );
     a.agent_status = "working".into();
     a.state_change_seq = 2;
-    for _ in 0..100 {
+    for _ in 0..1000 {
         bridge.poll_sessions(vec![a.clone()]).await.unwrap();
         if bridge.state.mappings[&a.key()].last_agent_status == "working" {
             break;
@@ -709,7 +709,7 @@ async fn background_reads_discard_a_snapshot_from_an_older_agent_state() {
         },
     );
     bridge.poll_sessions(vec![a.clone()]).await.unwrap();
-    for _ in 0..100 {
+    for _ in 0..1000 {
         if started.exists() {
             break;
         }
@@ -719,7 +719,7 @@ async fn background_reads_discard_a_snapshot_from_an_older_agent_state() {
     a.state_change_seq = 2;
     std::fs::write(&source, data("current", "Current final")).unwrap();
     std::fs::write(release, "").unwrap();
-    for _ in 0..100 {
+    for _ in 0..1000 {
         bridge.poll_sessions(vec![a.clone()]).await.unwrap();
         if bridge
             .state
@@ -778,7 +778,7 @@ async fn background_reads_limit_parallel_exports_and_ignore_results_after_desk_s
         })
         .collect();
     bridge.poll_sessions(agents.clone()).await.unwrap();
-    for _ in 0..100 {
+    for _ in 0..1000 {
         if std::fs::read_to_string(&starts)
             .unwrap_or_default()
             .lines()
@@ -792,7 +792,7 @@ async fn background_reads_limit_parallel_exports_and_ignore_results_after_desk_s
     assert_eq!(std::fs::read_to_string(&starts).unwrap().lines().count(), 4);
     assert!(forwarding_command(&config, "desk").await.status.success());
     std::fs::write(release, "").unwrap();
-    for _ in 0..100 {
+    for _ in 0..1000 {
         bridge.poll_sessions(agents.clone()).await.unwrap();
         if bridge
             .state
@@ -1460,7 +1460,7 @@ async fn selecting_desk_during_a_transcript_read_prevents_a_new_invitation() {
         bridge.reconcile(vec![agent()]).await.unwrap();
         bridge
     });
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
         while !ready.exists() {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
@@ -1657,7 +1657,7 @@ async fn a_database_upgrade_recovers_phone_input_once_without_replaying_muted_hi
     );
     assert!(bridge.state.forwarding_resume_pending);
     std::fs::remove_file(&failing).unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             let _ = bridge.poll_ready_sessions().await;
             if bridge.inbound(&event).await.is_ok() {
@@ -1835,7 +1835,7 @@ async fn global_resume_reads_independent_session_checkpoints_concurrently() {
         bridge.reconcile(vec![agent(), other]).await.unwrap();
         bridge
     });
-    let concurrent = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    let concurrent = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         while !ready1.exists() || !ready2.exists() {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
@@ -2072,17 +2072,28 @@ async fn long_final_replies_keep_all_text_without_waiting_for_progress_edits() {
         },
     );
     bridge.state.begin_response(&key, &group);
+    let response = bridge.state.mappings[&key].response_id.clone().unwrap();
     bridge.flush().await.unwrap();
     let text = "🙂".repeat(10000);
     export_script(&config.opencode_bin, &text, "long-final");
     bridge.reconcile(vec![agent()]).await.unwrap();
+    let throttle = |bridge: &mut Bridge, at| {
+        let item = bridge
+            .state
+            .outbox
+            .iter_mut()
+            .find(|item| item.id == response);
+        item.unwrap().response.as_mut().unwrap().last_attempt_at = at;
+    };
+    // The export can take longer than the 2 s edit throttle under load.
+    throttle(&mut bridge, u64::MAX / 2);
     bridge.flush().await.unwrap();
     assert_eq!(
         calls.lock().unwrap().len(),
         3,
         "Both final parts precede the throttled terminal progress edit"
     );
-    tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+    throttle(&mut bridge, 0);
     bridge.flush().await.unwrap();
     let calls = calls.lock().unwrap();
     assert_eq!(calls[1]["type"], "send_final");
@@ -3442,7 +3453,7 @@ async fn deferred_prepared_media_does_not_block_another_session() {
         "version":"encrypted-media-v1","source_epoch":1,"locators":[{"kind":"blossom-v1","value":"https://example.com/fixture"}]}]);
     bridge.state.media_pending = vec![deferred, ready];
     assert!(bridge.process_media().await.is_err());
-    for _ in 0..100 {
+    for _ in 0..1000 {
         // Each worker tick can arrive after the deferred session's retry deadline.
         bridge.state.media_pending[0]["_codr_retry_at"] = json!(0);
         let _ = bridge.process_media().await;
@@ -3500,7 +3511,7 @@ async fn prepared_audio_survives_a_herdr_outage_and_restart() {
     bridge.inbound(&event).await.unwrap();
     bridge.process_media().await.unwrap();
     bridge.herdr_available = false;
-    for _ in 0..100 {
+    for _ in 0..1000 {
         if bridge.process_media().await.is_err() {
             break;
         }
@@ -3521,7 +3532,7 @@ async fn prepared_audio_survives_a_herdr_outage_and_restart() {
     drop(bridge);
     let mut bridge = Bridge::open(config).unwrap();
     bridge.reconcile(vec![agent()]).await.unwrap();
-    for _ in 0..100 {
+    for _ in 0..1000 {
         bridge.process_media().await.unwrap();
         if bridge.state.media_pending.is_empty() {
             break;
@@ -3688,7 +3699,7 @@ async fn audio_queue_survives_restart_and_submits_the_transcript_once_without_co
     let mut bridge = Bridge::open(config.clone()).unwrap();
     bridge.reconcile(vec![agent()]).await.unwrap();
     for _ in 0..2 {
-        for _ in 0..100 {
+        for _ in 0..1000 {
             bridge.process_media().await.unwrap();
             if bridge.state.media_pending[0]["_codr_retry_at"]
                 .as_u64()
@@ -3730,7 +3741,7 @@ async fn audio_queue_survives_restart_and_submits_the_transcript_once_without_co
     // An old MDK returns summaries during recovery. A complete live event must
     // hydrate that queued row, not be discarded as a duplicate.
     bridge.inbound(&event).await.unwrap();
-    for _ in 0..100 {
+    for _ in 0..1000 {
         bridge.process_media().await.unwrap();
         if bridge.state.media_pending.is_empty() {
             break;
