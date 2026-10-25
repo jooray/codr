@@ -8132,18 +8132,7 @@ async fn control_chat_is_created_once_and_answers_without_an_agent() {
             .any(|item| item.text.contains("mapped session"))
     );
 
-    let mut new = inbound(HEX, "control-3");
-    new["message"]["text"] = json!("/new");
-    bridge.inbound(&new).await.unwrap();
-    assert!(
-        bridge
-            .state
-            .outbox
-            .last()
-            .is_some_and(|item| item.text.contains("workspace"))
-    );
-
-    let mut agent = inbound(HEX, "control-4");
+    let mut agent = inbound(HEX, "control-3");
     agent["message"]["text"] = json!("/agent");
     bridge.inbound(&agent).await.unwrap();
     assert!(
@@ -8152,6 +8141,17 @@ async fn control_chat_is_created_once_and_answers_without_an_agent() {
             .outbox
             .last()
             .is_some_and(|item| item.text.contains("not mapped to a project"))
+    );
+
+    let mut new = inbound(HEX, "control-4");
+    new["message"]["text"] = json!("/new");
+    bridge.inbound(&new).await.unwrap();
+    assert!(
+        bridge
+            .state
+            .outbox
+            .last()
+            .is_some_and(|item| item.text.contains("workspace"))
     );
 
     bridge.reconcile(vec![]).await.unwrap();
