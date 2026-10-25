@@ -541,7 +541,9 @@ async fn location_steps_are_tidy_and_new_workspace_is_the_last_numbered_choice()
             .is_none()
     );
     assert!(last(&bridge).starts_with("[2/4] Folder name:"));
-    assert!(last(&bridge).contains("Reply with your chosen folder name.\n\n**0. Cancel**"));
+    assert!(last(&bridge).contains(
+        "Reply with your chosen folder name, or ls to list existing folders.\n\n**0. Cancel**"
+    ));
     bridge
         .inbound(&event("folder", "side-project"))
         .await
