@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.8.0] - Unreleased
+## [0.8.0] - 2026-10-25
 
 Phone-driven worker updates, immediate prepared-media delivery, and more reliable
 project setup and progress completion. These changes are not in published 0.7.0.
