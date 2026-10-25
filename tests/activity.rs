@@ -125,3 +125,32 @@ fn phone_echo_allows_line_endings_but_not_changes_inside_the_message() {
         assert_eq!(state.observe(&[input("echo", echo)]), local, "{echo:?}");
     }
 }
+
+#[test]
+fn matching_duplicate_phone_sends_are_attributed_one_to_one() {
+    let mut state = Activity::default();
+    state.start_phone("one", "hello", &[]);
+    state.confirm_phone("one");
+    state.start_phone("two", "hello", &[]);
+    state.confirm_phone("two");
+    assert!(!state.observe(&[input("first", "hello"), input("second", "hello")]));
+    assert!(state.observe(&[
+        input("first", "hello"),
+        input("second", "hello"),
+        input("local", "hello"),
+    ]));
+}
+
+#[test]
+fn duplicate_phone_text_does_not_poison_other_phone_attribution() {
+    let mut state = Activity::default();
+    for (receipt, text) in [("status", "status?"), ("one", "hello"), ("two", "hello")] {
+        state.start_phone(receipt, text, &[]);
+        state.confirm_phone(receipt);
+    }
+    assert!(!state.observe(&[
+        input("status-echo", "status?"),
+        input("first", "hello"),
+        input("second", "hello"),
+    ]));
+}
