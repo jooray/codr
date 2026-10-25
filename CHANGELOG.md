@@ -20,6 +20,7 @@ project setup and progress completion. These changes are not in published 0.7.0.
 
 ### Added
 
+- Add `scripts/transcribe_gemini.py`, an optional voice transcriber that uses the Gemini API. It sends the voice audio to Google. The API key is read from `~/.config/codr/gemini-api-key`. Local Phonon remains the default.
 - Answer supported OpenCode V2 questions with custom text directly from the phone, such as a version number, or `/answer TEXT`. Bind the reply to the fresh native form and session, retain question-code and duplicate guards, and never turn it into a queued prompt or arbitrary terminal input. Legacy, multi-select and multi-question custom replies remain terminal-only.
 - Owner-only `/update` discovers stable releases from the pinned ngit maintainer, asks for a chat-bound confirmation, and verifies independent Blossom downloads before replacing only the managed bridge worker. Updates retain state and accepted work, reject connector/storage-cohort changes, and restore the previous executable after failed startup without rewinding routing state.
 
