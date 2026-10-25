@@ -1723,7 +1723,7 @@ async fn shortcut_help_is_a_short_command_list() {
     }
     assert_eq!(
         help,
-        "# codr commands\n\n### General\n\n**`/help`**  \nShow commands\n\n**`/status`**  \nConnection, state, queue and unmute\n\n**`/recent`**  \nGet newest 3 of all active <1h\n\n### Projects & Agents\n\n**`/new`**  \nSet up a project\n\n**`/agent`**  \nChoose agent (separate chat)\n\n**`/model`**  \nChoose model\n\n### Tasks\n\n**`/queue`**  \nView pending deliveries\n\n**`/cancel`**  \nInterrupt the current task\n\n### Sync\n\n**`/unmute`**  \nUnmute all chats and return to automatic sync\n\n**`/sync auto|on|off`**  \nSet persistent sync mode\nCurrent sync mode: Automatic"
+        "# codr commands\n\n### General\n\n**`/help`**  \nShow commands\n\n**`/status`**  \nConnection, state, queue and unmute\n\n**`/recent`**  \nGet newest 3 of all active <1h\n\n### Projects & Agents\n\n**`/new`**  \nSet up a project\n\n**`/agent`**  \nChoose agent (separate chat)\n\n**`/model`**  \nChoose model\n\n### Tasks\n\n**`/queue`**  \nView pending deliveries\n\n**`/cancel`**  \nInterrupt the current task\n\n### Sync\n\n**`/unmute`**  \nUnmute all chats and return to automatic sync\n\n**`/sync auto|on|off`**  \nSet persistent sync mode\nCurrent sync mode: Automatic\n\nCommands accept unambiguous prefixes (/n, /st, /sy). In the control chat the leading / is optional."
     );
 }
 
@@ -2647,6 +2647,50 @@ async fn unmute_requires_complete_text_without_attachments() {
 }
 
 /// Only typed commands are controls; a prepared voice transcript remains agent input.
+#[tokio::test]
+async fn command_prefixes_preserve_prepared_and_accepted_payloads() {
+    for prepared in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path());
+        input_history(&config, "ses_1", &[], None);
+        let calls = Arc::new(Mutex::new(vec![]));
+        let herdr = peer(&config.herdr_socket, false, calls.clone()).await;
+        let mut bridge = Bridge::open(config).unwrap();
+        let observed = agent();
+        bridge.state.mappings.insert(
+            observed.key(),
+            activity_mapping(observed.clone(), &"bb".repeat(16)),
+        );
+        bridge.reconcile(vec![observed.clone()]).await.unwrap();
+        let text = if prepared { "/st" } else { "/h" };
+        if prepared {
+            let mut event = inbound(HEX, "prepared-prefix");
+            event["message"]["text"] = json!("");
+            event["message"]["media"] = json!([{"media_type":"audio/ogg"}]);
+            event["_codr_prepared_text"] = json!(text);
+            bridge.state.media_pending.push(event);
+            bridge.process_media().await.unwrap();
+        } else {
+            accept_legacy_text(&mut bridge, &observed.key(), "accepted-prefix", text);
+            bridge.reconcile(vec![observed.clone()]).await.unwrap();
+        }
+        assert!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|call| { call["method"] == "agent.prompt" && call["params"]["text"] == text }),
+            "prepared={prepared}: accepted text must reach the agent unchanged"
+        );
+        assert!(
+            bridge.state.mappings[&observed.key()]
+                .prompt_queue
+                .is_empty()
+        );
+        herdr.abort();
+    }
+}
+
 #[tokio::test]
 async fn unmute_in_a_voice_transcript_is_not_a_bridge_command() {
     let root = tempfile::tempdir().unwrap();
@@ -8122,7 +8166,7 @@ async fn control_chat_is_created_once_and_answers_without_an_agent() {
     );
 
     let mut status = inbound(HEX, "control-2");
-    status["message"]["text"] = json!("/status");
+    status["message"]["text"] = json!("status");
     bridge.inbound(&status).await.unwrap();
     assert!(
         bridge
@@ -8132,7 +8176,18 @@ async fn control_chat_is_created_once_and_answers_without_an_agent() {
             .any(|item| item.text.contains("mapped session"))
     );
 
-    let mut agent = inbound(HEX, "control-3");
+    let mut ambiguous = inbound(HEX, "control-3");
+    ambiguous["message"]["text"] = json!("/s");
+    bridge.inbound(&ambiguous).await.unwrap();
+    assert!(
+        bridge
+            .state
+            .outbox
+            .last()
+            .is_some_and(|item| item.text.contains("Ambiguous command"))
+    );
+
+    let mut agent = inbound(HEX, "control-4");
     agent["message"]["text"] = json!("/agent");
     bridge.inbound(&agent).await.unwrap();
     assert!(
@@ -8143,9 +8198,40 @@ async fn control_chat_is_created_once_and_answers_without_an_agent() {
             .is_some_and(|item| item.text.contains("not mapped to a project"))
     );
 
-    let mut new = inbound(HEX, "control-4");
-    new["message"]["text"] = json!("/new");
+    let mut new = inbound(HEX, "control-5");
+    new["message"]["text"] = json!("new");
     bridge.inbound(&new).await.unwrap();
+    assert!(
+        bridge
+            .state
+            .outbox
+            .last()
+            .is_some_and(|item| item.text.contains("workspace"))
+    );
+
+    let mut menu = inbound(HEX, "control-6");
+    menu["message"]["text"] = json!("n");
+    bridge.inbound(&menu).await.unwrap();
+    assert!(
+        bridge
+            .state
+            .outbox
+            .last()
+            .is_some_and(|item| item.text.contains("setup menu is open"))
+    );
+
+    bridge
+        .state
+        .mappings
+        .get_mut("control")
+        .unwrap()
+        .launch_draft
+        .as_mut()
+        .unwrap()
+        .expires_at = 0;
+    let mut fresh = inbound(HEX, "control-7");
+    fresh["message"]["text"] = json!("new");
+    bridge.inbound(&fresh).await.unwrap();
     assert!(
         bridge
             .state

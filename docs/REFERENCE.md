@@ -70,7 +70,7 @@ Selected models and installed agents are checked again before a launch. The plug
 
 Set `control_chat = true` in the bridge configuration and restart the worker. On the next start, the bridge creates one owner-only White Noise group, invites the configured phone, and posts a short welcome. It is not mapped to an agent session; it exists so `/new` does not have to be sent inside a session chat.
 
-The control chat accepts `/new`, `/help`, `/status`, `/recent`, `/queue`, `/sync auto|on|off`, and `/unmute`. `/status` reports the mapped-session count and the current sync mode. Plain text gets a short instruction instead of prompting an agent. `/agent`, `/model`, and `/cancel` describe the currently mapped session, so they are refused there; use `/new` to start a project, then continue in the new chat.
+The control chat accepts `/new`, `/help`, `/status`, `/recent`, `/queue`, `/sync auto|on|off`, and `/unmute`. The leading `/` is optional there, and unambiguous prefixes work (`new`, `n`, `st`, `sy`); ambiguous words list the candidates instead of guessing. `/status` reports the mapped-session count and the current sync mode. Plain text gets a short instruction instead of prompting an agent. `/agent`, `/model`, and `/cancel` describe the currently mapped session, so they are refused there; use `/new` to start a project, then continue in the new chat.
 
 Creation uses the same non-retry rule as session groups: if the group-create response is uncertain, the bridge records `creating` and reports that inspection is needed. `herdr-white-noise-bridge status` prints the control entry with `"control": true` so `resolve-create control --group GROUP_HEX` can be used after inspecting the phone. The control group keeps its fixed name and is skipped by automatic and manual renames.
 
@@ -160,6 +160,8 @@ Send these as standalone text from the configured owner's account in a linked ch
 | `/queue` | Show this chat's waiting prompt count and in-flight or uncertain submission state without changing mute settings. |
 | `/cancel` | Interrupt the current task in this chat through native herdr control, keeping history and accepted deliveries. Does not change sync mode. |
 | `unmute` or `/unmute` | Clear a forced mode and resume automatic sync for all chats without prompting an agent. |
+
+Commands accept **unambiguous prefixes**: `/n`, `/ne`, `/st`, `/sy`, `/q`, `/c`, `/h`, `/u`, `/m`, `/ag`, `/al`, `/an`, `/rec`, `/rej`. Ambiguous prefixes (`/s`, `/a`, `/r`) are listed in the control chat and left untouched in session chats, where they reach the agent. In the control chat the leading `/` is optional (`new`, `n`, `status`); bare words remain normal prompts in session chats and are not treated as commands while a launch menu is open.
 
 Control replies wait until the host clock passes the latest owner input's whole-second timestamp in that chat. This avoids timestamp ties and small clock differences that can place a reply above its request. The deadline survives restarts. Other chats and native agent input do not wait for it. Timestamps more than five seconds ahead do not extend the deadline, so an incorrect sender clock cannot hold control replies indefinitely. Larger clock differences still require clock correction; codr never changes device clocks or rewrites message timestamps.
 

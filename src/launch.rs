@@ -184,8 +184,9 @@ pub fn proposal(text: &str, root: &Path, home: &Path, timestamp: u64) -> Result<
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_')),
         "Use a workspace name of 1-48 letters, digits, '-' or '_'."
     );
+    let kind = args[3].to_ascii_lowercase();
     ensure!(
-        matches!(args[3], "opencode" | "codex" | "claude"),
+        matches!(kind.as_str(), "opencode" | "codex" | "claude"),
         "Choose opencode, codex, or claude. Custom commands and arguments are not allowed."
     );
     let path = if let Some(relative) = args[2].strip_prefix("~/") {
@@ -202,7 +203,7 @@ pub fn proposal(text: &str, root: &Path, home: &Path, timestamp: u64) -> Result<
         label: label.into(),
         directory: path,
         root: root.into(),
-        kind: args[3].into(),
+        kind,
         model: None,
         source_agent: None,
         native_session: None,
@@ -900,6 +901,8 @@ mod model_argument_tests {
             });
             assert_eq!(request.agent_args(), vec!["--model", "chosen-model"]);
         }
+        let upper = super::proposal("/new project project OPENCODE", &root, &root, 0).unwrap();
+        assert_eq!(upper.kind, "opencode");
         let mut request =
             super::proposal("/new project project opencode", &root, &root, 0).unwrap();
         request.native_session = Some("ses_chosen".into());
