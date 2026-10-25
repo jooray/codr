@@ -67,6 +67,9 @@ mod tests {
         assert_eq!(text("/c", false, false), "/cancel");
         assert_eq!(text("/h", false, false), "/help");
         assert_eq!(text("/NEW", false, false), "/new");
+        assert_eq!(text("/N", false, false), "/new");
+        assert_eq!(text("/StAtUs", false, false), "/status");
+        assert_eq!(text("NeW", true, false), "/new");
     }
 
     #[test]

@@ -8165,6 +8165,37 @@ async fn control_chat_is_created_once_and_answers_without_an_agent() {
             .is_some_and(|item| item.text.contains("workspace"))
     );
 
+    let mut menu = inbound(HEX, "control-6");
+    menu["message"]["text"] = json!("n");
+    bridge.inbound(&menu).await.unwrap();
+    assert!(
+        bridge
+            .state
+            .outbox
+            .last()
+            .is_some_and(|item| item.text.contains("setup menu is open"))
+    );
+
+    bridge
+        .state
+        .mappings
+        .get_mut("control")
+        .unwrap()
+        .launch_draft
+        .as_mut()
+        .unwrap()
+        .expires_at = 0;
+    let mut fresh = inbound(HEX, "control-7");
+    fresh["message"]["text"] = json!("new");
+    bridge.inbound(&fresh).await.unwrap();
+    assert!(
+        bridge
+            .state
+            .outbox
+            .last()
+            .is_some_and(|item| item.text.contains("workspace"))
+    );
+
     bridge.reconcile(vec![]).await.unwrap();
     assert!(bridge.state.mappings["control"].active);
     assert_eq!(
