@@ -116,7 +116,8 @@ impl Bridge {
                     mapping.task_revision = None;
                     // The control chat has no transcript and never needs a checkpoint.
                     mapping.forwarding_baseline_pending = !mapping.control;
-                    mapping.blocked_context_seq = None;
+                    // Keep the announced blocked context across mute/wake cycles;
+                    // an unchanged block must not notify the phone again.
                     mapping.decision_checked_at = 0;
                     mapping.decision_refresh_pending = true;
                     if let Some(decision) = mapping.decision.as_mut() {
