@@ -1268,6 +1268,33 @@ async fn host_with_workspaces(
             let mut stream = tokio::io::BufReader::new(stream);
             let request = read_line(&mut stream).await.unwrap();
             captured.lock().unwrap().push(request.clone());
+            if request["method"] == "agent.start" {
+                let flags = workspaces.lock().unwrap().clone();
+                let busy = flags
+                    .iter()
+                    .find_map(|w| w["agent_start_busy"].as_u64())
+                    .unwrap_or(0);
+                let starts = captured
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|c| c["method"] == "agent.start")
+                    .count() as u64;
+                let code = flags
+                    .iter()
+                    .find_map(|w| w["agent_start_error"].as_str().map(str::to_owned))
+                    .or_else(|| (starts <= busy).then(|| "agent_pane_busy".to_owned()));
+                if let Some(code) = code {
+                    let error =
+                        json!({"id":request["id"],"error":{"code":code,"message":"refused"}});
+                    stream
+                        .get_mut()
+                        .write_all(format!("{error}\n").as_bytes())
+                        .await
+                        .unwrap();
+                    continue;
+                }
+            }
             let result = match request["method"].as_str().unwrap() {
                 "workspace.list" => {
                     json!({"type":"workspace_list","workspaces":workspaces.lock().unwrap().clone()})
@@ -2312,4 +2339,69 @@ async fn confirm_words_start_without_typing_the_workspace_name() {
         );
         server.abort();
     }
+}
+
+#[tokio::test]
+async fn a_busy_fresh_pane_is_retried_until_its_shell_is_ready() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    api(&config);
+    let (mut bridge, key) = bridge(&config, None);
+    let (server, calls) = host_with_workspaces(
+        &config,
+        None,
+        Arc::new(Mutex::new(vec![
+            json!({"workspace_id":"w1","label":"Main","agent_start_busy":2}),
+        ])),
+    )
+    .await;
+    new_model_preview(&mut bridge, &key).await;
+    bridge.inbound(&event("confirm", "my-idea")).await.unwrap();
+    let starts = |calls: &Arc<Mutex<Vec<Value>>>| {
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c["method"] == "agent.start")
+            .count()
+    };
+    assert_eq!(starts(&calls), 3);
+    assert_eq!(
+        bridge.state.mappings[&key].launch.as_ref().unwrap().phase,
+        herdr_white_noise_bridge::launch::Phase::Started
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn an_agent_start_failure_other_than_busy_is_not_retried() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    api(&config);
+    let (mut bridge, key) = bridge(&config, None);
+    // herdr can return agent_pane_unavailable after it has written the command.
+    let (server, calls) = host_with_workspaces(
+        &config,
+        None,
+        Arc::new(Mutex::new(vec![
+            json!({"workspace_id":"w1","label":"Main","agent_start_error":"agent_pane_unavailable"}),
+        ])),
+    )
+    .await;
+    new_model_preview(&mut bridge, &key).await;
+    bridge.inbound(&event("confirm", "my-idea")).await.unwrap();
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c["method"] == "agent.start")
+            .count(),
+        1
+    );
+    assert_eq!(
+        bridge.state.mappings[&key].launch.as_ref().unwrap().phase,
+        herdr_white_noise_bridge::launch::Phase::Uncertain
+    );
+    server.abort();
 }

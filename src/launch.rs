@@ -819,13 +819,27 @@ async fn start(
         .as_ref()
         .unwrap()
         .agent_args();
-    let started = bridge
-        .herdr
-        .herdr(
-            "agent.start",
-            json!({"name":name,"kind":request.kind,"pane_id":pane,"args":args}),
-        )
-        .await;
+    // A fresh pane reports agent_pane_busy until its shell owns the foreground
+    // (shell startup files may still be running). herdr returns that before
+    // writing any input, so only that refusal is retried; every other result
+    // keeps the non-retry rule.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    let started = loop {
+        let started = bridge
+            .herdr
+            .herdr(
+                "agent.start",
+                json!({"name":name,"kind":request.kind,"pane_id":pane,"args":&args}),
+            )
+            .await;
+        let busy = started
+            .as_ref()
+            .is_err_and(|error| error.to_string() == "Remote request failed: agent_pane_busy");
+        if !busy || tokio::time::Instant::now() >= deadline {
+            break started;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    };
     let confirmed = started.as_ref().is_ok_and(|response| {
         let result = &response["result"];
         result["type"] == "agent_started"
