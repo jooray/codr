@@ -253,7 +253,7 @@ fn relative_parts<'a>(root: &Path, path: &'a Path) -> Result<Vec<&'a std::ffi::O
     Ok(parts)
 }
 
-fn directory(root: &Path) -> Result<File> {
+pub(crate) fn directory(root: &Path) -> Result<File> {
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     let mut parent = File::from(open("/", flags, Mode::empty())?);
     for component in root.components() {

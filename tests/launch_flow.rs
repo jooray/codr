@@ -72,6 +72,30 @@ async fn model_code(bridge: &mut Bridge, key: &str) -> String {
 }
 
 #[tokio::test]
+async fn folder_menu_words_remain_valid_one_line_workspace_names() {
+    for name in ["list", "pick"] {
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path());
+        api(&config);
+        let (mut bridge, key) = bridge(&config, None);
+        bridge
+            .inbound(&event(
+                "one-line",
+                &format!("/new {name} my-project opencode"),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            bridge.state.mappings[&key]
+                .launch
+                .as_ref()
+                .is_some_and(|request| request.label == name)
+        );
+        assert!(last(&bridge).contains("Confirm within ten minutes"));
+    }
+}
+
+#[tokio::test]
 async fn even_one_provider_starts_with_default_or_provider_and_then_lists_every_model() {
     let root = tempfile::tempdir().unwrap();
     let config = config(root.path());
@@ -541,7 +565,9 @@ async fn location_steps_are_tidy_and_new_workspace_is_the_last_numbered_choice()
             .is_none()
     );
     assert!(last(&bridge).starts_with("[2/4] Folder name:"));
-    assert!(last(&bridge).contains("Reply with your chosen folder name.\n\n**0. Cancel**"));
+    assert!(last(&bridge).contains(
+        "Reply with your chosen folder name, or ls to list existing folders.\n\n**0. Cancel**"
+    ));
     bridge
         .inbound(&event("folder", "side-project"))
         .await
