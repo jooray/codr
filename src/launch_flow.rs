@@ -458,7 +458,8 @@ pub async fn handle(
         && !text.trim().starts_with('/')
         && text.trim() != "0"
     {
-        if now() >= request.expires_at {
+        let word = text.trim().to_ascii_lowercase();
+        if now() >= request.expires_at || matches!(word.as_str(), "confirm" | "yes" | "y") {
             let command = format!("/new confirm {}", request.code);
             return launch::handle(bridge, key, group, id, &command, true).await;
         }
@@ -469,7 +470,7 @@ pub async fn handle(
                 group,
                 id,
                 &format!(
-                    "That name does not match the pending workspace. Confirm by typing:\n{}\n0. Cancel",
+                    "That name does not match the pending workspace. Reply confirm, yes or y (or type: {}), or 0 to cancel.",
                     request.confirmation_name()
                 ),
             );
