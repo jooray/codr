@@ -289,7 +289,7 @@ class InstallationTests(unittest.TestCase):
                    "base_sha256": updater.install.sha256(destination), "pid": 1234,
                    "config_path": str(self.root / ".config" / updater.WORKER / "config.toml")}
         manager = SimpleNamespace(backend=updater.services.LAUNCHD, path=lambda _: plist)
-        with patch.object(Path, "home", return_value=self.root), patch.object(updater.services, "for_host", return_value=manager):
+        with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.root / ".config")}), patch.object(Path, "home", return_value=self.root), patch.object(updater.services, "for_host", return_value=manager):
             controller = updater.Controller()
             for pid in [0, 9999]:
                 with patch.object(controller, "pid", return_value=pid), self.assertRaises(updater.UpdateError):
@@ -309,7 +309,7 @@ class InstallationTests(unittest.TestCase):
         request = {**self.request, "installed_path": str(destination), "pid": 1234,
                    "base_sha256": updater.install.sha256(destination), "config_path": str(config.resolve())}
         manager = SimpleNamespace(backend=updater.services.LAUNCHD, path=lambda _: plist)
-        with patch.object(Path, "home", return_value=self.root), patch.object(updater.services, "for_host", return_value=manager):
+        with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.root / ".config")}), patch.object(Path, "home", return_value=self.root), patch.object(updater.services, "for_host", return_value=manager):
             controller = updater.Controller()
             with patch.object(controller, "pid", return_value=1234):
                 controller.validate(request)
