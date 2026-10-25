@@ -6,8 +6,6 @@ Supported agents: OpenCode, Codex, and Claude Code on Linux and macOS.
 
 New bridge accounts introduce themselves as **Pat**, your messenger between White Noise and herdr. Verify the full bridge public key printed by setup, not its display name.
 
-The separate **portr** desktop app can optionally connect over SSH. Its codr endpoint is off by default; phone-only installs do not need it. [Optional desktop setup](docs/INSTALL.md#optional-portr-desktopssh-access)
-
 ## Behaviour
 
 - Chat names pair the **herdr** tab and workspace: `review (Acme)`. Descriptions contain workspace and agent details.
