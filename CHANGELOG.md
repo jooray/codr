@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Optional standalone control chat (`control_chat = true`): one owner-only White Noise group that accepts `/new` and general commands without being mapped to an agent session. Plain text, session-only commands, and uncertain creation are handled explicitly.
+
 ## [0.7.0] - 2026-10-24
 
 ### Added

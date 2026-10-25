@@ -52,6 +52,9 @@ pub struct Mapping {
     /// A profile update may have reached the group; do not retry automatically.
     #[serde(default)]
     pub rename_uncertain: bool,
+    /// Standalone control group, not mapped to an agent session.
+    #[serde(default)]
+    pub control: bool,
     pub creating: bool,
     pub last_agent_status: String,
     pub last_state_change_seq: u64,

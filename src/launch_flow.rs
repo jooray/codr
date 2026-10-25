@@ -435,6 +435,15 @@ pub async fn handle(
 async fn route(bridge: &mut Bridge, key: &str, group: &str, id: &str, text: &str) -> Result<()> {
     let args: Vec<_> = text.split_whitespace().collect();
     let command = args[0].to_ascii_lowercase();
+    if bridge.state.mappings[key].control && matches!(command.as_str(), "/agent" | "/model") {
+        return launch::reply(
+            bridge,
+            key,
+            group,
+            id,
+            "The control chat is not mapped to a project. Use /new to start a session.",
+        );
+    }
     let draft = bridge.state.mappings[key].launch_draft.clone();
     if draft.as_ref().is_some_and(Draft::blocks_replacement) {
         return launch::reply(bridge, key, group, id, &draft.unwrap().prompt());
