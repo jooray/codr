@@ -139,7 +139,7 @@ Read the agent's review in the same chat, alongside the matching herdr session.
 
 ### Keep sessions separate
 
-Each herdr session has its own chat. Group related chats in a White Noise project folder.
+Each herdr session has its own chat. To collect them in one place, open White Noise's Folders settings, create an intelligent folder, and filter it by the bridge account (the full public key is printed during setup). New codr chats join the folder automatically, and renaming a chat does not move it out.
 
 <img src="docs/screenshots/herdr-phone-conversations.png" width="1280" alt="Six Garden planner session tabs in herdr beside their six matching chats in a White Noise Garden folder">
 
