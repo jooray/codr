@@ -6,6 +6,7 @@
 
 - Optional standalone control chat (`control_chat = true`): one owner-only White Noise group that accepts `/new` and general commands without being mapped to an agent session. Plain text, session-only commands, and uncertain creation are handled explicitly.
 - Commands accept unambiguous prefixes (`/n`, `/st`, `/sy`); in the control chat the leading `/` is optional (`new`, `n`, `status`). Ambiguous prefixes are listed in the control chat and left to the agent elsewhere.
+- The `/new` folder step accepts `ls` to list selectable directories under `launch_root` and choose one by number.
 
 ## [0.7.0] - 2026-10-24
 

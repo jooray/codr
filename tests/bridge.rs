@@ -1723,7 +1723,7 @@ async fn shortcut_help_is_a_short_command_list() {
     }
     assert_eq!(
         help,
-        "# codr commands\n\n### General\n\n**`/help`**  \nShow commands\n\n**`/status`**  \nConnection, state, queue and unmute\n\n**`/recent`**  \nGet newest 3 of all active <1h\n\n### Projects & Agents\n\n**`/new`**  \nSet up a project\n\n**`/agent`**  \nChoose agent (separate chat)\n\n**`/model`**  \nChoose model\n\n### Tasks\n\n**`/queue`**  \nView pending deliveries\n\n**`/cancel`**  \nInterrupt the current task\n\n### Sync\n\n**`/unmute`**  \nUnmute all chats and return to automatic sync\n\n**`/sync auto|on|off`**  \nSet persistent sync mode\nCurrent sync mode: Automatic"
+        "# codr commands\n\n### General\n\n**`/help`**  \nShow commands\n\n**`/status`**  \nConnection, state, queue and unmute\n\n**`/recent`**  \nGet newest 3 of all active <1h\n\n### Projects & Agents\n\n**`/new`**  \nSet up a project\n\n**`/agent`**  \nChoose agent (separate chat)\n\n**`/model`**  \nChoose model\n\n### Tasks\n\n**`/queue`**  \nView pending deliveries\n\n**`/cancel`**  \nInterrupt the current task\n\n### Sync\n\n**`/unmute`**  \nUnmute all chats and return to automatic sync\n\n**`/sync auto|on|off`**  \nSet persistent sync mode\nCurrent sync mode: Automatic\n\nCommands accept unambiguous prefixes (/n, /st, /sy). In the control chat the leading / is optional."
     );
 }
 
@@ -8143,18 +8143,7 @@ async fn control_chat_is_created_once_and_answers_without_an_agent() {
             .is_some_and(|item| item.text.contains("Ambiguous command"))
     );
 
-    let mut new = inbound(HEX, "control-4");
-    new["message"]["text"] = json!("new");
-    bridge.inbound(&new).await.unwrap();
-    assert!(
-        bridge
-            .state
-            .outbox
-            .last()
-            .is_some_and(|item| item.text.contains("workspace"))
-    );
-
-    let mut agent = inbound(HEX, "control-5");
+    let mut agent = inbound(HEX, "control-4");
     agent["message"]["text"] = json!("/agent");
     bridge.inbound(&agent).await.unwrap();
     assert!(
@@ -8163,6 +8152,17 @@ async fn control_chat_is_created_once_and_answers_without_an_agent() {
             .outbox
             .last()
             .is_some_and(|item| item.text.contains("not mapped to a project"))
+    );
+
+    let mut new = inbound(HEX, "control-5");
+    new["message"]["text"] = json!("new");
+    bridge.inbound(&new).await.unwrap();
+    assert!(
+        bridge
+            .state
+            .outbox
+            .last()
+            .is_some_and(|item| item.text.contains("workspace"))
     );
 
     bridge.reconcile(vec![]).await.unwrap();
