@@ -61,35 +61,46 @@ impl Activity {
             .iter()
             .filter(|input| input.complete && !known.contains(&input.id))
             .collect();
-        let local = fresh.iter().any(|input| {
+        // Group fresh text by fingerprint. A resend produces two phone receipts
+        // with the same text and two echoes; matching counts keeps that
+        // attributable instead of treating the whole batch as local input.
+        let mut by_text: std::collections::BTreeMap<String, Vec<&UserInput>> =
+            std::collections::BTreeMap::new();
+        let mut local = fresh.iter().any(|input| input.fingerprint.is_none());
+        for input in &fresh {
+            if let Some(fingerprint) = &input.fingerprint {
+                by_text.entry(fingerprint.clone()).or_default().push(input);
+            }
+        }
+        let mut consumed = HashSet::new();
+        for (fingerprint, group) in &by_text {
             let candidates: Vec<_> = self
                 .phone
                 .iter()
                 .filter(|phone| {
                     phone.confirmed
-                        && input.fingerprint.is_some()
-                        && input.fingerprint == phone.fingerprint
-                        && !phone.before.contains(&input.id)
+                        && phone.fingerprint.as_deref() == Some(fingerprint)
+                        && group.iter().all(|input| !phone.before.contains(&input.id))
                 })
                 .collect();
-            candidates.len() != 1
-                || fresh
-                    .iter()
-                    .filter(|other| {
-                        other.fingerprint == candidates[0].fingerprint
-                            && !candidates[0].before.contains(&other.id)
-                    })
-                    .count()
-                    != 1
-        });
-        // A busy agent may record already-delivered follow-ups in separate batches.
+            if candidates.len() == group.len() {
+                consumed.insert(fingerprint.clone());
+            } else {
+                local = true;
+            }
+        }
         // A genuine local/ambiguous input still invalidates outstanding attribution.
-        self.phone.retain(|phone| {
-            !local
-                && !fresh.iter().any(|input| {
-                    input.fingerprint == phone.fingerprint && !phone.before.contains(&input.id)
-                })
-        });
+        if local {
+            self.phone.clear();
+        } else {
+            self.phone.retain(|phone| {
+                !phone.confirmed
+                    || !phone
+                        .fingerprint
+                        .as_deref()
+                        .is_some_and(|fingerprint| consumed.contains(fingerprint))
+            });
+        }
         observed.extend(fresh.into_iter().map(|input| input.id.clone()));
         local
     }

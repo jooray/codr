@@ -7,6 +7,9 @@ project setup and progress completion. These changes are not in published 0.7.0.
 
 ### Fixed
 
+- Attribute repeated identical phone messages one-to-one when confirmed receipt and transcript counts match. Ambiguous extra local input still mutes forwarding.
+- Keep delivered blocked notices deduplicated across mute/wake. Retry cancelled undelivered notices, and do not consume an announcement while muted.
+- Retry fresh-pane agent startup only after an explicit pre-input `agent_pane_busy` refusal. Other failures and uncertain submissions are not retried.
 - Pause an unexpected new native session on an established terminal before creating another phone group. Retain the original chat and accepted work, persist the hold across restarts, and require local `confirm-session-change` approval against the current terminal and native session. Intentional launches in new terminals remain unchanged.
 - Deliver incoming ZIP archives, documents and other file attachments as private local files, with their caption and quoted original name. Do not send them to image/audio-only validation or require a transcription service; archives are not automatically extracted or executed. Preserve bounded downloads, restart recovery and duplicate protection, and distinguish file-preparation errors from audio-transcription errors.
 - Keep progress edit targets through failed completion edits, lost initial acknowledgements, restarts and mute/resume, so visible working bubbles can finish as `done` without holding up final replies. Do not complete progress on an early idle signal alone.
@@ -25,6 +28,9 @@ project setup and progress completion. These changes are not in published 0.7.0.
 - Answer supported OpenCode V2 questions with custom text directly from the phone, such as a version number, or `/answer TEXT`. Bind the reply to the fresh native form and session, retain question-code and duplicate guards, and never turn it into a queued prompt or arbitrary terminal input. Legacy, multi-select and multi-question custom replies remain terminal-only.
 - Owner-only `/update` discovers stable releases from the pinned ngit maintainer, asks for a chat-bound confirmation, and verifies independent Blossom downloads before replacing only the managed bridge worker. Updates retain state and accepted work, reject connector/storage-cohort changes, and restore the previous executable after failed startup without rewinding routing state.
 - Optional standalone control chat (`control_chat = true`): one owner-only White Noise group that accepts `/new` and general commands without being mapped to an agent session. Plain text, session-only commands, and uncertain creation are handled explicitly.
+- Commands accept unambiguous prefixes (`/n`, `/st`, `/sy`); in the control chat the leading `/` is optional (`new`, `n`, `status`). Ambiguous prefixes are listed in the control chat and left to the agent elsewhere.
+- The `/new` folder step accepts `ls` to list selectable directories under `launch_root` and choose one by number.
+- A pending launch starts on `confirm`, `yes` or `y`. Typing the repository folder name still works; the workspace label is not the confirmation name.
 
 ## [0.7.0] - 2026-10-25
 

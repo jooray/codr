@@ -118,6 +118,22 @@ impl Bridge {
                                 .map(|attachment| attachment.path.clone())
                         }),
                 );
+                let cancelled_blocks: HashSet<_> = self
+                    .state
+                    .outbox
+                    .iter()
+                    .filter(|item| {
+                        !item.manual
+                            && item.text.starts_with("> blocked Agent needs input")
+                            && item.response.as_ref().is_none_or(|response| {
+                                (response.durable
+                                    || (response.target.is_none()
+                                        && response.initial_text.is_none()))
+                                    && response.sent_text.as_deref() != Some(item.text.as_str())
+                            })
+                    })
+                    .map(|item| item.group.clone())
+                    .collect();
                 self.state.outbox.retain(|item| {
                     item.manual
                         || item.response.as_ref().is_some_and(|delivery| {
@@ -138,7 +154,16 @@ impl Bridge {
                     mapping.task_revision = None;
                     // The control chat has no transcript and never needs a checkpoint.
                     mapping.forwarding_baseline_pending = !mapping.control;
-                    mapping.blocked_context_seq = None;
+                    // Keep the announced blocked context across mute/wake cycles;
+                    // an unchanged block must not notify the phone again.
+                    // A cancelled, undelivered notice still needs one delivery on wake.
+                    if mapping
+                        .group_id_hex
+                        .as_ref()
+                        .is_some_and(|group| cancelled_blocks.contains(group))
+                    {
+                        mapping.blocked_context_seq = None;
+                    }
                     mapping.decision_checked_at = 0;
                     mapping.decision_refresh_pending = true;
                     if let Some(decision) = mapping.decision.as_mut() {
@@ -621,7 +646,7 @@ impl Bridge {
                 }
                 self.state.enqueue_manual(
                     group,
-                    "codr control chat. Send /new to start a project, /help for commands.",
+                    "codr control chat. Send /new (or just new) to start a project, /help for commands.",
                     &format!("control-welcome:{group}"),
                 );
                 let _ = self.save();
@@ -1217,7 +1242,8 @@ impl Bridge {
                     .unwrap()
                     .blocked_context_seq = Some(agent.state_change_seq);
             }
-        } else if agent.agent_status == "blocked"
+        } else if self.state.forwarding_enabled
+            && agent.agent_status == "blocked"
             && self.state.mappings[key].blocked_context_seq != Some(agent.state_change_seq)
         {
             let response = self
@@ -1591,7 +1617,7 @@ impl Bridge {
             status
         } else {
             format!(
-                "# codr commands\n\n### General\n\n**`/help`**  \nShow commands\n\n**`/status`**  \nConnection, state, queue and unmute\n\n**`/recent`**  \nGet newest 3 of all active <1h\n\n**`/update`**  \nCheck ngit for a stable bridge update; confirm before installing\n\n### Projects & Agents\n\n**`/new`**  \nSet up a project\n\n**`/agent`**  \nChoose agent (separate chat)\n\n**`/model`**  \nChoose model\n\n### Tasks\n\n**`/queue`**  \nView pending deliveries\n\n**`/cancel`**  \nInterrupt the current task\n\n### Sync\n\n**`/unmute`**  \nUnmute all chats and return to automatic sync\n\n**`/sync auto|on|off`**  \nSet persistent sync mode\nCurrent sync mode: {}",
+                "# codr commands\n\n### General\n\n**`/help`**  \nShow commands\n\n**`/status`**  \nConnection, state, queue and unmute\n\n**`/recent`**  \nGet newest 3 of all active <1h\n\n**`/update`**  \nCheck ngit for a stable bridge update; confirm before installing\n\n### Projects & Agents\n\n**`/new`**  \nSet up a project\n\n**`/agent`**  \nChoose agent (separate chat)\n\n**`/model`**  \nChoose model\n\n### Tasks\n\n**`/queue`**  \nView pending deliveries\n\n**`/cancel`**  \nInterrupt the current task\n\n### Sync\n\n**`/unmute`**  \nUnmute all chats and return to automatic sync\n\n**`/sync auto|on|off`**  \nSet persistent sync mode\nCurrent sync mode: {}\n\nCommands accept unambiguous prefixes (/n, /st, /sy). In the control chat the leading / is optional.",
                 forwarding::load(&self.config.state_path)?.mode.label()
             )
         };
@@ -1638,7 +1664,7 @@ impl Bridge {
         } else if trimmed.is_empty() {
             "Send /new to start a project, /help for commands.".into()
         } else {
-            "This is the codr control chat, not a session. Use /new to start a project, /help for commands. To prompt an agent, open its chat.".into()
+            "This is the codr control chat, not a session. Use /new (or just new) to start a project, /help for commands. To prompt an agent, open its chat.".into()
         };
         crate::launch::reply(self, key, group, id, &response)
     }
@@ -1831,7 +1857,18 @@ impl Bridge {
             }
             return Ok(());
         }
-        let text = msg["text"].as_str().unwrap_or("");
+        let raw_text = msg["text"].as_str().unwrap_or("");
+        let control = self.state.mappings[&key].control;
+        let menu_open = self.state.mappings[&key]
+            .launch_draft
+            .as_ref()
+            .is_some_and(|draft| now() < draft.expires_at)
+            || self.state.mappings[&key]
+                .launch
+                .as_ref()
+                .is_some_and(|request| {
+                    request.phase == crate::launch::Phase::Awaiting && now() < request.expires_at
+                });
         let plain_command = !prepared
             && msg["text_truncated"] != true
             && msg["attachments_truncated"] != true
@@ -1839,6 +1876,29 @@ impl Bridge {
                 .as_array()
                 .is_none_or(|items| items.is_empty())
             && msg["media"].as_array().is_none_or(|items| items.is_empty());
+        let normalized = if plain_command && !queued {
+            crate::commands::normalize(raw_text, control, menu_open)
+        } else {
+            crate::commands::Normalized::Text(raw_text.to_owned())
+        };
+        let text = match &normalized {
+            crate::commands::Normalized::Text(value) => value.as_str(),
+            crate::commands::Normalized::Ambiguous(options) if control => {
+                let options = options
+                    .iter()
+                    .map(|command| format!("/{command}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return crate::launch::reply(
+                    self,
+                    &key,
+                    group,
+                    id,
+                    &format!("Ambiguous command. Did you mean {options}? Add another letter."),
+                );
+            }
+            _ => raw_text,
+        };
         if !prepared && !queued && text.trim().eq_ignore_ascii_case("/cancel") {
             return self.cancel_task(&key, group, id, plain_command).await;
         }
@@ -1986,6 +2046,15 @@ impl Bridge {
                     group,
                     id,
                     "The control chat accepts complete standalone text commands only.",
+                );
+            }
+            if menu_open {
+                return crate::launch::reply(
+                    self,
+                    &key,
+                    group,
+                    id,
+                    "A setup menu is open. Reply with a listed number, 0 to cancel, or /new to restart.",
                 );
             }
             return self.control_message(&key, group, id, text).await;

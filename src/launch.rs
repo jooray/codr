@@ -92,7 +92,7 @@ impl Request {
     }
     pub(crate) fn preview(&self) -> String {
         format!(
-            "{}: {}\nWorkspace destination: {}\nAgent: {}\nModel: {}\nFolder: {}\n{}\nNothing has started. Confirm within ten minutes.\nConfirm by typing:\n{}\n\n**0. Cancel**",
+            "{}: {}\nWorkspace destination: {}\nAgent: {}\nModel: {}\nFolder: {}\n{}\nNothing has started. Confirm within ten minutes.\nReply confirm, yes or y (or type: {}).\n\n**0. Cancel**",
             if self.destination_workspace().is_some() {
                 "New tab in existing workspace"
             } else {
@@ -173,8 +173,9 @@ pub fn proposal(text: &str, root: &Path, home: &Path, timestamp: u64) -> Result<
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_')),
         "Use a workspace name of 1-48 letters, digits, '-' or '_'."
     );
+    let kind = args[3].to_ascii_lowercase();
     ensure!(
-        matches!(args[3], "opencode" | "codex" | "claude"),
+        matches!(kind.as_str(), "opencode" | "codex" | "claude"),
         "Choose opencode, codex, or claude. Custom commands and arguments are not allowed."
     );
     let path = if let Some(relative) = args[2].strip_prefix("~/") {
@@ -191,7 +192,7 @@ pub fn proposal(text: &str, root: &Path, home: &Path, timestamp: u64) -> Result<
         label: label.into(),
         directory: path,
         root: root.into(),
-        kind: args[3].into(),
+        kind,
         model: None,
         source_agent: None,
         native_session: None,
@@ -241,7 +242,7 @@ fn relative_parts<'a>(root: &Path, path: &'a Path) -> Result<Vec<&'a std::ffi::O
     Ok(parts)
 }
 
-fn directory(root: &Path) -> Result<File> {
+pub(crate) fn directory(root: &Path) -> Result<File> {
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     let mut parent = File::from(open("/", flags, Mode::empty())?);
     for component in root.components() {
@@ -807,13 +808,27 @@ async fn start(
         .as_ref()
         .unwrap()
         .agent_args();
-    let started = bridge
-        .herdr
-        .herdr(
-            "agent.start",
-            json!({"name":name,"kind":request.kind,"pane_id":pane,"args":args}),
-        )
-        .await;
+    // A fresh pane reports agent_pane_busy until its shell owns the foreground
+    // (shell startup files may still be running). herdr returns that before
+    // writing any input, so only that refusal is retried; every other result
+    // keeps the non-retry rule.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    let started = loop {
+        let started = bridge
+            .herdr
+            .herdr(
+                "agent.start",
+                json!({"name":name,"kind":request.kind,"pane_id":pane,"args":&args}),
+            )
+            .await;
+        let busy = started
+            .as_ref()
+            .is_err_and(|error| error.to_string() == "Remote request failed: agent_pane_busy");
+        if !busy || tokio::time::Instant::now() >= deadline {
+            break started;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    };
     let confirmed = started.as_ref().is_ok_and(|response| {
         let result = &response["result"];
         result["type"] == "agent_started"
@@ -889,6 +904,8 @@ mod model_argument_tests {
             });
             assert_eq!(request.agent_args(), vec!["--model", "chosen-model"]);
         }
+        let upper = super::proposal("/new project project OPENCODE", &root, &root, 0).unwrap();
+        assert_eq!(upper.kind, "opencode");
         let mut request =
             super::proposal("/new project project opencode", &root, &root, 0).unwrap();
         request.native_session = Some("ses_chosen".into());

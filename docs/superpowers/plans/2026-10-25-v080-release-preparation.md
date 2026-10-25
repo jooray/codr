@@ -96,3 +96,36 @@ No real `/update` replacement has been exercised. Scheduling and rollback tests
 use fixtures. A suitable published compatible release and explicit confirmation
 are required for that end-to-end test. No connector/storage migration is needed
 or authorized; preserve the current MDK 0.14 cohort and all user data.
+
+## Outstanding-PR integration update
+
+The earlier verification and installation records above describe the initial
+candidate. This section records the later, authorised PR-integration task.
+
+- GitHub PRs #8–#15 were reviewed and merged, retaining Juraj Bednar's original
+  commits. Fresh ngit discovery found no open or draft proposals.
+- Integrated `master` is `11b316a7b23e1ada306f1fbf27fc18c8b070b9be` on GitHub
+  and ngit. GitHub checks passed in run `40194163306`.
+- Review fixes preserve prepared/accepted input before command expansion, use
+  a validated directory handle for folder listing, retain legacy `list`/`pick`
+  workspace labels, distinguish pending from delivered blocked notices, and
+  avoid consuming blocked announcements while muted. Failing-first regressions
+  cover these paths. README wording preserves ended-chat history.
+- The session-replacement safeguard is committed on the release branch. The
+  locally installed OpenCode recovery build remains separate from codr source
+  and release assets. No live services or account data changed in this task.
+- Candidate integration keeps repository-folder-name confirmation alongside
+  `confirm`/`yes`/`y`, retains `/update` help, and treats `/u` as ambiguous between
+  `/unmute` and `/update`. Retained editable progress is not cancelled by the
+  blocked-notice fix. The updater-prefix regression failed before correction.
+- Final local candidate checks: 370 Rust tests passed, 8 ignored, and 122 Python
+  tests passed. Formatting and strict clippy passed. Logs use the prefix
+  `/tmp/opencode/codr-v080-pr-batch-`.
+- Release notes cover the new PR features, session safeguard and review fixes,
+  with Tom Dwyer, Paul Eipper/lkraider and Juraj Bednar/jooray credit. Screenshots
+  remain unchanged. The changelog remains marked unreleased.
+
+Release preparation permits build-only verification, not a version tag, release,
+installation or data migration. Inspect retained artifacts before dispatch. The
+current workflow has no artifact-promotion path: a later authorised tag will
+rebuild and rerun the release gates. Do not dispatch a duplicate candidate build.

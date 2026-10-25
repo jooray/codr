@@ -64,6 +64,12 @@ Handoff is automatic. Manual controls remain available through **herdr**'s **Whi
 
 **Phone updates:** `/update` shows an available version and a ten-minute confirmation command. `/update cancel` dismisses the offer. Updates use ngit v3 and independent Blossom downloads, not GitHub. Only the managed bridge worker restarts; connector/storage changes require local setup. [Update safety and recovery →](docs/REFERENCE.md#confirmed-updates-from-ngit)
 
+### Control chat
+
+Session chats are tied to native agent sessions. Their history remains after a session ends, and restoring that session reconnects its existing chat. Set `control_chat = true` in the bridge config and restart the worker to add one owner-only chat called `codr control`. The bridge invites your phone on the next start and keeps the chat when sessions are renamed or end.
+
+Send `/new` there to start a project, or use `/help`, `/status`, `/recent`, `/queue`, `/sync`, and `/unmute`. `/agent`, `/model`, and `/cancel` need a session chat. Plain text gets a short hint instead of reaching an agent. This is also where `/new` works on a fresh install before any session chat exists. [Control chat reference →](docs/REFERENCE.md#control-chat)
+
 ## How it works
 
 White Noise ↔ MDK ↔ **codr** ↔ **herdr** ↔ your agent
@@ -136,7 +142,7 @@ Read the agent's review in the same chat, alongside the matching herdr session.
 
 ### Keep sessions separate
 
-Each herdr session has its own chat. Group related chats in a White Noise project folder.
+Each herdr session has its own chat. To collect them in one place, open White Noise's Folders settings, create an intelligent folder, and filter it by the bridge account (the full public key is printed during setup). New codr chats join the folder automatically, and renaming a chat does not move it out.
 
 <img src="docs/screenshots/herdr-phone-conversations.png" width="1280" alt="Six Garden planner session tabs in herdr beside their six matching chats in a White Noise Garden folder">
 

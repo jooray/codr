@@ -72,6 +72,30 @@ async fn model_code(bridge: &mut Bridge, key: &str) -> String {
 }
 
 #[tokio::test]
+async fn folder_menu_words_remain_valid_one_line_workspace_names() {
+    for name in ["list", "pick"] {
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path());
+        api(&config);
+        let (mut bridge, key) = bridge(&config, None);
+        bridge
+            .inbound(&event(
+                "one-line",
+                &format!("/new {name} my-project opencode"),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            bridge.state.mappings[&key]
+                .launch
+                .as_ref()
+                .is_some_and(|request| request.label == name)
+        );
+        assert!(last(&bridge).contains("Confirm within ten minutes"));
+    }
+}
+
+#[tokio::test]
 async fn even_one_provider_starts_with_default_or_provider_and_then_lists_every_model() {
     let root = tempfile::tempdir().unwrap();
     let config = config(root.path());
@@ -266,7 +290,7 @@ async fn typing_the_displayed_project_name_confirms_but_wrong_or_unsafe_names_do
     let (server, calls) = host(&config, None).await;
     new_model_preview(&mut bridge, &key).await;
     assert!(last(&bridge).contains("Confirm within ten minutes"));
-    assert!(last(&bridge).contains("Confirm by typing:\nmy-idea\n\n**0. Cancel**"));
+    assert!(last(&bridge).contains("Reply confirm, yes or y (or type: my-idea)"));
     bridge.inbound(&event("wrong", "other-name")).await.unwrap();
     assert!(last(&bridge).contains("my-idea"));
     assert!(bridge.state.mappings[&key].prompt_queue.is_empty());
@@ -383,7 +407,7 @@ async fn project_name_confirmation_rechecks_destination_renames_and_expiry() {
     ]));
     let (server, calls) = host_with_workspaces(&config, None, workspaces.clone()).await;
     existing_workspace_preview(&mut bridge, &key, 1).await;
-    assert!(last(&bridge).contains("Confirm by typing:\nside-project\n\n**0. Cancel**"));
+    assert!(last(&bridge).contains("Reply confirm, yes or y (or type: side-project)"));
     bridge
         .inbound(&event("workspace-is-not-project", "Main"))
         .await
@@ -396,7 +420,7 @@ async fn project_name_confirmation_rechecks_destination_renames_and_expiry() {
         .await
         .unwrap();
     assert!(last(&bridge).contains("Renamed (w1)"));
-    assert!(last(&bridge).contains("Confirm by typing:\nside-project"));
+    assert!(last(&bridge).contains("Reply confirm, yes or y (or type: side-project)"));
     assert!(!config.launch_root.join("side-project").exists());
     bridge
         .inbound(&event("wrong-name", "Renamed"))
@@ -434,7 +458,7 @@ async fn repository_folder_name_not_existing_workspace_name_confirms_after_resta
     let (server, calls) = host(&config, None).await;
     existing_workspace_preview(&mut bridge, &key, 1).await;
     assert!(last(&bridge).contains("Workspace destination: Main (w1)"));
-    assert!(last(&bridge).contains("Confirm by typing:\nside-project\n"));
+    assert!(last(&bridge).contains("Reply confirm, yes or y (or type: side-project)"));
     drop(bridge);
     let mut bridge = Bridge::open(config.clone()).unwrap();
     bridge
@@ -469,7 +493,7 @@ async fn confirmation_uses_the_exact_dotted_folder_basename_not_a_workspace_labe
         ))
         .await
         .unwrap();
-    assert!(last(&bridge).contains("Confirm by typing:\nrepo.v2\n"));
+    assert!(last(&bridge).contains("Reply confirm, yes or y (or type: repo.v2)"));
     bridge
         .inbound(&event("wrong-label", "workspace-label"))
         .await
@@ -502,7 +526,7 @@ async fn a_zero_named_repository_keeps_zero_as_cancel_not_confirmation() {
         .inbound(&event("propose-zero", "/new workspace-label 0 opencode"))
         .await
         .unwrap();
-    assert!(last(&bridge).contains("Confirm by typing:\n/new confirm\n"));
+    assert!(last(&bridge).contains("Reply confirm, yes or y (or type: /new confirm)"));
     bridge.inbound(&event("cancel-zero", "0")).await.unwrap();
     assert_eq!(
         bridge.state.mappings[&key].launch.as_ref().unwrap().phase,
@@ -643,7 +667,9 @@ async fn location_steps_are_tidy_and_new_workspace_is_the_last_numbered_choice()
             .is_none()
     );
     assert!(last(&bridge).starts_with("[2/4] Folder name:"));
-    assert!(last(&bridge).contains("Reply with your chosen folder name.\n\n**0. Cancel**"));
+    assert!(last(&bridge).contains(
+        "Reply with your chosen folder name, or ls to list existing folders.\n\n**0. Cancel**"
+    ));
     bridge
         .inbound(&event("folder", "side-project"))
         .await
@@ -921,7 +947,7 @@ async fn code_free_menu_choices_survive_restart_and_require_explicit_confirmatio
     let request = bridge.state.mappings[&key].launch.as_ref().unwrap();
     assert_eq!(request.model.as_ref().unwrap().id, "model-12");
     assert!(!last(&bridge).contains(&request.code));
-    assert!(last(&bridge).contains("Confirm by typing:\nside-project"));
+    assert!(last(&bridge).contains("Reply confirm, yes or y (or type: side-project)"));
     assert!(!config.launch_root.join("side-project").exists());
     bridge.inbound(&event("select", "12")).await.unwrap(); // Same message cannot become a prompt after the menu advances.
     assert!(
@@ -1346,6 +1372,33 @@ async fn host_with_workspaces(
             let mut stream = tokio::io::BufReader::new(stream);
             let request = read_line(&mut stream).await.unwrap();
             captured.lock().unwrap().push(request.clone());
+            if request["method"] == "agent.start" {
+                let flags = workspaces.lock().unwrap().clone();
+                let busy = flags
+                    .iter()
+                    .find_map(|w| w["agent_start_busy"].as_u64())
+                    .unwrap_or(0);
+                let starts = captured
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|c| c["method"] == "agent.start")
+                    .count() as u64;
+                let code = flags
+                    .iter()
+                    .find_map(|w| w["agent_start_error"].as_str().map(str::to_owned))
+                    .or_else(|| (starts <= busy).then(|| "agent_pane_busy".to_owned()));
+                if let Some(code) = code {
+                    let error =
+                        json!({"id":request["id"],"error":{"code":code,"message":"refused"}});
+                    stream
+                        .get_mut()
+                        .write_all(format!("{error}\n").as_bytes())
+                        .await
+                        .unwrap();
+                    continue;
+                }
+            }
             let result = match request["method"].as_str().unwrap() {
                 "workspace.list" => {
                     json!({"type":"workspace_list","workspaces":workspaces.lock().unwrap().clone()})
@@ -2450,4 +2503,94 @@ async fn failed_menu_or_model_intent_save_prevents_api_mutations() {
         assert!(!config.launch_root.join("idea").exists());
         server.abort();
     }
+}
+
+#[tokio::test]
+async fn confirm_words_start_without_typing_the_workspace_name() {
+    for word in ["confirm", "yes", "y"] {
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path());
+        api(&config);
+        let (mut bridge, key) = bridge(&config, None);
+        let (server, calls) = host(&config, None).await;
+        new_model_preview(&mut bridge, &key).await;
+        assert!(last(&bridge).contains("Reply confirm, yes or y (or type: my-idea)"));
+        bridge.inbound(&event("confirm-word", word)).await.unwrap();
+        assert_eq!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| c["method"] == "workspace.create")
+                .count(),
+            1,
+            "{word} did not start the launch"
+        );
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn a_busy_fresh_pane_is_retried_until_its_shell_is_ready() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    api(&config);
+    let (mut bridge, key) = bridge(&config, None);
+    let (server, calls) = host_with_workspaces(
+        &config,
+        None,
+        Arc::new(Mutex::new(vec![
+            json!({"workspace_id":"w1","label":"Main","agent_start_busy":2}),
+        ])),
+    )
+    .await;
+    new_model_preview(&mut bridge, &key).await;
+    bridge.inbound(&event("confirm", "my-idea")).await.unwrap();
+    let starts = |calls: &Arc<Mutex<Vec<Value>>>| {
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c["method"] == "agent.start")
+            .count()
+    };
+    assert_eq!(starts(&calls), 3);
+    assert_eq!(
+        bridge.state.mappings[&key].launch.as_ref().unwrap().phase,
+        herdr_white_noise_bridge::launch::Phase::Started
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn an_agent_start_failure_other_than_busy_is_not_retried() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    api(&config);
+    let (mut bridge, key) = bridge(&config, None);
+    // herdr can return agent_pane_unavailable after it has written the command.
+    let (server, calls) = host_with_workspaces(
+        &config,
+        None,
+        Arc::new(Mutex::new(vec![
+            json!({"workspace_id":"w1","label":"Main","agent_start_error":"agent_pane_unavailable"}),
+        ])),
+    )
+    .await;
+    new_model_preview(&mut bridge, &key).await;
+    bridge.inbound(&event("confirm", "my-idea")).await.unwrap();
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c["method"] == "agent.start")
+            .count(),
+        1
+    );
+    assert_eq!(
+        bridge.state.mappings[&key].launch.as_ref().unwrap().phase,
+        herdr_white_noise_bridge::launch::Phase::Uncertain
+    );
+    server.abort();
 }
