@@ -8167,3 +8167,26 @@ async fn control_chat_is_created_once_and_answers_without_an_agent() {
     );
     mdk.abort();
 }
+
+#[tokio::test]
+async fn control_chat_does_not_block_forwarding_resume() {
+    let root = tempfile::tempdir().unwrap();
+    let mut config = config(root.path());
+    config.control_chat = true;
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge.reconcile(vec![]).await.unwrap();
+
+    herdr_white_noise_bridge::forwarding::set(&config.state_path, false).unwrap();
+    bridge.reconcile(vec![]).await.unwrap();
+    assert!(!bridge.state.forwarding_enabled);
+
+    // A phone message wakes forwarding; the synthetic control chat has no
+    // transcript, so it must not be treated as a blocking checkpoint.
+    herdr_white_noise_bridge::forwarding::set(&config.state_path, true).unwrap();
+    bridge.reconcile(vec![]).await.unwrap();
+    assert!(bridge.state.forwarding_enabled);
+    assert!(!bridge.state.forwarding_resume_pending);
+    mdk.abort();
+}
