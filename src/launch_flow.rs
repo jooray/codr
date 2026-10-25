@@ -435,7 +435,13 @@ pub async fn handle(
 async fn route(bridge: &mut Bridge, key: &str, group: &str, id: &str, text: &str) -> Result<()> {
     let args: Vec<_> = text.split_whitespace().collect();
     let command = args[0].to_ascii_lowercase();
-    if bridge.state.mappings[key].control && matches!(command.as_str(), "/agent" | "/model") {
+    let draft = bridge.state.mappings[key].launch_draft.clone();
+    // A guided /new menu synthesises /agent and /model replies; only a fresh
+    // /agent or /model in the control chat needs a mapped project.
+    if bridge.state.mappings[key].control
+        && draft.is_none()
+        && matches!(command.as_str(), "/agent" | "/model")
+    {
         return launch::reply(
             bridge,
             key,
@@ -444,7 +450,6 @@ async fn route(bridge: &mut Bridge, key: &str, group: &str, id: &str, text: &str
             "The control chat is not mapped to a project. Use /new to start a session.",
         );
     }
-    let draft = bridge.state.mappings[key].launch_draft.clone();
     if draft.as_ref().is_some_and(Draft::blocks_replacement) {
         return launch::reply(bridge, key, group, id, &draft.unwrap().prompt());
     }
