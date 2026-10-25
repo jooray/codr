@@ -819,6 +819,8 @@ async fn start(
         .as_ref()
         .unwrap()
         .agent_args();
+    // A freshly created workspace pane needs its shell before agent.start accepts it.
+    tokio::time::sleep(std::time::Duration::from_millis(750)).await;
     let started = bridge
         .herdr
         .herdr(
