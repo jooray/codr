@@ -8232,3 +8232,69 @@ async fn control_chat_does_not_block_forwarding_resume() {
     assert!(!bridge.state.forwarding_resume_pending);
     mdk.abort();
 }
+
+#[tokio::test]
+async fn forwarding_reset_does_not_reannounce_an_unchanged_blocked_context() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    input_history(
+        &config,
+        "ses_1",
+        &[("prior-input", "Prior task")],
+        Some(("prior-reply", "Prior answer")),
+    );
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    let mut blocked = agent();
+    blocked.agent_status = "blocked".into();
+    blocked.state_change_seq = 2;
+    bridge.state.mappings.insert(
+        blocked.key(),
+        Mapping {
+            group_id_hex: Some("bb".repeat(16)),
+            output_initialised: true,
+            active: true,
+            agent_record: Some(blocked.clone()),
+            last_agent_status: "idle".into(),
+            last_state_change_seq: 1,
+            ..Mapping::default()
+        },
+    );
+    let announced = |bridge: &Bridge| {
+        bridge
+            .state
+            .outbox
+            .iter()
+            .any(|item| item.text.contains("Agent needs input in the terminal"))
+    };
+    for _ in 0..1000 {
+        let _ = bridge.poll_sessions(vec![blocked.clone()]).await;
+        if announced(&bridge) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(announced(&bridge));
+    bridge.state.outbox.clear();
+
+    herdr_white_noise_bridge::forwarding::set(&config.state_path, false).unwrap();
+    let _ = bridge.poll_sessions(vec![blocked.clone()]).await;
+    herdr_white_noise_bridge::forwarding::set(&config.state_path, true).unwrap();
+    for _ in 0..20 {
+        let _ = bridge.poll_sessions(vec![blocked.clone()]).await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        !announced(&bridge),
+        "mute/wake must not repeat an unchanged blocked notice"
+    );
+
+    blocked.state_change_seq = 3;
+    for _ in 0..1000 {
+        let _ = bridge.poll_sessions(vec![blocked.clone()]).await;
+        if announced(&bridge) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(announced(&bridge), "a new blocked context is announced");
+}
