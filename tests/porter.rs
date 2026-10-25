@@ -10,6 +10,7 @@ use tokio::{
 };
 
 fn config(dir: &Path) -> BridgeConfig {
+    let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
     BridgeConfig {
         phone_npub: bech32::encode("npub", [0x11u8; 32].to_base32(), bech32::Variant::Bech32)
             .unwrap(),
@@ -19,6 +20,7 @@ fn config(dir: &Path) -> BridgeConfig {
         state_path: dir.join("state.json"),
         launch_root: dir.join("projects"),
         portr_enabled: false,
+        control_chat: false,
         opencode_bin: dir.join("opencode"),
         opencode_db: None,
         codex_home: dir.join("codex"),

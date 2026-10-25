@@ -71,6 +71,8 @@ fn launch_root_ancestors_cannot_be_symlinks() {
     assert!(!real.join("projects/idea").exists());
 }
 fn config(root: &Path) -> BridgeConfig {
+    // tempfile's macOS root sits behind the /var symlink; launch roots must be real paths.
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     serde_json::from_value(json!({
         "phone_npub":bech32::encode("npub",[0x11u8;32].to_base32(),bech32::Variant::Bech32).unwrap(),
         "account_id_hex":"aa".repeat(32),"herdr_socket":root.join("herdr.sock"),

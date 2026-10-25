@@ -34,7 +34,7 @@ New bridge accounts use the display name **Pat**. New session chats introduce Pa
 
 The phone controls below do not require the optional **portr** desktop/SSH endpoint. That endpoint is disabled unless `portr_enabled = true` is configured or the worker is explicitly started with `run --portr`. See [optional installation](INSTALL.md#optional-portr-desktopssh-access).
 
-Send `/new` in any linked chat. The plugin guides you through **existing or new herdr workspace → folder name → installed agent → model → confirmation**. The four selection headings use bracketed progress: `[1/4] Choose a herdr workspace:`, `[2/4] Folder name:`, `[3/4] Choose an installed agent:`, and `[4/4] Choose a model for OpenCode:` (or the selected agent). The title is outside the brackets. Each prompt explains how to reply:
+Send `/new` in any linked chat or the control chat (below). The plugin guides you through **existing or new herdr workspace → folder name → installed agent → model → confirmation**. The four selection headings use bracketed progress: `[1/4] Choose a herdr workspace:`, `[2/4] Folder name:`, `[3/4] Choose an installed agent:`, and `[4/4] Choose a model for OpenCode:` (or the selected agent). The title is outside the brackets. Each prompt explains how to reply:
 
 1. Existing workspaces are listed first. The final numbered choice is **Create new workspace**, followed by **0. Cancel**. With two workspaces, reply `3` to create a new one. Labels and stable IDs distinguish workspaces with the same name. Use `next` or `previous` for ten-item pages; numbers are global across pages, and the new-workspace number is always one higher than the total workspace count. Page counters appear only when there is more than one page. `/new workspace 1` and `new` also work.
 2. Reply with your chosen folder name, such as `my-idea`, or `0` to cancel. `/new folder my-idea` remains supported. A new workspace uses the folder's final component as its name. An existing workspace receives a new project tab with an explicit cwd; its existing tabs and workspace name stay unchanged.
@@ -65,6 +65,14 @@ Requests survive worker restarts. If a workspace or startup acknowledgement is l
 OpenCode models come from its authenticated V2 `/api/model` catalogue, filtered to enabled, non-deprecated choices. Provider IDs and available variants distinguish otherwise similar names. **OpenAI / Codex** is the OpenAI provider group inside OpenCode, not a switch to the Codex agent. The **Free models** group requires explicit zero input, output, and cache prices in the API; absent prices are not evidence that a subscription model is free. The catalogue uses the target folder's configuration, or the nearest existing parent for a new folder. Codex choices come from its local `models_cache.json` and are labelled **cached**; an absent cache leaves only the backend default. Claude choices are its documented `sonnet`, `opus`, and `haiku` aliases, not a verified account-entitlement list. Backend authentication and account access can still prevent startup.
 
 Selected models and installed agents are checked again before a launch. The plugin never changes global backend settings. It saves intent before a model switch and reads back the selected model. An unconfirmed switch is not repeated, even after a restart, and requires local inspection. Selection commands do not change forwarding mode. Captions, voice transcripts, truncated messages, other senders, and **portr** queue input cannot operate these controls.
+
+### Control chat
+
+Set `control_chat = true` in the bridge configuration and restart the worker. On the next start, the bridge creates one owner-only White Noise group, invites the configured phone, and posts a short welcome. It is not mapped to an agent session; it exists so `/new` does not have to be sent inside a session chat.
+
+The control chat accepts `/new`, `/help`, `/status`, `/recent`, `/queue`, `/sync auto|on|off`, and `/unmute`. `/status` reports the mapped-session count and the current sync mode. Plain text gets a short instruction instead of prompting an agent. `/agent`, `/model`, and `/cancel` describe the currently mapped session, so they are refused there; use `/new` to start a project, then continue in the new chat.
+
+Creation uses the same non-retry rule as session groups: if the group-create response is uncertain, the bridge records `creating` and reports that inspection is needed. `herdr-white-noise-bridge status` prints the control entry with `"control": true` so `resolve-create control --group GROUP_HEX` can be used after inspecting the phone. The control group keeps its fixed name and is skipped by automatic and manual renames.
 
 ### Incremental OpenCode database reads
 

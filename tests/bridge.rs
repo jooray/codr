@@ -21,6 +21,8 @@ fn phone_npub() -> String {
 }
 
 fn config(dir: &std::path::Path) -> BridgeConfig {
+    // tempfile's macOS root sits behind the /var symlink; launch roots must be real paths.
+    let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
     BridgeConfig {
         phone_npub: phone_npub(),
         herdr_socket: dir.join("herdr.sock"),
@@ -29,6 +31,7 @@ fn config(dir: &std::path::Path) -> BridgeConfig {
         state_path: dir.join("state.json"),
         launch_root: dir.join("projects"),
         portr_enabled: false,
+        control_chat: false,
         opencode_bin: dir.join("opencode"),
         opencode_db: None,
         codex_home: dir.join("codex"),
@@ -4665,6 +4668,7 @@ async fn background_reads_limit_parallel_exports_and_ignore_results_after_desk_s
 }
 
 fn editable_config(dir: &std::path::Path) -> BridgeConfig {
+    let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
     serde_json::from_value(json!({
         "phone_npub":phone_npub(), "herdr_socket":dir.join("herdr.sock"),
         "wn_agent_socket":dir.join("wn.sock"), "account_id_hex":"aa".repeat(32),
@@ -9169,5 +9173,113 @@ async fn an_unconfirmed_profile_update_is_not_retried() {
         1
     );
     assert!(bridge.state.mappings[&observed.key()].rename_uncertain);
+    mdk.abort();
+}
+
+#[tokio::test]
+async fn control_chat_is_created_once_and_answers_without_an_agent() {
+    let root = tempfile::tempdir().unwrap();
+    let mut config = config(root.path());
+    config.control_chat = true;
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let mut bridge = Bridge::open(config).unwrap();
+    assert!(bridge.state.mappings.contains_key("control"));
+
+    bridge.reconcile(vec![]).await.unwrap();
+    let control = &bridge.state.mappings["control"];
+    assert_eq!(
+        control.group_id_hex.as_deref(),
+        Some("bb".repeat(16).as_str())
+    );
+    assert!(control.active && !control.creating);
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call["type"] == "group_create_with_admins")
+            .count(),
+        1
+    );
+
+    let mut plain = inbound(HEX, "control-1");
+    plain["message"]["text"] = json!("hello");
+    bridge.inbound(&plain).await.unwrap();
+    assert!(
+        bridge
+            .state
+            .outbox
+            .iter()
+            .any(|item| item.text.contains("control chat") && item.text.contains("/new"))
+    );
+
+    let mut status = inbound(HEX, "control-2");
+    status["message"]["text"] = json!("/status");
+    bridge.inbound(&status).await.unwrap();
+    assert!(
+        bridge
+            .state
+            .outbox
+            .iter()
+            .any(|item| item.text.contains("mapped session"))
+    );
+
+    let mut agent = inbound(HEX, "control-3");
+    agent["message"]["text"] = json!("/agent");
+    bridge.inbound(&agent).await.unwrap();
+    assert!(
+        bridge
+            .state
+            .outbox
+            .last()
+            .is_some_and(|item| item.text.contains("not mapped to a project"))
+    );
+
+    let mut new = inbound(HEX, "control-4");
+    new["message"]["text"] = json!("/new");
+    bridge.inbound(&new).await.unwrap();
+    assert!(
+        bridge
+            .state
+            .outbox
+            .last()
+            .is_some_and(|item| item.text.contains("workspace"))
+    );
+
+    bridge.reconcile(vec![]).await.unwrap();
+    assert!(bridge.state.mappings["control"].active);
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call["type"] == "group_create_with_admins")
+            .count(),
+        1
+    );
+    mdk.abort();
+}
+
+#[tokio::test]
+async fn control_chat_does_not_block_forwarding_resume() {
+    let root = tempfile::tempdir().unwrap();
+    let mut config = config(root.path());
+    config.control_chat = true;
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge.reconcile(vec![]).await.unwrap();
+
+    herdr_white_noise_bridge::forwarding::set(&config.state_path, false).unwrap();
+    bridge.reconcile(vec![]).await.unwrap();
+    assert!(!bridge.state.forwarding_enabled);
+
+    // A phone message wakes forwarding; the synthetic control chat has no
+    // transcript, so it must not be treated as a blocking checkpoint.
+    herdr_white_noise_bridge::forwarding::set(&config.state_path, true).unwrap();
+    bridge.reconcile(vec![]).await.unwrap();
+    assert!(bridge.state.forwarding_enabled);
+    assert!(!bridge.state.forwarding_resume_pending);
     mdk.abort();
 }

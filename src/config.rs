@@ -17,6 +17,9 @@ pub struct BridgeConfig {
     /// Optional same-user desktop endpoint for portr; does not configure SSH.
     #[serde(default)]
     pub portr_enabled: bool,
+    /// Create a standalone owner-only control group for /new and general commands.
+    #[serde(default)]
+    pub control_chat: bool,
     #[serde(default = "default_opencode")]
     pub opencode_bin: PathBuf,
     /// Explicit database/profile selection. None keeps the CLI export reader.

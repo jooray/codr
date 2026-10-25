@@ -129,7 +129,7 @@ async fn main() -> Result<()> {
         for (key, m) in s.mappings {
             println!(
                 "{}",
-                serde_json::json!({"session":key,"group":m.group_id_hex,"creating_uncertain":m.creating,"active":m.active,"state":m.last_agent_status,"pending_prompt":m.pending_prompt,"queued_prompts":m.prompt_queue.len(),"queue_submission_uncertain":m.queue_flight.as_ref().is_some_and(|flight| !flight.confirmed),"unresolved_progress":s.outbox.iter().filter(|item| Some(&item.group)==m.group_id_hex.as_ref() && item.response.as_ref().is_some_and(|delivery| delivery.finished && delivery.target.is_none() && delivery.initial_text.is_some() && !delivery.durable)).count(),"forwarding_enabled":forwarding_enabled,"forwarding_resume_pending":resume_pending})
+                serde_json::json!({"session":key,"group":m.group_id_hex,"control":m.control,"creating_uncertain":m.creating,"active":m.active,"state":m.last_agent_status,"pending_prompt":m.pending_prompt,"queued_prompts":m.prompt_queue.len(),"queue_submission_uncertain":m.queue_flight.as_ref().is_some_and(|flight| !flight.confirmed),"unresolved_progress":s.outbox.iter().filter(|item| Some(&item.group)==m.group_id_hex.as_ref() && item.response.as_ref().is_some_and(|delivery| delivery.finished && delivery.target.is_none() && delivery.initial_text.is_some() && !delivery.durable)).count(),"forwarding_enabled":forwarding_enabled,"forwarding_resume_pending":resume_pending})
             );
         }
         return Ok(());
@@ -155,6 +155,7 @@ async fn main() -> Result<()> {
                 .state
                 .mappings
                 .values()
+                .filter(|m| !m.control)
                 .filter_map(|m| m.group_id_hex.clone())
                 .filter(|id| group.as_ref().is_none_or(|g| g == id))
                 .collect();
