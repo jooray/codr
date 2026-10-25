@@ -10,6 +10,7 @@ pub mod outbound_images;
 pub mod output;
 mod reads;
 pub mod state;
+pub mod update;
 pub mod wire;
 pub use config::BridgeConfig;
 pub use state::BridgeState;

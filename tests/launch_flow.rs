@@ -256,7 +256,7 @@ async fn account_model_groups_and_variants_are_separate_restart_safe_menus() {
 }
 
 #[tokio::test]
-async fn typing_the_displayed_workspace_name_confirms_but_wrong_or_unsafe_names_do_not() {
+async fn typing_the_displayed_project_name_confirms_but_wrong_or_unsafe_names_do_not() {
     let root = tempfile::tempdir().unwrap();
     let config = config(root.path());
     api(&config);
@@ -371,7 +371,7 @@ async fn grouped_models_support_back_cancel_and_provider_qualified_leaf_choices(
 }
 
 #[tokio::test]
-async fn workspace_name_confirmation_rechecks_renames_and_expiry() {
+async fn project_name_confirmation_rechecks_destination_renames_and_expiry() {
     let root = tempfile::tempdir().unwrap();
     let config = config(root.path());
     api(&config);
@@ -381,12 +381,25 @@ async fn workspace_name_confirmation_rechecks_renames_and_expiry() {
     ]));
     let (server, calls) = host_with_workspaces(&config, None, workspaces.clone()).await;
     existing_workspace_preview(&mut bridge, &key, 1).await;
-    assert!(last(&bridge).contains("Confirm by typing:\nMain\n\n**0. Cancel**"));
-    workspaces.lock().unwrap()[0]["label"] = json!("Renamed");
-    bridge.inbound(&event("old-name", "Main")).await.unwrap();
-    assert!(last(&bridge).contains("Confirm by typing:\nRenamed"));
+    assert!(last(&bridge).contains("Confirm by typing:\nside-project\n\n**0. Cancel**"));
+    bridge
+        .inbound(&event("workspace-is-not-project", "Main"))
+        .await
+        .unwrap();
+    assert!(last(&bridge).contains("does not match"));
     assert!(!config.launch_root.join("side-project").exists());
-    bridge.inbound(&event("wrong-name", "Main")).await.unwrap();
+    workspaces.lock().unwrap()[0]["label"] = json!("Renamed");
+    bridge
+        .inbound(&event("project-name", "side-project"))
+        .await
+        .unwrap();
+    assert!(last(&bridge).contains("Renamed (w1)"));
+    assert!(last(&bridge).contains("Confirm by typing:\nside-project"));
+    assert!(!config.launch_root.join("side-project").exists());
+    bridge
+        .inbound(&event("wrong-name", "Renamed"))
+        .await
+        .unwrap();
     assert!(last(&bridge).contains("does not match"));
     bridge
         .state
@@ -397,7 +410,10 @@ async fn workspace_name_confirmation_rechecks_renames_and_expiry() {
         .as_mut()
         .unwrap()
         .expires_at = 0;
-    bridge.inbound(&event("expired", "Renamed")).await.unwrap();
+    bridge
+        .inbound(&event("expired", "side-project"))
+        .await
+        .unwrap();
     assert!(last(&bridge).contains("expired"));
     assert!(!config.launch_root.join("side-project").exists());
     assert!(calls.lock().unwrap().iter().all(|c| matches!(
@@ -405,6 +421,92 @@ async fn workspace_name_confirmation_rechecks_renames_and_expiry() {
         Some("workspace.list" | "workspace.get")
     )));
     server.abort();
+}
+
+#[tokio::test]
+async fn repository_folder_name_not_existing_workspace_name_confirms_after_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    api(&config);
+    let (mut bridge, key) = bridge(&config, None);
+    let (server, calls) = host(&config, None).await;
+    existing_workspace_preview(&mut bridge, &key, 1).await;
+    assert!(last(&bridge).contains("Workspace destination: Main (w1)"));
+    assert!(last(&bridge).contains("Confirm by typing:\nside-project\n"));
+    drop(bridge);
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge
+        .inbound(&event("wrong-workspace-name", "Main"))
+        .await
+        .unwrap();
+    assert!(!config.launch_root.join("side-project").exists());
+    let confirm = event("confirm-project", "side-project");
+    bridge.inbound(&confirm).await.unwrap();
+    bridge.inbound(&confirm).await.unwrap();
+    assert!(config.launch_root.join("side-project").is_dir());
+    let calls = calls.lock().unwrap();
+    assert_eq!(
+        calls.iter().filter(|c| c["method"] == "tab.create").count(),
+        1
+    );
+    assert!(!calls.iter().any(|c| c["method"] == "workspace.create"));
+    server.abort();
+}
+
+#[tokio::test]
+async fn confirmation_uses_the_exact_dotted_folder_basename_not_a_workspace_label() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    api(&config);
+    let (mut bridge, _) = bridge(&config, None);
+    let (server, calls) = host(&config, None).await;
+    bridge
+        .inbound(&event(
+            "propose",
+            "/new workspace-label parent/repo.v2 opencode",
+        ))
+        .await
+        .unwrap();
+    assert!(last(&bridge).contains("Confirm by typing:\nrepo.v2\n"));
+    bridge
+        .inbound(&event("wrong-label", "workspace-label"))
+        .await
+        .unwrap();
+    assert!(!config.launch_root.join("parent/repo.v2").exists());
+    bridge
+        .inbound(&event("confirm-folder", "repo.v2"))
+        .await
+        .unwrap();
+    assert!(config.launch_root.join("parent/repo.v2").is_dir());
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c["method"] == "workspace.create")
+            .count(),
+        1
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_zero_named_repository_keeps_zero_as_cancel_not_confirmation() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    api(&config);
+    let (mut bridge, key) = bridge(&config, None);
+    bridge
+        .inbound(&event("propose-zero", "/new workspace-label 0 opencode"))
+        .await
+        .unwrap();
+    assert!(last(&bridge).contains("Confirm by typing:\n/new confirm\n"));
+    bridge.inbound(&event("cancel-zero", "0")).await.unwrap();
+    assert_eq!(
+        bridge.state.mappings[&key].launch.as_ref().unwrap().phase,
+        herdr_white_noise_bridge::launch::Phase::Cancelled
+    );
+    assert!(!config.launch_root.join("0").exists());
 }
 
 #[tokio::test]
@@ -1180,9 +1282,11 @@ method,path=args[1:3]; body=json.loads(args[args.index('--data')+1]) if '--data'
 if path.startswith('/api/model?'): print(json.dumps({'data':state['models']}));sys.exit()
 if method=='post' and path=='/api/session':
  if state['mode']=='fail-create': sys.exit(1)
+ if 'canonical_variant' in state: body['model']['variant']=state['canonical_variant']
  state['sessions'][body['id']]=body;store.write_text(json.dumps(state));print(json.dumps({'data':body}));sys.exit()
 session=path.split('/')[3]
 if method=='post' and path.endswith('/model'):
+ if 'canonical_variant' in state: body['model']['variant']=state['canonical_variant']
  state['sessions'][session]['model']=body['model'];store.write_text(json.dumps(state))
  if state['mode']=='lost-switch':sys.exit(1)
  sys.exit()
@@ -1822,6 +1926,86 @@ async fn guided_new_creates_a_model_selected_native_session_only_after_confirmat
 }
 
 #[tokio::test]
+async fn new_project_accepts_opencodes_canonical_default_variant_without_duplicate_sessions() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    api(&config);
+    change_api_state(&config, |s| s["canonical_variant"] = json!("default"));
+    let (mut bridge, key) = bridge(&config, None);
+    let (server, calls) = host(&config, None).await;
+    existing_workspace_preview(&mut bridge, &key, 1).await;
+    let confirmation = event("confirm-project", "side-project");
+    bridge.inbound(&confirmation).await.unwrap();
+    assert_eq!(
+        bridge.state.mappings[&key].launch.as_ref().unwrap().phase,
+        herdr_white_noise_bridge::launch::Phase::Started
+    );
+    let native = bridge.state.mappings[&key]
+        .launch
+        .as_ref()
+        .unwrap()
+        .native_session
+        .clone()
+        .unwrap();
+    assert_eq!(
+        api_state(&config)["sessions"][&native]["model"]["variant"],
+        "default"
+    );
+    drop(bridge);
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge.inbound(&confirmation).await.unwrap();
+    bridge
+        .inbound(&event("confirm-again", "/new confirm"))
+        .await
+        .unwrap();
+    assert_eq!(
+        api_calls(&config)
+            .iter()
+            .filter(|c| c[1] == "post" && c[2] == "/api/session")
+            .count(),
+        1
+    );
+    let calls = calls.lock().unwrap();
+    assert_eq!(
+        calls.iter().filter(|c| c["method"] == "tab.create").count(),
+        1
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| c["method"] == "agent.start")
+            .count(),
+        1
+    );
+    assert!(!calls.iter().any(|c| c["method"] == "workspace.create"));
+    server.abort();
+}
+
+#[tokio::test]
+async fn new_project_does_not_accept_an_unrequested_nondefault_variant() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    api(&config);
+    change_api_state(&config, |s| s["canonical_variant"] = json!("high"));
+    let (mut bridge, key) = bridge(&config, None);
+    let (server, calls) = host(&config, None).await;
+    existing_workspace_preview(&mut bridge, &key, 1).await;
+    bridge
+        .inbound(&event("confirm-project", "side-project"))
+        .await
+        .unwrap();
+    assert_eq!(
+        bridge.state.mappings[&key].launch.as_ref().unwrap().phase,
+        herdr_white_noise_bridge::launch::Phase::Uncertain
+    );
+    assert!(calls.lock().unwrap().iter().all(|c| matches!(
+        c["method"].as_str(),
+        Some("workspace.list" | "workspace.get")
+    )));
+    server.abort();
+}
+
+#[tokio::test]
 async fn agent_selection_creates_a_separate_tab_without_changing_the_old_chat() {
     let root = tempfile::tempdir().unwrap();
     let config = config(root.path());
@@ -1895,50 +2079,55 @@ async fn agent_selection_creates_a_separate_tab_without_changing_the_old_chat() 
 
 #[tokio::test]
 async fn existing_opencode_model_switch_is_confirmed_in_place_and_never_repeated() {
-    let root = tempfile::tempdir().unwrap();
-    let config = config(root.path());
-    api(&config);
-    let agent = source(&config, "opencode");
-    let (mut bridge, key) = bridge(&config, Some(agent.clone()));
-    let (server, calls) = host(&config, Some(agent)).await;
-    bridge.inbound(&event("open", "/model")).await.unwrap();
-    let code = model_code(&mut bridge, &key).await;
-    bridge
-        .inbound(&event("choose", &format!("/model {code} 2")))
-        .await
-        .unwrap();
-    let code = draft_code(&bridge, &key);
-    assert!(last(&bridge).contains("/model confirm"));
-    assert_eq!(
-        api_state(&config)["sessions"]["ses_existing"]["model"]["id"],
-        "model-1"
-    );
-    let confirmation = event("confirm", &format!("/model confirm {code}"));
-    bridge.inbound(&confirmation).await.unwrap();
-    assert_eq!(
-        api_state(&config)["sessions"]["ses_existing"]["model"]["id"],
-        "model-2"
-    );
-    assert!(last(&bridge).contains("Model changed"));
-    drop(bridge);
-    let mut bridge = Bridge::open(config.clone()).unwrap();
-    bridge.inbound(&confirmation).await.unwrap();
-    bridge
-        .inbound(&event("again", &format!("/model confirm {code}")))
-        .await
-        .unwrap();
-    assert_eq!(
-        api_calls(&config).iter().filter(|c| c[1] == "post").count(),
-        1
-    );
-    assert!(
-        calls
-            .lock()
-            .unwrap()
-            .iter()
-            .all(|c| c["method"] == "agent.get")
-    );
-    server.abort();
+    for canonical in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path());
+        api(&config);
+        if canonical {
+            change_api_state(&config, |s| s["canonical_variant"] = json!("default"));
+        }
+        let agent = source(&config, "opencode");
+        let (mut bridge, key) = bridge(&config, Some(agent.clone()));
+        let (server, calls) = host(&config, Some(agent)).await;
+        bridge.inbound(&event("open", "/model")).await.unwrap();
+        let code = model_code(&mut bridge, &key).await;
+        bridge
+            .inbound(&event("choose", &format!("/model {code} 2")))
+            .await
+            .unwrap();
+        let code = draft_code(&bridge, &key);
+        assert!(last(&bridge).contains("/model confirm"));
+        assert_eq!(
+            api_state(&config)["sessions"]["ses_existing"]["model"]["id"],
+            "model-1"
+        );
+        let confirmation = event("confirm", &format!("/model confirm {code}"));
+        bridge.inbound(&confirmation).await.unwrap();
+        assert_eq!(
+            api_state(&config)["sessions"]["ses_existing"]["model"]["id"],
+            "model-2"
+        );
+        assert!(last(&bridge).contains("Model changed"));
+        drop(bridge);
+        let mut bridge = Bridge::open(config.clone()).unwrap();
+        bridge.inbound(&confirmation).await.unwrap();
+        bridge
+            .inbound(&event("again", &format!("/model confirm {code}")))
+            .await
+            .unwrap();
+        assert_eq!(
+            api_calls(&config).iter().filter(|c| c[1] == "post").count(),
+            1
+        );
+        assert!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|c| c["method"] == "agent.get")
+        );
+        server.abort();
+    }
 }
 
 #[tokio::test]

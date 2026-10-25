@@ -40,7 +40,7 @@ Send `/new` in any linked chat. The plugin guides you through **existing or new 
 2. Reply with your chosen folder name, such as `my-idea`, or `0` to cancel. `/new folder my-idea` remains supported. A new workspace uses the folder's final component as its name. An existing workspace receives a new project tab with an explicit cwd; its existing tabs and workspace name stay unchanged.
 3. Reply with a listed number to choose an installed agent: OpenCode, Codex, or Claude Code. `/agent 1` also works.
 4. Model selection starts with **Backend default**, when supported, then provider groups such as **View OpenAI / Codex models**, **View Claude models**, and **View Free models**. Select a provider/category to receive its **full available model list**, with no pagination. This also applies when only one provider is available. Variants appear only after selecting a model that has them, as a separate full list. Use `back` to return to the preceding model menu. Long lists use the existing encrypted message-size limit and are delivered in consecutive messages without dropping options. `/model 2` also works. A default-only catalogue shows just its default choice. Older saved flat menus keep their original numbering and pagination until you start a fresh selection.
-5. The complete preview shows the existing workspace's label and ID or the new-workspace choice, full folder path, agent, model, and whether the folder exists or will be created. It says **Confirm within ten minutes** and **Confirm by typing:** followed by the destination workspace name (or the new workspace name). Reply with that exact displayed name to confirm, or `0` to cancel. A wrong name stays within the confirmation flow, never becomes an agent prompt, and creates nothing. After expiry, the next plain reply closes the expired confirmation and reports expiry; later messages follow normal chat routing. `/new confirm` remains supported. If a workspace name is `0` or begins with `/`, the preview uses `/new confirm` to avoid conflicting with controls.
+5. The complete preview shows the existing workspace's label and ID or the new-workspace choice, full folder path, agent, model, and whether the folder exists or will be created. It says **Confirm within ten minutes** and **Confirm by typing:** followed by the **repository folder name** (the final path component), not the workspace label. For example, creating `tools/repo.v2` inside workspace `Main` is confirmed by `repo.v2`, not `Main`. Reply with that exact displayed name to confirm, or `0` to cancel. A wrong name stays within the confirmation flow, never becomes an agent prompt, and creates nothing. Destination workspace renames still require a fresh preview and confirmation. After expiry, the next plain reply closes the expired confirmation and reports expiry; later messages follow normal chat routing. `/new confirm` remains supported. If the repository folder is named `0`, the preview uses `/new confirm` so `0` remains cancellation.
 
 Workspace selection does not create anything. If the existing-workspace list is unavailable, the menu says so: retry with `/new`, or explicitly choose a new workspace. Before launch, the plugin checks the selected existing workspace again. If it was renamed, a new confirmation is required. If it is gone or unavailable, launch stops without creating a folder or using another workspace. There is no automatic fallback to a new workspace.
 
@@ -124,7 +124,7 @@ To resume forwarding without asking an agent to do work, send `unmute` or `/unmu
 
 In the popup, enter **1** for At desk, **2** for Away, **3** to toggle, or **q** to close. Press Enter after your choice. Muting applies to every mapped session; it does not stop the transport or change your groups.
 
-The selected mode survives restarts. Mode changes discard the automatic outgoing backlog, but preserve explicitly requested `/help` and `/recent` replies. Before Away becomes active, the bridge checkpoints replies for all active sessions. The popup shows **Away requested** while a transcript checkpoint is pending. Completed muted turns remain suppressed even if their transcript records arrive late. An operation already submitted to MDK can still arrive after you select At desk.
+The selected mode survives restarts. Mode changes discard the automatic outgoing backlog, but preserve explicitly requested `/help` and `/recent` replies and the edit targets of already-attempted progress messages. Muting pauses those edits; resuming reuses the same progress bubble or finishes it as `done` if a completed reply was recorded while muted. Before Away becomes active, the bridge checkpoints replies for all active sessions. The popup shows **Away requested** while a transcript checkpoint is pending. Completed muted turns remain suppressed even if their transcript records arrive late. An operation already submitted to MDK can still arrive after you select At desk.
 
 Phone sync overrides are persistent: `/sync on` means **Always on**, `/sync off` means **Always off**, and `/sync auto` restores normal automatic behavior. Local activity, phone wake-up, and the At desk/Away controls do not change a forced mode. `/unmute` clears it and requests automatic sync with all chats unmuted. `/help` and bare `/sync` show the current mode. Always off suppresses automatic outgoing messages but does not hold new phone text from reaching the agent; explicit control replies and `/recent` still work. Returning to an enabled state retains the history checkpoint before outgoing sync resumes.
 
@@ -146,6 +146,7 @@ Send these as standalone text from the configured owner's account in a linked ch
 | Command | Result |
 | --- | --- |
 | `/help` | List commands and the current sync mode in this chat only. |
+| `/update` | Check stable ngit releases and offer a chat-bound confirmation before updating the managed bridge worker. |
 | `/recent` | Get newest 3 of all active <1h: send up to three conversation text messages, labelled You or Agent with section breaks, to each chat active in the past hour. Does not resume sync. |
 | `/sync auto\|on\|off` | Set a persistent sync mode. Bare `/sync` shows the current mode and choices. |
 | `/status` | Show connection, agent state and pending delivery count. Resumes sync in automatic mode; a forced-off override remains off until `/unmute` or a new sync-mode choice. |
@@ -169,15 +170,65 @@ Within that three-message excerpt, already delivered or pending messages are rem
 
 Recognition ignores capitalization and surrounding whitespace for standalone controls. Longer prose, attachment captions, voice transcripts, and truncated input cannot operate these controls. Use a listed number, an exact option label, or `/answer 2` for a supported pending decision; include the question code when its card requests one.
 
+### Confirmed updates from ngit
+
+Send `/update` as standalone owner text. A background, read-only check selects
+the newest stable numeric codr release published by the pinned maintainer:
+`npub19at4nqjjymca2lh3v546vcg5ktun3al4c5xu2pts3ewckv0y70ys0gupzr`.
+It uses the existing ngit repository and the author's `codr` application records.
+The host needs ngit v3 and Git in its service PATH. No Nostr signing credentials
+or GitHub access are needed for this command. Release signatures are checked by
+ngit; the updater also checks the pinned author/application and asset metadata.
+
+The offer displays the running and available versions. Reply with the exact
+`/update confirm CODE` shown in that chat within ten minutes, or `/update cancel`.
+There is no installation from plain numbers, another chat, attachment captions,
+voice transcripts, or another participant. Confirmation and the selected release
+event/hashes survive restarts. Equal/older versions are never installed. A new
+check replaces that chat's previous offer. A restart during the read-only check
+may require another `/update`; it never starts an installation by itself.
+
+After confirmation, an independent per-user systemd or launchd job revalidates
+the pinned release event. It downloads this platform's bridge archive and its
+checksum from independent HTTPS Blossom URLs, verifies both signed hashes and
+sizes, and checks the archive checksum and expected regular executable. GitHub
+URLs and redirects are rejected, with no fallback. macOS signature validation
+uses the existing installer. Missing, incomplete or conflicting records leave
+the running executable unchanged.
+
+Only the standard `~/.local/bin/herdr-white-noise-bridge` installation supervised
+by codr's existing per-user service is supported. The candidate must expose
+`update-info`, match the confirmed version and current connector pin/patch,
+protocol and state cohort, and read the existing configuration/state successfully.
+A different connector/storage cohort is refused; use local setup and its backup
+and migration approval gates instead. Neither the connector nor herdr's coding
+sessions are restarted, and no accepted work is cleared or automatically replayed.
+
+The updater keeps the old executable and a stopped, private state backup under
+the routing state's `.updates` directory. It replaces the executable atomically,
+starts the bridge, and requires a version/job/PID-bound startup receipt. Failed
+startup restores the old executable and verifies its restart. **Rollback never
+restores an older routing state**, which could lose receipts or repeat work.
+If rollback cannot confirm startup, local intervention is required.
+
+One installation may be pending globally. `/update cancel` cannot interrupt an
+already confirmed installation. An uncertain scheduler acknowledgement is not
+automatically retried: inspect the `codr-update-*` systemd job or launchd job and
+the private `request.json`/`result.json` records before recovery. Completion or
+rollback is reported in the original encrypted chat. Missing completion does not
+prove failure or authorize a second install.
+
 ### Immediate text and persistent pending deliveries
 
 An ordinary complete owner text prompt goes directly to the freshly verified mapped agent, including while it is working. It does not wait in codr for idle or interrupt the current task. The agent may still use its own native inbox. A blocked native dialog is reported without silently making a future task; answer its supported decision or permission request, or use `/cancel`. Duplicate inbound events do not submit again. Phone text may reach the agent before an older media item finishes preparation.
 
-Media and the optional desktop endpoint retain bounded pending delivery: 16 waiting items per chat and 30000 UTF-8 bytes per queued text/caption or prepared image prompt. A full queue or oversized waiting prompt gets a rejection notice, not silent eviction. An image message occupies one slot, keeps its caption, and accepts up to four PNG, JPEG, WebP, or GIF attachments, with the existing 25 MiB-per-file download limit. Voice handling is unchanged. New phone text has no 16-task waiting queue.
+Image preparation and legacy text/desktop deliveries share 16 accepted slots per chat and a 30000 UTF-8 byte caption/text limit on acceptance. A full preparation FIFO or oversized caption gets a rejection notice, not silent eviction. An image message occupies one slot, keeps its caption, and accepts up to four PNG, JPEG, WebP, or GIF attachments, with the existing 25 MiB-per-file download limit. Voice retains local transcription; it no longer waits for agent idle. New phone text has no 16-task waiting queue.
 
-Images are prepared when their retained FIFO item reaches an idle agent. References and private prepared paths survive worker restarts. A processing failure reports that no image prompt was sent and releases the failed item. Missing offline download references remain pending for recovery. The retired `/clear-queue` command returns a retirement notice and does not delete accepted images or text.
+Images download and voice messages transcribe while the agent works. Once preparation completes, codr submits the caption/image path or transcript immediately, without waiting for a completed reply or interrupting the agent. Image preparation remains FIFO; older legacy text deliveries do not hold it up. Outgoing sync-off does not block prepared owner media. A native blocking dialog or unavailable/changed session still defers delivery safely. References and private prepared paths survive worker restarts. A processing failure reports that no image prompt was sent and releases only that failed item. Missing offline download references remain pending for recovery. The retired `/clear-queue` command returns a retirement notice and does not delete accepted images or text.
 
-Previously accepted text, media and desktop deliveries run independently per chat using the existing guarded dispatch path. They still require the same native session, an idle readiness check, enabled sync and a supported transcript reader. An early idle event alone is not completion. Muting pauses these retained deliveries without discarding them; ending a session never reroutes them to another session. This retained path does not hold new phone text.
+ZIP archives, documents and other non-audio attachments also download while the agent works. The agent receives the caption, a private local file path and the quoted original filename. The bridge does not extract archives, execute files, render active content or require transcription for ordinary files. Remote filenames are never used as destination paths. Up to four files are accepted per message, with a 25 MiB-per-file limit; regular-file, size and download MIME checks still apply. Prepared file paths and duplicate-delivery receipts survive restarts. File preparation errors are reported separately from audio/transcription failures.
+
+Previously accepted legacy text and desktop deliveries run independently per chat using the existing guarded dispatch path. These non-media deliveries still require the same native session, an idle readiness check, enabled sync and a supported transcript reader. An early idle event alone is not completion. Muting pauses these retained deliveries without discarding them; ending a session never reroutes them to another session. This retained path does not hold new phone text or ready media.
 
 The bridge saves consumption and submission intent before native input. A proven pre-submission socket failure retains the message for retry without clearing a running task. A lost acknowledgement, uncertain result, or restart during submission is never automatically repeated. Inspect the terminal, then use local `clear-prompt` to release a retained-delivery hold; it does not resubmit the uncertain task. `/queue` inspects pending state while muted or disconnected. `/cancel` interrupts only a freshly verified active task, persists its receipt before submission, and never repeats an uncertain interrupt automatically.
 
@@ -187,11 +238,11 @@ Set `edit_responses = true` in the bridge configuration to enable editable progr
 
 Each response starts as one `> working...` progress message. The bridge edits that message with the current task list, when available. It sends the final answer as a separate message through the normal durable send path, with its own retry key. The bridge never edits that final answer. When possible, it marks the progress message `> done`.
 
-When an agent resumes from a blocked decision, or a phone follow-up is delivered while it is working, the bridge also posts a fresh `> working...` notice below newer chat messages. Unsent notices coalesce. Direct text delivery does not claim a queue position; retained media still acknowledges `Queued prompt at position N.`. This is not a heartbeat: polling and restarts do not repeat the notice. Refreshes are best effort, follow durable answers, and are discarded when the agent stops working.
+Phone follow-ups and blocked-to-working transitions reuse the current editable progress bubble; they do not append standalone `> working...` notices. The same bubble becomes `done` when the response completes. Without editable responses, follow-ups still do not emit extra working refreshes. Previously sent historical notices remain in the chat. Image acceptance says `Preparing image`, not `Queued prompt`: this is download preparation, not scheduling a future task. Media preparation never clears an existing response or submission receipt.
 
 OpenCode to-do writes, Codex plan updates, and Claude Code to-do/task tools supply structured task data. The bridge does not prompt a model to obtain progress. Message IDs and pending updates survive bridge restarts. Updates coalesce between snapshots, and edit attempts are at least two timestamp seconds apart.
 
-Progress is best effort. Final replies take priority over progress updates, and progress requests have a three-second local deadline. A failed progress edit does not block a queued final answer. An MDK response or local readback does not prove phone delivery. Very long final replies use continuation messages to preserve all text. Progress messages are ordinary encrypted chat messages, not Nostr ephemeral events.
+Progress updates have a three-second local deadline. Final replies take priority. A failed completion edit keeps its known target and retries after restart or connectivity recovery, without blocking a queued final answer or a later request's progress. If an initial progress send lost its acknowledgement and its target remains unknown, completion retains that record for local inspection (`status` reports `unresolved_progress`) instead of replaying a send that could create a replacement bubble after transport receipts expire. Progress that was never attempted is discarded after completion. An MDK response or local readback does not prove phone delivery. Very long final replies use continuation messages to preserve all text. Progress messages are ordinary encrypted chat messages, not Nostr ephemeral events.
 
 If **herdr** becomes idle before the agent stores its final reply, the bridge keeps the `working...` progress bubble and its checklist, continues reading task updates, and retries the final transcript read. It marks progress done only when the completed reply is collected. After inspection, `clear-prompt` can release a cancelled response that has no final record.
 
@@ -209,7 +260,9 @@ OpenCode V2 exports omit running questions. The bridge reads V2's live session f
 
 The bridge checks the session, pending tool request, and visible question before sending the native number shortcut. If a question was not answered through **codr** and is replaced, the new card requires its short code, for example `qabc123 1`. Duplicate deliveries and uncertain submissions are not sent again automatically.
 
-Decision routing was verified against OpenCode 1.18.35's single-choice question UI with 1–9 listed options. The gallery uses OpenCode 1.19.3, but does not verify live decision routing on that version. Custom text entry, multi-select/multi-question dialogs, and decisions in other backends require the terminal. Unsupported OpenCode blockers show a short notice instead of forwarding unrelated tool output.
+For supported OpenCode V2 questions that allow custom input, type a complete text answer directly, such as `v6.6.6`, or use `/answer TEXT`. The bridge sends it to the freshly checked native form through the authenticated API, not as a prompt or arbitrary terminal keys. A combined reply such as `1 v6.6.6` remains literal custom text. If the question changed, prefix the text with its current question code. Custom replies are limited to 4000 UTF-8 bytes; an answer beginning with `/` must use `/answer TEXT` so commands keep their meaning. Prepared media is not automatically submitted as custom text. Submission intent is saved before the API call, and an uncertain outcome is never automatically retried.
+
+Legacy shortcut routing was verified against OpenCode 1.18.35's single-choice question UI with 1–9 listed options. The gallery uses OpenCode 1.19.3, but does not verify live decision routing on that version. Custom text entry for legacy forms or questions that do not expose a native custom field, multi-select/multi-question dialogs, and decisions in other backends still require the terminal. Unsupported OpenCode blockers show a short notice instead of forwarding unrelated tool output.
 
 OpenCode V2 tool permissions can show a separate permission card. The configured phone owner can reply with `/allow CODE` for **Allow once**, or `/reject CODE`. Use the code from that card in the same chat. **Always allow** remains terminal-only. The bridge checks the session and the exact pending request before sending an API reply; it never sends terminal keys or changes persistent permission rules. Replies bypass the task queue and do not resume muted forwarding. An uncertain reply is not retried, including after restart; check the terminal instead. Multiple pending permissions, oversized requests, unsafe display text, and unavailable permission APIs require the terminal.
 

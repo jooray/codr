@@ -23,6 +23,14 @@ impl Model {
     pub fn same_reference(&self, other: &Self) -> bool {
         self.id == other.id && self.provider == other.provider && self.variant == other.variant
     }
+    pub fn matches_reference(&self, actual: &Value) -> bool {
+        let mut expected = self.reference();
+        // OpenCode makes an omitted variant explicit in session responses.
+        if self.variant.is_none() && actual["variant"] == "default" {
+            expected["variant"] = json!("default");
+        }
+        *actual == expected
+    }
     pub fn reference(&self) -> Value {
         let mut value = json!({"id":self.id,"providerID":self.provider});
         if let Some(variant) = &self.variant {

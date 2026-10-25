@@ -1,6 +1,7 @@
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use unicode_width::UnicodeWidthStr;
 
 fn custom_default() -> bool {
@@ -29,6 +30,8 @@ pub struct Question {
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Decision {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub form_id: Option<String>,
     pub questions: Vec<Question>,
     #[serde(default)]
     pub announced: bool,
@@ -38,12 +41,32 @@ pub struct Decision {
     pub requires_token: bool,
 }
 
+#[derive(Debug, PartialEq)]
+pub enum Answer {
+    Choice(usize),
+    Custom(String),
+}
+
+fn question_code(word: &str) -> bool {
+    matches!(word.len(), 7 | 17)
+        && word.as_bytes()[0].eq_ignore_ascii_case(&b'q')
+        && word.as_bytes()[1..]
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
 impl Decision {
     pub fn same_request(&self, other: &Self) -> bool {
-        self.id == other.id && self.questions == other.questions
+        self.id == other.id && self.form_id == other.form_id && self.questions == other.questions
     }
 
     pub fn token(&self) -> String {
+        if let Some(form) = &self.form_id {
+            let identity = serde_json::to_vec(&(&self.id, form, &self.questions))
+                .expect("Question identity serializes");
+            let digest = hex::encode(Sha256::digest(identity));
+            return format!("q{}", &digest[..16]);
+        }
         let tail: String = self.id.chars().rev().take(6).collect();
         format!("q{}", tail.chars().rev().collect::<String>().to_lowercase())
     }
@@ -52,6 +75,10 @@ impl Decision {
         self.questions.len() == 1
             && !self.questions[0].multiple
             && (1..=9).contains(&self.questions[0].options.len())
+    }
+
+    pub fn supports_custom(&self) -> bool {
+        self.supported() && self.questions[0].custom && self.form_id.is_some()
     }
 
     pub fn text(&self) -> String {
@@ -80,25 +107,32 @@ impl Decision {
                 self.token(),
                 self.token()
             ));
+            if self.supports_custom() {
+                text.push_str(" A custom text answer can follow the same question code.");
+            }
         } else {
             text.push_str("\n\nReply with the option number or its label.");
-            if self.questions[0].custom {
+            if self.supports_custom() {
+                text.push_str(
+                    " Or type your custom answer directly; /answer TEXT is also supported.",
+                );
+            } else if self.questions[0].custom {
                 text.push_str(" Use the terminal for a custom answer.");
             }
         }
         text
     }
 
-    pub fn choice(&self, text: &str) -> Result<usize> {
-        ensure!(
-            self.supported(),
-            "This dialog needs an answer in the terminal."
-        );
+    fn answer_text<'a>(&self, text: &'a str) -> Result<&'a str> {
         let text = text.trim();
         let text = text.strip_prefix("/answer ").unwrap_or(text).trim();
         let mut words = text.splitn(2, char::is_whitespace);
         let first = words.next().unwrap_or("").trim_end_matches(':');
         let token_present = first.eq_ignore_ascii_case(&self.token());
+        ensure!(
+            !question_code(first) || token_present,
+            "That question code is stale. Use the code on the current question card."
+        );
         let answer = if token_present {
             words.next().unwrap_or("").trim()
         } else {
@@ -108,6 +142,15 @@ impl Decision {
             !self.requires_token || token_present,
             "The question changed. Include its question code with your answer."
         );
+        Ok(answer)
+    }
+
+    pub fn choice(&self, text: &str) -> Result<usize> {
+        ensure!(
+            self.supported(),
+            "This dialog needs an answer in the terminal."
+        );
+        let answer = self.answer_text(text)?;
         if !answer.is_empty()
             && answer.bytes().all(|byte| byte.is_ascii_digit())
             && let Ok(index) = answer.parse::<usize>()
@@ -129,6 +172,26 @@ impl Decision {
         )
     }
 
+    pub fn answer(&self, text: &str) -> Result<Answer> {
+        if let Ok(choice) = self.choice(text) {
+            return Ok(Answer::Choice(choice));
+        }
+        ensure!(
+            self.supports_custom(),
+            "Reply with a listed option number or its label. Custom answers for this dialog need the terminal."
+        );
+        let answer = self.answer_text(text)?;
+        ensure!(
+            !answer.is_empty() && answer.len() <= 4000,
+            "Custom answers must contain 1–4000 UTF-8 bytes."
+        );
+        ensure!(
+            !text.trim().starts_with('/') || text.trim().starts_with("/answer "),
+            "Use /answer TEXT to send a custom answer beginning with '/'."
+        );
+        Ok(Answer::Custom(answer.to_owned()))
+    }
+
     pub fn looks_like_answer(&self, text: &str) -> bool {
         let text = text.trim();
         let first = text
@@ -136,15 +199,12 @@ impl Decision {
             .next()
             .unwrap_or("")
             .trim_end_matches(':');
-        let coded = first.len() == 7
-            && first.as_bytes()[0].eq_ignore_ascii_case(&b'q')
-            && first.as_bytes()[1..]
-                .iter()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
+        let coded = question_code(first);
         (!text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()))
             || text.starts_with("/answer ")
             || first.eq_ignore_ascii_case(&self.token())
             || coded
+            || (self.supports_custom() && !text.is_empty() && !text.starts_with('/'))
             || self
                 .questions
                 .iter()
@@ -296,6 +356,7 @@ pub(super) fn from_data(export: &super::Export) -> Result<Option<Decision>> {
             ensure!(found.is_none(), "Multiple pending questions are ambiguous");
             found = Some(Decision {
                 id: format!("{}:{id}", message.info.id),
+                form_id: None,
                 questions,
                 announced: false,
                 submitted: false,
@@ -385,6 +446,21 @@ pub fn from_forms(value: &Value, session: &str) -> Result<Option<Decision>> {
                 "state":{"status":"running","input":{"questions":questions}}
             }]
         }]}))?;
+        if let Some(id) = form.get("id") {
+            let id = id
+                .as_str()
+                .filter(|id| {
+                    id.starts_with("frm_")
+                        && id.len() <= 128
+                        && id
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+                })
+                .ok_or_else(|| anyhow::anyhow!("Invalid question form identity"))?;
+            if let Some(decision) = found.as_mut() {
+                decision.form_id = Some(id.into());
+            }
+        }
     }
     Ok(found)
 }

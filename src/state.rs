@@ -78,6 +78,9 @@ pub struct Mapping {
     pub completion_pending: bool,
     #[serde(default)]
     pub response_id: Option<String>,
+    /// A resume checkpoint saw completion before runtime reported idle.
+    #[serde(default)]
+    pub response_completion_pending: bool,
     #[serde(default)]
     pub task_revision: Option<String>,
     #[serde(default)]
@@ -104,6 +107,8 @@ pub struct Mapping {
     pub launch: Option<crate::launch::Request>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_draft: Option<crate::launch_flow::Draft>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_offer: Option<crate::update::Offer>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -170,6 +175,8 @@ pub struct BridgeState {
     /// Authorised inbound media awaiting download/transcription. No terminal input yet.
     #[serde(default)]
     pub media_pending: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_job: Option<crate::update::Job>,
 }
 
 fn forwarding_default() -> bool {
@@ -191,6 +198,7 @@ impl Default for BridgeState {
             forwarding_revision: None,
             forwarding_resume_pending: false,
             media_pending: vec![],
+            update_job: None,
         }
     }
 }
@@ -402,6 +410,10 @@ impl BridgeState {
             source: None,
         });
         self.mappings.get_mut(key).unwrap().response_id = Some(id);
+        self.mappings
+            .get_mut(key)
+            .unwrap()
+            .response_completion_pending = false;
     }
 
     pub fn begin_transcription(&mut self, group: &str) -> Option<String> {
@@ -440,12 +452,20 @@ impl BridgeState {
         item.response.as_mut().unwrap().finished = finished;
         if finished {
             self.mappings.get_mut(key).unwrap().response_id = None;
+            self.mappings
+                .get_mut(key)
+                .unwrap()
+                .response_completion_pending = false;
             // Preserve the full text of long terminal notices.
             self.enqueue(group, &text[end..]);
         }
     }
 
     pub fn complete_progress(&mut self, key: &str) {
+        self.mappings
+            .get_mut(key)
+            .unwrap()
+            .response_completion_pending = false;
         let Some(id) = self.mappings.get_mut(key).unwrap().response_id.take() else {
             return;
         };
@@ -453,7 +473,7 @@ impl BridgeState {
             return;
         };
         let delivery = item.response.as_mut().unwrap();
-        if delivery.target.is_none() {
+        if delivery.target.is_none() && delivery.initial_text.is_none() {
             // Progress is best effort. Do not post a late working notice after the final.
             self.outbox.retain(|item| item.id != id);
             return;

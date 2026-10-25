@@ -2,6 +2,47 @@ use herdr_white_noise_bridge::catalogue;
 use serde_json::json;
 
 #[test]
+fn session_model_readback_accepts_only_the_requested_reference_and_canonical_default() {
+    let model = catalogue::Model {
+        id: "gpt-6.1-sol".into(),
+        label: "GPT-6.1 Sol".into(),
+        provider: Some("openai".into()),
+        variant: None,
+        free: false,
+    };
+    assert!(model.matches_reference(&model.reference()));
+    assert!(
+        model.matches_reference(
+            &json!({"id":"gpt-6.1-sol","providerID":"openai","variant":"default"})
+        )
+    );
+    for invalid in [
+        json!({"id":"other","providerID":"openai","variant":"default"}),
+        json!({"id":"gpt-6.1-sol","providerID":"other","variant":"default"}),
+        json!({"id":"gpt-6.1-sol","providerID":"openai","variant":"high"}),
+        json!({"id":"gpt-6.1-sol","providerID":"openai","variant":null}),
+        json!({"id":"gpt-6.1-sol","variant":"default"}),
+        json!(null),
+    ] {
+        assert!(
+            !model.matches_reference(&invalid),
+            "Unexpected reference: {invalid}"
+        );
+    }
+    let explicit = catalogue::Model {
+        variant: Some("high".into()),
+        ..model.clone()
+    };
+    assert!(explicit.matches_reference(&explicit.reference()));
+    assert!(!explicit.matches_reference(&model.reference()));
+    assert!(
+        !explicit.matches_reference(
+            &json!({"id":"gpt-6.1-sol","providerID":"openai","variant":"default"})
+        )
+    );
+}
+
+#[test]
 fn free_models_require_explicit_zero_prices_not_missing_subscription_prices() {
     let rows = json!({"data":[
         {"id":"free","providerID":"opencode","name":"Free","enabled":true,"cost":[{"input":0,"output":0,"cache":{"read":0,"write":0}}]},

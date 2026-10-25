@@ -408,7 +408,7 @@ pub async fn handle(
                 group,
                 id,
                 &format!(
-                    "That name does not match the pending workspace. Confirm by typing:\n{}\n0. Cancel",
+                    "That name does not match the pending project. Confirm by typing:\n{}\n0. Cancel",
                     request.confirmation_name()
                 ),
             );
@@ -833,7 +833,7 @@ async fn switch_model(
         && readback.as_ref().is_ok_and(|r| {
             r["data"]["id"] == session.value
                 && r["data"]["location"]["directory"] == current.cwd
-                && r["data"]["model"] == model.reference()
+                && model.matches_reference(&r["data"]["model"])
         });
     draft.step = if confirmed {
         Step::Applied

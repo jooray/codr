@@ -61,23 +61,12 @@ pub struct Request {
 impl Request {
     pub(crate) fn confirmation_name(&self) -> String {
         let name = self
-            .target_workspace
-            .as_ref()
-            .map(|workspace| {
-                let label: String = workspace
-                    .label
-                    .chars()
-                    .filter(|c| !c.is_control())
-                    .take(80)
-                    .collect();
-                if label.trim().is_empty() {
-                    workspace.workspace_id.clone()
-                } else {
-                    label.trim().to_string()
-                }
-            })
+            .directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_owned)
             .unwrap_or_else(|| self.label.clone());
-        // Zero and slash commands retain their control meaning, even for unusually named workspaces.
+        // Zero retains its cancellation meaning, even for an unusually named folder.
         if name == "0" || name.starts_with('/') {
             "/new confirm".into()
         } else {
@@ -656,7 +645,7 @@ async fn start(
             r["data"]["id"] == session
                 && r["data"]["location"]["directory"]
                     == request.directory.to_string_lossy().as_ref()
-                && (model.id.is_empty() || r["data"]["model"] == model.reference())
+                && (model.id.is_empty() || model.matches_reference(&r["data"]["model"]))
         }) {
             bridge
                 .state

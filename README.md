@@ -9,11 +9,11 @@ New bridge accounts introduce themselves as **Pat**, your messenger between Whit
 ## Behaviour
 
 - Chat names pair the **herdr** tab and workspace: `review (Acme)`. Descriptions contain workspace and agent details.
-- Status notices, optional editable checklists, and final replies appear as separate messages.
-- Phone text is handed straight to the agent, including while it is working. The agent handles its own input; codr does not interrupt it or wait for idle. Send `/cancel` when you do want to interrupt the current task.
-- `/new` guides you through workspace, folder, installed agent, and model selection. Reply with numbers, use `0` to cancel, and type the displayed workspace name to confirm the final preview.
+- With editable progress enabled, one active bubble carries status and checklist updates. Final replies stay separate.
+- Phone text is handed straight to the agent, including while it is working. Images, files and voice follow as soon as download/transcription completes, without waiting for idle. The agent handles its own input; codr does not interrupt it. Send `/cancel` when you do want to interrupt the current task.
+- `/new` guides you through workspace, folder, installed agent, and model selection. Reply with numbers, use `0` to cancel, and type the repository folder name to confirm the final preview. The destination workspace is shown separately.
 - Choose the default model or browse a provider's full model list. OpenCode uses its authenticated model catalogue; variants are selected separately. `/agent` opens a separate chat without moving old history.
-- Supported OpenCode questions accept a number or option label as a reply.
+- Supported OpenCode questions accept a number or option label as a reply. V2 questions with custom input also accept text answers, such as a version number.
 - New groups make your configured account an admin, so you can invite participants and rename the group. Only the owner can prompt the agent. [Group setup](docs/REFERENCE.md#shared-chats-and-owner-only-control)
 - In automatic sync mode, local prompts mute all chats and an owner phone message resumes them. `/sync on` or `/sync off` keeps your explicit choice across restarts; `/unmute` restores automatic mode.
 
@@ -22,7 +22,7 @@ New bridge accounts introduce themselves as **Pat**, your messenger between Whit
 Needs Linux x86_64 or aarch64 or macOS on Apple silicon or Intel, a per-user service manager (systemd or launchd), Python 3.11+, Git, and **herdr** 0.9.1+. No Rust toolchain required.
 
 ```sh
-herdr plugin install tidley/codr --ref v0.7.0
+herdr plugin install tidley/codr --ref v0.8.0
 herdr plugin action invoke local.white-noise.setup
 ```
 
@@ -45,6 +45,7 @@ Or give your coding agent this prompt, with your own public key:
 | Command | What it does |
 | --- | --- |
 | `/help` | Show commands and the current sync mode. |
+| `/update` | Check the maintainer's stable ngit releases; install a verified bridge update only after confirmation. |
 | `/status` | Show connection, state and pending deliveries; resume sync in automatic mode. |
 | `/recent` | Get the newest three text messages from each chat active in the past hour, skipping messages already delivered or pending. |
 | `/new` | Set up a project, with a final name confirmation. |
@@ -60,6 +61,8 @@ In 0.7.0, **`/recent` replaces the old catch-up `/sync` command**. It sends each
 New phone text does not join a worker-scheduled task queue. Messages are delivered without an interrupt; a backend can still use its own native inbox. A blocked permission or decision requires its supported answer or `/cancel`, not an arbitrary prompt. Media still needs download/transcription, and existing accepted deliveries are preserved across upgrades. `/clear-queue` is retired and does not discard those deliveries. A lost submission acknowledgement is never automatically retried.
 
 Handoff is automatic. Manual controls remain available through **herdr**'s **White Noise forwarding: At desk / Away** action. [Controls and limits →](docs/REFERENCE.md#at-desk--away-forwarding)
+
+**Phone updates:** `/update` shows an available version and a ten-minute confirmation command. `/update cancel` dismisses the offer. Updates use ngit v3 and independent Blossom downloads, not GitHub. Only the managed bridge worker restarts; connector/storage changes require local setup. [Update safety and recovery →](docs/REFERENCE.md#confirmed-updates-from-ngit)
 
 ## How it works
 

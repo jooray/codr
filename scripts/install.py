@@ -99,18 +99,21 @@ def download(url, destination):
         raise InstallError(f"Could not download release asset: {url}") from error
 
 
-def install_bundle(url, member, destination):
+def install_bundle(url, member, destination, *, checksum_url=None, expected_sha256=None, downloader=None):
     """Verify the archive, then install only its expected regular executable."""
     with tempfile.TemporaryDirectory(prefix="codr-download-") as temporary:
         archive = Path(temporary) / "binary.tar.gz"
         checksum = Path(temporary) / "checksum"
-        download(url, archive)
-        download(url + ".sha256", checksum)
+        fetch = downloader or download
+        fetch(url, archive)
+        fetch(checksum_url or url + ".sha256", checksum)
         fields = checksum.read_text().split()
         if not fields or not re.fullmatch(r"[a-fA-F0-9]{64}", fields[0]):
             raise InstallError("Invalid release checksum")
         if sha256(archive) != fields[0].lower():
             raise InstallError("Release checksum mismatch; nothing was installed")
+        if expected_sha256 is not None and sha256(archive) != expected_sha256:
+            raise InstallError("Release differs from the confirmed asset; nothing was installed")
         with tarfile.open(archive, "r:gz") as bundle:
             entries = [entry for entry in bundle.getmembers() if entry.name == member]
             if len(entries) != 1 or not entries[0].isfile() or not 0 < entries[0].size <= MAX_DOWNLOAD:

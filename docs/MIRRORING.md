@@ -23,6 +23,17 @@ GitHub Actions builds and publishes the release first. Mirror published release 
 The mirror must retain the version, notes, source commit, release date, and stable or preview channel.
 Keep Linux previews separate from stable releases. A mirror must not promote a preview to stable.
 
+### Contributor credits
+
+Published release notes must include a **Contributors** section covering the
+release's changes from both GitHub and ngit. Use original commit authors,
+co-authors and verified contribution records from either host; GitHub's generated
+list alone is not sufficient. Preserve the contributor's original credit and do
+not require a GitHub account. Combine identities only when the link is verified,
+not from matching names. Keep these credits identical in mirrored notes.
+
+### Asset verification
+
 1. Read the GitHub release metadata and list every published asset.
 2. Download the original archives and checksum files.
 3. Verify each archive against its published SHA-256 checksum.

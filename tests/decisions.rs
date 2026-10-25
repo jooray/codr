@@ -143,6 +143,106 @@ fn changed_questions_require_their_code() {
 }
 
 #[test]
+fn native_custom_answers_keep_codes_limits_and_literal_text_separate_from_choices() {
+    use decision::Answer;
+    let mut value = forms();
+    value["data"][0]["id"] = json!("frm_amber");
+    let mut decision = decision::from_forms(&value, "ses_fixture")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        decision.answer("v6.6.6").unwrap(),
+        Answer::Custom("v6.6.6".into())
+    );
+    assert_eq!(
+        decision.answer("1 v6.6.6").unwrap(),
+        Answer::Custom("1 v6.6.6".into())
+    );
+    assert_eq!(decision.answer("1").unwrap(), Answer::Choice(1));
+    assert_eq!(decision.answer("review").unwrap(), Answer::Choice(2));
+    assert_eq!(
+        decision.answer("/answer /path/to/version").unwrap(),
+        Answer::Custom("/path/to/version".into())
+    );
+    assert!(decision.text().contains("type your custom answer directly"));
+    assert!(
+        !decision
+            .text()
+            .contains("Use the terminal for a custom answer")
+    );
+    for invalid in [
+        "",
+        "  ",
+        "/unknown-command",
+        "qold001 v6.6.6",
+        &"x".repeat(4001),
+    ] {
+        assert!(
+            decision.answer(invalid).is_err(),
+            "Unexpected custom answer: {invalid}"
+        );
+    }
+    decision.requires_token = true;
+    assert!(decision.answer("v6.6.6").is_err());
+    assert_eq!(
+        decision
+            .answer(&format!("{} v6.6.6", decision.token()))
+            .unwrap(),
+        Answer::Custom("v6.6.6".into())
+    );
+    let mut replaced = decision.clone();
+    replaced.form_id = Some("frm_replaced".into());
+    assert!(!decision.same_request(&replaced));
+    assert!(
+        pending().answer("v6.6.6").is_err(),
+        "Legacy questions have no request-bound custom API"
+    );
+    decision.questions[0].custom = false;
+    assert!(
+        decision
+            .answer(&format!("{} v6.6.6", decision.token()))
+            .is_err()
+    );
+}
+
+#[test]
+fn malformed_form_identifiers_cannot_become_native_reply_paths() {
+    for id in [
+        "",
+        "frm_a/other",
+        "frm_a?reply=true",
+        "frm_a\npost",
+        "not-a-form",
+    ] {
+        let mut value = forms();
+        value["data"][0]["id"] = json!(id);
+        assert!(
+            decision::from_forms(&value, "ses_fixture").is_err(),
+            "Unsafe form ID: {id}"
+        );
+    }
+}
+
+#[test]
+fn native_question_codes_change_with_form_identity_and_question_content() {
+    let mut value = forms();
+    value["data"][0]["id"] = json!("frm_amber");
+    let decision = decision::from_forms(&value, "ses_fixture")
+        .unwrap()
+        .unwrap();
+    let mut replaced = decision.clone();
+    replaced.form_id = Some("frm_replaced".into());
+    assert_ne!(
+        decision.token(),
+        replaced.token(),
+        "Old form answers must not authorize a replacement form"
+    );
+    replaced = decision.clone();
+    replaced.questions[0].question = "A changed question".into();
+    assert_ne!(decision.token(), replaced.token());
+}
+
+#[test]
 fn only_the_exact_visible_single_choice_dialog_can_receive_a_shortcut() {
     let decision = pending();
     let visible = "Unrelated old output\n│ Which next step?\n│ 1. Proceed\n│ Continue with the plan\n│ 2. Review\n│ Review the alternatives\n│ 3. Type your own answer\n↑↓ select enter submit esc dismiss\n";

@@ -14,6 +14,8 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Action {
+    /// Print the worker's version and update compatibility cohort without opening state.
+    UpdateInfo,
     /// Run in the foreground. herdr starts this worker through the plugin manifest.
     Run {
         /// Enable the optional same-user portr desktop endpoint for this run.
@@ -69,6 +71,10 @@ enum ForwardingMode {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    if matches!(args.command, Some(Action::UpdateInfo)) {
+        println!("{}", herdr_white_noise_bridge::update::info()?);
+        return Ok(());
+    }
     let config_path = args.config.unwrap_or_else(|| {
         let root = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
@@ -123,13 +129,14 @@ async fn main() -> Result<()> {
         for (key, m) in s.mappings {
             println!(
                 "{}",
-                serde_json::json!({"session":key,"group":m.group_id_hex,"creating_uncertain":m.creating,"active":m.active,"state":m.last_agent_status,"pending_prompt":m.pending_prompt,"queued_prompts":m.prompt_queue.len(),"queue_submission_uncertain":m.queue_flight.as_ref().is_some_and(|flight| !flight.confirmed),"forwarding_enabled":forwarding_enabled,"forwarding_resume_pending":resume_pending})
+                serde_json::json!({"session":key,"group":m.group_id_hex,"creating_uncertain":m.creating,"active":m.active,"state":m.last_agent_status,"pending_prompt":m.pending_prompt,"queued_prompts":m.prompt_queue.len(),"queue_submission_uncertain":m.queue_flight.as_ref().is_some_and(|flight| !flight.confirmed),"unresolved_progress":s.outbox.iter().filter(|item| Some(&item.group)==m.group_id_hex.as_ref() && item.response.as_ref().is_some_and(|delivery| delivery.finished && delivery.target.is_none() && delivery.initial_text.is_some() && !delivery.durable)).count(),"forwarding_enabled":forwarding_enabled,"forwarding_resume_pending":resume_pending})
             );
         }
         return Ok(());
     }
     let _lock = state::lock(&config.state_path)?;
     let mut bridge = Bridge::open(config)?;
+    bridge.update_config_path = Some(std::fs::canonicalize(config_path)?);
     match args.command.unwrap_or(Action::Run {
         porter: false,
         no_porter: false,
@@ -138,7 +145,7 @@ async fn main() -> Result<()> {
             let enabled = !no_porter && (porter || bridge.config.portr_enabled);
             bridge.run(enabled).await
         }
-        Action::Porter { .. } => unreachable!(),
+        Action::Porter { .. } | Action::UpdateInfo => unreachable!(),
         Action::Notify { text, group } => {
             anyhow::ensure!(
                 bridge.state.forwarding_enabled,

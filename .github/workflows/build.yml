@@ -52,6 +52,8 @@ jobs:
           version = tomllib.loads(Path('Cargo.toml').read_text())['package']['version']
           manifest = tomllib.loads(Path('herdr-plugin.toml').read_text())
           assert manifest['version'] == version, 'Cargo and plugin versions differ'
+          notes = Path(f'docs/releases/{version}.md')
+          assert notes.is_file() and '## Contributors' in notes.read_text(), 'Reviewed release notes and contributor credits are required'
           if os.environ['GITHUB_REF'].startswith('refs/tags/'):
               assert os.environ['GITHUB_REF_NAME'] == 'v' + version, 'Tag and package versions differ'
           PY
@@ -369,6 +371,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           pattern: codr-*
@@ -378,4 +384,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --title "codr $GITHUB_REF_NAME" --generate-notes --verify-tag
+        run: |
+          notes="docs/releases/${GITHUB_REF_NAME#v}.md"
+          test -s "$notes"
+          gh release create "$GITHUB_REF_NAME" dist/* --title "codr $GITHUB_REF_NAME" --notes-file "$notes" --verify-tag

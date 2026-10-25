@@ -877,7 +877,7 @@ fn activity_mapping(observed: Agent, group: &str) -> Mapping {
 }
 
 #[tokio::test]
-async fn delivered_followup_gets_a_fresh_working_notice_without_a_queue_acknowledgement() {
+async fn delivered_followup_reuses_current_status_without_a_new_working_bubble() {
     for editable in [false, true] {
         let root = tempfile::tempdir().unwrap();
         let mut config = config(root.path());
@@ -929,10 +929,9 @@ async fn delivered_followup_gets_a_fresh_working_notice_without_a_queue_acknowle
             .filter(|r| r["type"] == "send_final")
             .map(|r| r["text"].as_str().unwrap())
             .collect();
-        assert_eq!(
-            notices,
-            ["> working..."],
-            "The current status must be visible without claiming the delivered prompt is queued"
+        assert!(
+            notices.is_empty(),
+            "Follow-ups must not create another status bubble: {notices:?}"
         );
         assert!(restarted.state.mappings[&key].prompt_queue.is_empty());
         assert_eq!(
@@ -948,7 +947,7 @@ async fn delivered_followup_gets_a_fresh_working_notice_without_a_queue_acknowle
 }
 
 #[tokio::test]
-async fn resuming_a_decision_posts_one_new_working_notice_below_the_choice_ack() {
+async fn resuming_a_decision_edits_the_existing_status_instead_of_posting_another() {
     let root = tempfile::tempdir().unwrap();
     let mut config = config(root.path());
     config.edit_responses = true;
@@ -981,8 +980,14 @@ async fn resuming_a_decision_posts_one_new_working_notice_below_the_choice_ack()
             .iter()
             .filter(|r| r["type"] == "send_final" && r["text"] == "> working...")
             .count(),
-        1,
-        "Resume needs a fresh bubble, once, even if an old blocked bubble can be edited"
+        0,
+        "Resume must reuse the existing editable status"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|r| r["type"] == "edit_message"
+                && r["target_message_id_hex"] == "old-blocked-bubble")
     );
     mdk.abort();
 }
@@ -1045,8 +1050,8 @@ async fn failed_working_refresh_cannot_hold_back_a_final_answer() {
 }
 
 #[tokio::test]
-async fn pending_working_refresh_is_dropped_if_the_agent_stops_working() {
-    for status in ["blocked", "done", "ended"] {
+async fn legacy_working_refresh_is_dropped_instead_of_adding_another_bubble() {
+    for status in ["working", "blocked", "done", "ended"] {
         let root = tempfile::tempdir().unwrap();
         let config = config(root.path());
         let mut observed = agent();
@@ -1122,6 +1127,549 @@ fn inbound_image(path: &std::path::Path, id: &str, caption: &str) -> Value {
         "ciphertext_sha256":"aa".repeat(32),"plaintext_sha256":"bb".repeat(32),"nonce_hex":"00".repeat(12),
         "version":"encrypted-media-v1","source_epoch":1,"locators":[{"kind":"blossom-v1","value":"https://example.com/fixture"}]}]);
     event
+}
+
+#[tokio::test]
+async fn downloaded_images_reach_a_working_agent_without_waiting_for_a_final() {
+    for sync_off in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = config(root.path());
+        config.edit_responses = true;
+        input_history(&config, "ses_1", &[("prior", "Current task")], None);
+        let image = root.path().join("screen.png");
+        std::fs::write(&image, b"\x89PNG\r\n\x1a\nfixture").unwrap();
+        let mut working = agent();
+        working.agent_status = "working".into();
+        let calls = Arc::new(Mutex::new(vec![]));
+        let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+        let herdr =
+            peer_for_agent(&config.herdr_socket, false, calls.clone(), working.clone()).await;
+        let mut bridge = Bridge::open(config.clone()).unwrap();
+        let key = working.key();
+        let group = "bb".repeat(16);
+        let mut mapping = activity_mapping(working.clone(), &group);
+        mapping.pending_prompt = true;
+        mapping.last_agent_status = "working".into();
+        mapping.queue_flight = Some(herdr_white_noise_bridge::state::QueueFlight {
+            before_final: Some("current-task-final".into()),
+            confirmed: false,
+        });
+        bridge.state.mappings.insert(key.clone(), mapping);
+        bridge.state.begin_response(&key, &group);
+        let flight = bridge.state.mappings[&key].queue_flight.clone();
+        bridge.reconcile(vec![working.clone()]).await.unwrap();
+        if sync_off {
+            herdr_white_noise_bridge::forwarding::set_mode(
+                &config.state_path,
+                herdr_white_noise_bridge::forwarding::Mode::Off,
+            )
+            .unwrap();
+        }
+        accept_legacy_text(
+            &mut bridge,
+            &key,
+            "legacy",
+            "Keep this older accepted delivery",
+        );
+        for (id, caption) in [("image-one", "First image"), ("image-two", "Second image")] {
+            let event = inbound_image(&image, id, caption);
+            bridge.inbound(&event).await.unwrap();
+            bridge.inbound(&event).await.unwrap();
+        }
+        let response = bridge.state.mappings[&key].response_id.clone();
+        bridge.reconcile(vec![working.clone()]).await.unwrap();
+        assert!(
+            !bridge.state.media_pending.is_empty(),
+            "Image download must start while working, even behind a legacy delivery"
+        );
+        for _ in 0..1000 {
+            bridge.process_media().await.unwrap();
+            bridge.reconcile(vec![working.clone()]).await.unwrap();
+            if calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r["method"] == "agent.prompt")
+                .count()
+                == 2
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let requests = calls.lock().unwrap();
+        let prompts: Vec<_> = requests
+            .iter()
+            .filter(|r| r["method"] == "agent.prompt")
+            .collect();
+        assert_eq!(prompts.len(), 2);
+        assert!(
+            prompts[0]["params"]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("First image\n\nAttached image: ")
+        );
+        assert!(
+            prompts[1]["params"]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("Second image\n\nAttached image: ")
+        );
+        assert!(!requests.iter().any(|r| r["method"] == "agent.interrupt"));
+        assert_eq!(bridge.state.mappings[&key].queue_flight, flight);
+        assert_eq!(bridge.state.mappings[&key].response_id, response);
+        assert_eq!(bridge.state.mappings[&key].prompt_queue.len(), 1);
+        assert_eq!(bridge.state.mappings[&key].prompt_queue[0].id, "legacy");
+        assert!(!bridge.state.outbox.iter().any(|m| m.working_notice));
+        assert!(
+            !bridge
+                .state
+                .outbox
+                .iter()
+                .any(|m| m.text.starts_with("Queued prompt"))
+        );
+        mdk.abort();
+        herdr.abort();
+    }
+}
+
+#[tokio::test]
+async fn voice_is_prepared_and_delivered_while_the_agent_is_working() {
+    let root = tempfile::tempdir().unwrap();
+    let mut config = config(root.path());
+    let command = root.path().join("transcribe");
+    std::fs::write(&command, "#!/bin/sh\nprintf 'Also check the tests.\\n'\n").unwrap();
+    std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o700)).unwrap();
+    config.transcribe_command = vec![command.to_string_lossy().into_owned()];
+    let audio = root.path().join("voice.ogg");
+    std::fs::write(&audio, b"audio fixture").unwrap();
+    let mut working = agent();
+    working.agent_status = "working".into();
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let herdr = peer_for_agent(&config.herdr_socket, false, calls.clone(), working.clone()).await;
+    let mut bridge = Bridge::open(config).unwrap();
+    let mut mapping = activity_mapping(working.clone(), &"bb".repeat(16));
+    mapping.pending_prompt = true;
+    bridge.state.mappings.insert(working.key(), mapping);
+    bridge.herdr_available = true;
+    bridge.agents.insert(working.key(), working);
+    let mut event = inbound_image(&audio, "busy-voice", "Follow-up");
+    event["message"]["media"][0]["media_type"] = json!("audio/ogg");
+    bridge.inbound(&event).await.unwrap();
+    assert_eq!(
+        bridge.state.media_pending.len(),
+        1,
+        "Transcription must start while working"
+    );
+    for _ in 0..1000 {
+        bridge.process_media().await.unwrap();
+        if bridge.state.media_pending.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    bridge.inbound(&event).await.unwrap();
+    let requests = calls.lock().unwrap();
+    let prompts: Vec<_> = requests
+        .iter()
+        .filter(|r| r["method"] == "agent.prompt")
+        .collect();
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(
+        prompts[0]["params"]["text"],
+        "Follow-up\n\nAlso check the tests."
+    );
+    assert!(!requests.iter().any(|r| r["method"] == "agent.interrupt"));
+    mdk.abort();
+    herdr.abort();
+}
+
+#[tokio::test]
+async fn zip_files_survive_preparation_restart_and_reach_a_working_agent_once_even_with_sync_off() {
+    for sync_off in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path());
+        let file = root.path().join("logs.zip");
+        std::fs::write(&file, b"PK\x03\x04private log fixture").unwrap();
+        if sync_off {
+            herdr_white_noise_bridge::forwarding::set_mode(
+                &config.state_path,
+                herdr_white_noise_bridge::forwarding::Mode::Off,
+            )
+            .unwrap();
+        }
+        let mut working = agent();
+        working.agent_status = "working".into();
+        let calls = Arc::new(Mutex::new(vec![]));
+        let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+        let herdr =
+            peer_for_agent(&config.herdr_socket, false, calls.clone(), working.clone()).await;
+        let mut bridge = Bridge::open(config.clone()).unwrap();
+        let key = working.key();
+        let mut mapping = activity_mapping(working.clone(), &"bb".repeat(16));
+        mapping.last_agent_status = "working".into();
+        mapping.pending_prompt = true;
+        mapping.queue_flight = Some(herdr_white_noise_bridge::state::QueueFlight {
+            before_final: Some("older-task".into()),
+            confirmed: false,
+        });
+        let flight = mapping.queue_flight.clone();
+        bridge.state.mappings.insert(key.clone(), mapping);
+        bridge.agents.insert(key.clone(), working.clone());
+        bridge.herdr_available = true;
+        let mut event = inbound_image(&file, "zip-attachment", "Inspect these logs.");
+        event["message"]["media"][0]["media_type"] = json!("application/zip");
+        event["message"]["media"][0]["file_name"] = json!("white-noise-diagnostic-logs.zip");
+        bridge.inbound(&event).await.unwrap();
+        bridge.inbound(&event).await.unwrap();
+        assert_eq!(bridge.state.media_pending.len(), 1);
+        bridge.herdr_available = false;
+        for _ in 0..1000 {
+            let _ = bridge.process_media().await;
+            if bridge
+                .state
+                .media_pending
+                .first()
+                .is_some_and(|e| e["_codr_prepared_text"].is_string())
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let prompt = bridge.state.media_pending[0]["_codr_prepared_text"]
+            .as_str()
+            .expect("ZIP preparation must finish without agent idle")
+            .to_owned();
+        assert!(prompt.starts_with("Inspect these logs.\n\nAttached file: "));
+        let path: String = serde_json::from_str(
+            prompt
+                .split_once("Attached file: ")
+                .unwrap()
+                .1
+                .split_once('\n')
+                .unwrap()
+                .0,
+        )
+        .unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        bridge.save().unwrap();
+        drop(bridge);
+        let mut bridge = Bridge::open(config).unwrap();
+        bridge.agents.insert(key.clone(), working);
+        bridge.herdr_available = true;
+        // Advance the persisted retry deadline after herdr recovery.
+        bridge.state.media_pending[0]["_codr_retry_at"] = json!(0);
+        bridge.process_media().await.unwrap();
+        bridge.inbound(&event).await.unwrap();
+        bridge.process_media().await.unwrap();
+        assert!(bridge.state.media_pending.is_empty());
+        assert_eq!(bridge.state.mappings[&key].queue_flight, flight);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert!(
+            !bridge
+                .state
+                .outbox
+                .iter()
+                .any(|item| item.text.contains("transcrib") || item.text == "> downloading")
+        );
+        let requests = calls.lock().unwrap();
+        let prompts: Vec<_> = requests
+            .iter()
+            .filter(|r| r["method"] == "agent.prompt")
+            .collect();
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0]["params"]["text"], prompt);
+        assert!(!requests.iter().any(|r| r["method"] == "agent.interrupt"));
+        mdk.abort();
+        herdr.abort();
+    }
+}
+
+#[tokio::test]
+async fn ready_media_is_not_held_by_an_unrelated_download_in_progress() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let image = root.path().join("slow.png");
+    std::fs::write(&image, b"\x89PNG\r\n\x1a\nfixture").unwrap();
+    let mut working = agent();
+    working.agent_status = "working".into();
+    let calls = Arc::new(Mutex::new(vec![]));
+    let herdr = peer_for_agent(&config.herdr_socket, false, calls.clone(), working.clone()).await;
+    let listener = UnixListener::bind(&config.wn_agent_socket).unwrap();
+    let (started, received) = tokio::sync::oneshot::channel();
+    let (release, wait) = tokio::sync::oneshot::channel::<()>();
+    let download_path = image.clone();
+    let mdk = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut stream = tokio::io::BufReader::new(stream);
+        let request = read_line(&mut stream).await.unwrap();
+        assert_eq!(request["type"], "download_media");
+        started.send(()).unwrap();
+        wait.await.unwrap();
+        let response = json!({"marmot_agent_control":"marmot.agent-control.v2","id":request["id"],"type":"media_downloaded","path":download_path,"media_type":"image/png","size_bytes":std::fs::metadata(download_path).unwrap().len()});
+        stream
+            .get_mut()
+            .write_all(format!("{response}\n").as_bytes())
+            .await
+            .unwrap();
+    });
+    let mut bridge = Bridge::open(config).unwrap();
+    bridge.state.mappings.insert(
+        working.key(),
+        activity_mapping(working.clone(), &"bb".repeat(16)),
+    );
+    bridge.herdr_available = true;
+    bridge.agents.insert(working.key(), working);
+    bridge
+        .state
+        .media_pending
+        .push(inbound_image(&image, "slow", "Slow image"));
+    bridge.process_media().await.unwrap();
+    received.await.unwrap();
+    let mut ready = inbound(HEX, "ready");
+    ready["_codr_prepared_text"] = json!("Ready transcript");
+    bridge.state.media_pending.push(ready);
+    bridge.process_media().await.unwrap();
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r["method"] == "agent.prompt" && r["params"]["text"] == "Ready transcript"),
+        "Prepared input must not wait for another download"
+    );
+    assert_eq!(bridge.state.media_pending.len(), 1);
+    assert_eq!(
+        bridge.state.media_pending[0]["message"]["message_id_hex"],
+        "slow"
+    );
+    release.send(()).unwrap();
+    mdk.await.unwrap();
+    for _ in 0..1000 {
+        bridge.process_media().await.unwrap();
+        if bridge.state.media_pending.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(bridge.state.media_pending.is_empty());
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r["method"] == "agent.prompt")
+            .count(),
+        2
+    );
+    herdr.abort();
+}
+
+#[tokio::test]
+async fn prepared_media_after_restart_cannot_cross_a_changed_native_session() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    input_history(&config, "ses_1", &[("prior", "Current task")], None);
+    let mut working = agent();
+    working.agent_status = "working".into();
+    let mut changed = working.clone();
+    changed.agent_session.as_mut().unwrap().value = "ses_changed".into();
+    let calls = Arc::new(Mutex::new(vec![]));
+    let herdr = peer_for_agent(&config.herdr_socket, false, calls.clone(), changed).await;
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    let key = working.key();
+    let group = "bb".repeat(16);
+    let mut mapping = activity_mapping(working.clone(), &group);
+    mapping.pending_prompt = true;
+    let mut message =
+        inbound_image(&root.path().join("saved.png"), "prepared-image", "Caption")["message"]
+            .clone();
+    message["_codr_prepared_text"] = json!("Caption\n\nAttached image: \"saved.png\"");
+    mapping
+        .prompt_queue
+        .push(herdr_white_noise_bridge::state::QueuedPrompt {
+            id: "prepared-image".into(),
+            group,
+            text: "Caption".into(),
+            media: Some(message),
+        });
+    mapping.seen_messages.push("prepared-image".into());
+    bridge.state.mappings.insert(key.clone(), mapping);
+    bridge.save().unwrap();
+    drop(bridge);
+    let mut bridge = Bridge::open(config).unwrap();
+    bridge.reconcile(vec![working]).await.unwrap();
+    assert!(
+        !calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r["method"] == "agent.prompt")
+    );
+    assert_eq!(bridge.state.mappings[&key].prompt_queue.len(), 1);
+    assert_eq!(
+        bridge.state.mappings[&key].prompt_queue[0].id,
+        "prepared-image"
+    );
+    herdr.abort();
+}
+
+#[tokio::test]
+async fn prepared_media_is_retained_when_the_pre_submission_state_save_fails() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let mut working = agent();
+    working.agent_status = "working".into();
+    let calls = Arc::new(Mutex::new(vec![]));
+    let herdr = peer_for_agent(&config.herdr_socket, false, calls.clone(), working.clone()).await;
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    let key = working.key();
+    bridge.state.mappings.insert(
+        key.clone(),
+        activity_mapping(working.clone(), &"bb".repeat(16)),
+    );
+    bridge.agents.insert(key.clone(), working);
+    bridge.herdr_available = true;
+    let mut event = inbound(HEX, "prepared-save-failure");
+    event["_codr_prepared_text"] = json!("Prepared transcript");
+    bridge.state.media_pending.push(event);
+    std::fs::remove_file(&config.state_path).unwrap();
+    std::fs::create_dir(&config.state_path).unwrap();
+    assert!(bridge.process_media().await.is_err());
+    assert!(
+        !bridge.state.mappings[&key]
+            .seen_messages
+            .iter()
+            .any(|id| id == "prepared-save-failure")
+    );
+    assert_eq!(bridge.state.media_pending.len(), 1);
+    assert!(
+        !calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r["method"] == "agent.prompt")
+    );
+    herdr.abort();
+}
+
+#[tokio::test]
+async fn prepared_transcript_that_looks_like_status_is_still_agent_input() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let mut working = agent();
+    working.agent_status = "working".into();
+    let calls = Arc::new(Mutex::new(vec![]));
+    let herdr = peer_for_agent(&config.herdr_socket, false, calls.clone(), working.clone()).await;
+    let mut bridge = Bridge::open(config).unwrap();
+    bridge.state.mappings.insert(
+        working.key(),
+        activity_mapping(working.clone(), &"bb".repeat(16)),
+    );
+    bridge.agents.insert(working.key(), working);
+    bridge.herdr_available = true;
+    let mut event = inbound(HEX, "spoken-status");
+    event["_codr_prepared_text"] = json!("/status");
+    bridge.state.media_pending.push(event);
+    bridge.process_media().await.unwrap();
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r["method"] == "agent.prompt" && r["params"]["text"] == "/status")
+    );
+    assert!(bridge.state.media_pending.is_empty());
+    herdr.abort();
+}
+
+#[tokio::test]
+async fn known_unsent_ready_image_returns_to_its_slot_without_resetting_an_older_flight() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    input_history(&config, "ses_1", &[("prior", "Current task")], None);
+    let mut working = agent();
+    working.agent_status = "working".into();
+    let listener = UnixListener::bind(&config.herdr_socket).unwrap();
+    let path = config.herdr_socket.clone();
+    let observed = working.clone();
+    let preflight = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut stream = tokio::io::BufReader::new(stream);
+        let request = read_line(&mut stream).await.unwrap();
+        assert_eq!(request["method"], "agent.get");
+        std::fs::remove_file(path).unwrap();
+        let response = json!({"id":request["id"],"result":{"agent":observed}});
+        stream
+            .get_mut()
+            .write_all(format!("{response}\n").as_bytes())
+            .await
+            .unwrap();
+    });
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    let key = working.key();
+    let group = "bb".repeat(16);
+    let mut mapping = activity_mapping(working.clone(), &group);
+    mapping.pending_prompt = true;
+    mapping.queue_flight = Some(herdr_white_noise_bridge::state::QueueFlight {
+        before_final: Some("older-final".into()),
+        confirmed: false,
+    });
+    let flight = mapping.queue_flight.clone();
+    mapping
+        .prompt_queue
+        .push(herdr_white_noise_bridge::state::QueuedPrompt {
+            id: "legacy".into(),
+            group: group.clone(),
+            text: "Keep older delivery".into(),
+            media: None,
+        });
+    mapping
+        .prompt_queue
+        .push(herdr_white_noise_bridge::state::QueuedPrompt {
+            id: "ready-image".into(),
+            group,
+            text: "Ready image".into(),
+            media: Some(json!({"_codr_prepared_text":"Ready image with cached private path"})),
+        });
+    mapping
+        .seen_messages
+        .extend(["legacy".into(), "ready-image".into()]);
+    bridge.state.mappings.insert(key.clone(), mapping);
+    bridge.save().unwrap();
+    bridge.reconcile(vec![working.clone()]).await.unwrap();
+    preflight.await.unwrap();
+    assert_eq!(bridge.state.mappings[&key].queue_flight, flight);
+    assert!(bridge.state.mappings[&key].pending_prompt);
+    assert_eq!(
+        bridge.state.mappings[&key]
+            .prompt_queue
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect::<Vec<_>>(),
+        ["legacy", "ready-image"]
+    );
+    drop(bridge);
+    let calls = Arc::new(Mutex::new(vec![]));
+    let herdr = peer_for_agent(&config.herdr_socket, false, calls.clone(), working.clone()).await;
+    let mut bridge = Bridge::open(config).unwrap();
+    bridge.reconcile(vec![working.clone()]).await.unwrap();
+    bridge.reconcile(vec![working]).await.unwrap();
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r["method"] == "agent.prompt")
+            .count(),
+        1
+    );
+    assert_eq!(bridge.state.mappings[&key].queue_flight, flight);
+    assert_eq!(bridge.state.mappings[&key].prompt_queue.len(), 1);
+    assert_eq!(bridge.state.mappings[&key].prompt_queue[0].id, "legacy");
+    herdr.abort();
 }
 
 #[tokio::test]
@@ -1227,7 +1775,7 @@ async fn image_prompt_queue_preserves_caption_fifo_and_prepared_files_across_res
             .state
             .outbox
             .iter()
-            .any(|m| m.text == "Queued prompt at position 1.")
+            .any(|m| m.text.starts_with("Preparing image."))
     );
     accept_legacy_text(&mut bridge, &agent().key(), "text-after-image", "Next task");
     assert!(prompts().is_empty());
@@ -1240,6 +1788,7 @@ async fn image_prompt_queue_preserves_caption_fifo_and_prepared_files_across_res
         Some(("prior-final", "Prior answer")),
     );
     bridge.reconcile(vec![agent()]).await.unwrap();
+    bridge.herdr_available = false;
     for _ in 0..100 {
         bridge.process_media().await.unwrap();
         if bridge.state.media_pending.is_empty() {
@@ -1250,18 +1799,19 @@ async fn image_prompt_queue_preserves_caption_fifo_and_prepared_files_across_res
     assert!(bridge.state.media_pending.is_empty());
     assert!(
         prompts().is_empty(),
-        "Preparation does not submit or let later text overtake"
+        "Prepared images remain durable while herdr is unavailable"
     );
     std::fs::remove_file(image).unwrap();
     herdr_white_noise_bridge::forwarding::set(&config.state_path, false).unwrap();
     drop(bridge);
     let mut bridge = Bridge::open(config.clone()).unwrap();
     bridge.reconcile(vec![agent()]).await.unwrap();
-    assert!(
-        prompts().is_empty(),
-        "Prepared images stay paused while muted after restart"
+    assert_eq!(
+        prompts().len(),
+        1,
+        "Prepared owner images are delivered even while outgoing sync is off"
     );
-    assert_eq!(bridge.state.mappings[&agent().key()].prompt_queue.len(), 2);
+    assert_eq!(bridge.state.mappings[&agent().key()].prompt_queue.len(), 1);
     herdr_white_noise_bridge::forwarding::set(&config.state_path, true).unwrap();
     bridge.reconcile(vec![agent()]).await.unwrap();
     let sent = prompts();
@@ -1378,11 +1928,11 @@ async fn image_prompt_queue_shares_limits_and_rejects_foreign_or_truncated_input
             .state
             .outbox
             .iter()
-            .any(|m| m.text.starts_with("Queue limit reached"))
+            .any(|m| m.text.starts_with("Media preparation limit reached"))
     );
     assert!(
         bridge.state.media_pending.is_empty(),
-        "Do not download queued images while the agent is busy"
+        "Acceptance alone does not start synchronous downloads; the worker schedules preparation"
     );
 }
 
@@ -1475,7 +2025,7 @@ async fn image_prompt_queue_failure_releases_the_head_without_replaying_it() {
             .state
             .outbox
             .iter()
-            .any(|m| m.text.starts_with("Media processing failed"))
+            .any(|m| m.text.starts_with("Attachment preparation failed"))
     );
     bridge.inbound(&image_event).await.unwrap();
     bridge.reconcile(vec![agent()]).await.unwrap();
@@ -1714,13 +2264,13 @@ async fn shortcut_help_is_a_short_command_list() {
     bridge.inbound(&event).await.unwrap();
     let help = &bridge.state.outbox[0].text;
     for command in [
-        "/help", "/recent", "/status", "/queue", "/cancel", "/unmute",
+        "/help", "/recent", "/status", "/queue", "/cancel", "/unmute", "/update",
     ] {
         assert!(help.contains(command));
     }
     assert_eq!(
         help,
-        "# codr commands\n\n### General\n\n**`/help`**  \nShow commands\n\n**`/status`**  \nConnection, state, queue and unmute\n\n**`/recent`**  \nGet newest 3 of all active <1h\n\n### Projects & Agents\n\n**`/new`**  \nSet up a project\n\n**`/agent`**  \nChoose agent (separate chat)\n\n**`/model`**  \nChoose model\n\n### Tasks\n\n**`/queue`**  \nView pending deliveries\n\n**`/cancel`**  \nInterrupt the current task\n\n### Sync\n\n**`/unmute`**  \nUnmute all chats and return to automatic sync\n\n**`/sync auto|on|off`**  \nSet persistent sync mode\nCurrent sync mode: Automatic"
+        "# codr commands\n\n### General\n\n**`/help`**  \nShow commands\n\n**`/status`**  \nConnection, state, queue and unmute\n\n**`/recent`**  \nGet newest 3 of all active <1h\n\n**`/update`**  \nCheck ngit for a stable bridge update; confirm before installing\n\n### Projects & Agents\n\n**`/new`**  \nSet up a project\n\n**`/agent`**  \nChoose agent (separate chat)\n\n**`/model`**  \nChoose model\n\n### Tasks\n\n**`/queue`**  \nView pending deliveries\n\n**`/cancel`**  \nInterrupt the current task\n\n### Sync\n\n**`/unmute`**  \nUnmute all chats and return to automatic sync\n\n**`/sync auto|on|off`**  \nSet persistent sync mode\nCurrent sync mode: Automatic"
     );
 }
 
@@ -3292,86 +3842,89 @@ async fn prompt_queue_pauses_when_muted_or_ended_and_resumes_only_the_same_sessi
 
 #[tokio::test]
 async fn prompt_queue_uncertain_submission_is_never_retried_after_restart_or_a_final() {
-    let root = tempfile::tempdir().unwrap();
-    let config = config(root.path());
-    input_history(&config, "ses_1", &[], None);
-    let calls = Arc::new(Mutex::new(vec![]));
-    let listener = UnixListener::bind(&config.herdr_socket).unwrap();
-    let received = calls.clone();
-    let herdr = tokio::spawn(async move {
-        loop {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut reader = tokio::io::BufReader::new(stream);
-            let req = read_line(&mut reader).await.unwrap();
-            received.lock().unwrap().push(req.clone());
-            if req["method"] == "agent.prompt" {
-                continue;
-            } // Submission may have happened; acknowledgement is lost.
-            let response = json!({"id":req["id"],"result":{"agent":agent()}});
-            reader
-                .get_mut()
-                .write_all(format!("{response}\n").as_bytes())
-                .await
-                .unwrap();
+    for prepared_image in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path());
+        input_history(&config, "ses_1", &[], None);
+        let calls = Arc::new(Mutex::new(vec![]));
+        let listener = UnixListener::bind(&config.herdr_socket).unwrap();
+        let received = calls.clone();
+        let herdr = tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut reader = tokio::io::BufReader::new(stream);
+                let req = read_line(&mut reader).await.unwrap();
+                received.lock().unwrap().push(req.clone());
+                if req["method"] == "agent.prompt" {
+                    continue;
+                } // Submission may have happened; acknowledgement is lost.
+                let response = json!({"id":req["id"],"result":{"agent":agent()}});
+                reader
+                    .get_mut()
+                    .write_all(format!("{response}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+        let mut bridge = Bridge::open(config.clone()).unwrap();
+        let mut mapping = activity_mapping(agent(), &"bb".repeat(16));
+        for id in ["first", "second"] {
+            mapping
+                .prompt_queue
+                .push(herdr_white_noise_bridge::state::QueuedPrompt {
+                    id: id.into(),
+                    group: "bb".repeat(16),
+                    text: id.into(),
+                    media: (prepared_image && id == "first")
+                        .then(|| json!({"_codr_prepared_text":id})),
+                });
+            mapping.seen_messages.push(id.into());
         }
-    });
-    let mut bridge = Bridge::open(config.clone()).unwrap();
-    let mut mapping = activity_mapping(agent(), &"bb".repeat(16));
-    for id in ["first", "second"] {
-        mapping
-            .prompt_queue
-            .push(herdr_white_noise_bridge::state::QueuedPrompt {
-                id: id.into(),
-                group: "bb".repeat(16),
-                text: id.into(),
-                media: None,
-            });
-        mapping.seen_messages.push(id.into());
+        bridge.state.mappings.insert(agent().key(), mapping);
+        bridge.reconcile(vec![agent()]).await.unwrap();
+        assert_eq!(bridge.state.mappings[&agent().key()].prompt_queue.len(), 1);
+        assert!(
+            !bridge.state.mappings[&agent().key()]
+                .queue_flight
+                .as_ref()
+                .unwrap()
+                .confirmed
+        );
+        drop(bridge);
+        let mut bridge = Bridge::open(config.clone()).unwrap();
+        input_history(
+            &config,
+            "ses_1",
+            &[("user", "first")],
+            Some(("reply", "Possibly submitted")),
+        );
+        let mut idle = agent();
+        idle.state_change_seq = 2;
+        bridge.reconcile(vec![idle.clone()]).await.unwrap();
+        bridge.reconcile(vec![idle]).await.unwrap();
+        assert_eq!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|call| call["method"] == "agent.prompt")
+                .count(),
+            1
+        );
+        assert_eq!(bridge.state.mappings[&agent().key()].prompt_queue.len(), 1);
+        let mut clear = inbound(HEX, "clear-waiting-only");
+        clear["message"]["text"] = json!("/clear-queue");
+        bridge.inbound(&clear).await.unwrap();
+        assert_eq!(bridge.state.mappings[&agent().key()].prompt_queue.len(), 1);
+        assert!(
+            !bridge.state.mappings[&agent().key()]
+                .queue_flight
+                .as_ref()
+                .unwrap()
+                .confirmed
+        );
+        herdr.abort();
     }
-    bridge.state.mappings.insert(agent().key(), mapping);
-    bridge.reconcile(vec![agent()]).await.unwrap();
-    assert_eq!(bridge.state.mappings[&agent().key()].prompt_queue.len(), 1);
-    assert!(
-        !bridge.state.mappings[&agent().key()]
-            .queue_flight
-            .as_ref()
-            .unwrap()
-            .confirmed
-    );
-    drop(bridge);
-    let mut bridge = Bridge::open(config.clone()).unwrap();
-    input_history(
-        &config,
-        "ses_1",
-        &[("user", "first")],
-        Some(("reply", "Possibly submitted")),
-    );
-    let mut idle = agent();
-    idle.state_change_seq = 2;
-    bridge.reconcile(vec![idle.clone()]).await.unwrap();
-    bridge.reconcile(vec![idle]).await.unwrap();
-    assert_eq!(
-        calls
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|call| call["method"] == "agent.prompt")
-            .count(),
-        1
-    );
-    assert_eq!(bridge.state.mappings[&agent().key()].prompt_queue.len(), 1);
-    let mut clear = inbound(HEX, "clear-waiting-only");
-    clear["message"]["text"] = json!("/clear-queue");
-    bridge.inbound(&clear).await.unwrap();
-    assert_eq!(bridge.state.mappings[&agent().key()].prompt_queue.len(), 1);
-    assert!(
-        !bridge.state.mappings[&agent().key()]
-            .queue_flight
-            .as_ref()
-            .unwrap()
-            .confirmed
-    );
-    herdr.abort();
 }
 
 #[tokio::test]
@@ -4341,6 +4894,269 @@ fn decision_terminal(question: &str) -> String {
     format!(
         "PRIVATE TOOL OUTPUT\n{question}\n1. Proceed\n   Continue with the plan\n2. Review\n   Review the alternatives\n3. Type your own answer\n↑↓ select enter submit esc dismiss\n"
     )
+}
+
+fn custom_decision_export(path: &std::path::Path) -> std::path::PathBuf {
+    let form = path.with_file_name("question-form.json");
+    std::fs::write(&form, json!({"id":"frm_amber","sessionID":"ses_1","metadata":{"kind":"question","tool":{"messageID":"msg_amber","id":"tool_amber"}},
+        "fields":[{"key":"q0","type":"string","title":"Amber version","description":"Which Amber version is installed?","custom":true,
+        "options":[{"value":"I can check","label":"I can check"},{"value":"Not sure","label":"Not sure"}]}]}).to_string()).unwrap();
+    std::fs::write(path, r#"#!/usr/bin/env python3
+import json,pathlib,sys
+root=pathlib.Path(__file__).parent;args=sys.argv[1:]
+if args[0]=='--pure':sys.exit(2)
+if args[0]=='session':print('{"messages":[{"type":"user","id":"user","text":"Task"}]}');sys.exit(0)
+if args[:2]==['api','get']:
+ if args[2].endswith('/permission'):print('{"data":[]}');sys.exit(0)
+ if args[2].endswith('/form'):print(json.dumps({'data':[json.loads((root/'question-form.json').read_text())]}));sys.exit(0)
+ sys.exit(2)
+if args[:2]==['api','post']:
+ body=json.loads(args[args.index('--data')+1])
+ state=json.loads((root/'state.json').read_text())
+ assert any((m.get('decision') or {}).get('submitted') for m in state['mappings'].values())
+ with (root/'question-posts.jsonl').open('a') as f:f.write(json.dumps({'path':args[2],'body':body})+'\n')
+ if (root/'drop-question-ack').exists():sys.exit(1)
+ sys.exit(0)
+sys.exit(2)
+"#).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    form
+}
+
+#[tokio::test]
+async fn custom_question_text_uses_the_request_bound_form_api_once_without_prompting_or_keys() {
+    for lost_ack in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let config = editable_config(root.path());
+        custom_decision_export(&config.opencode_bin);
+        if lost_ack {
+            std::fs::write(root.path().join("drop-question-ack"), "").unwrap();
+        }
+        let mut blocked = agent();
+        blocked.agent_status = "blocked".into();
+        blocked.state_change_seq = 2;
+        let calls = Arc::new(Mutex::new(vec![]));
+        let herdr = decision_herdr(
+            &config.herdr_socket,
+            Arc::new(Mutex::new(blocked.clone())),
+            Arc::new(Mutex::new(
+                "No keyboard input is needed for native form replies".into(),
+            )),
+            calls.clone(),
+        )
+        .await;
+        let mut bridge = Bridge::open(config.clone()).unwrap();
+        let key = blocked.key();
+        bridge.state.mappings.insert(
+            key.clone(),
+            activity_mapping(blocked.clone(), &"bb".repeat(16)),
+        );
+        bridge.reconcile(vec![blocked.clone()]).await.unwrap();
+        let mut event = inbound(HEX, "custom-version");
+        event["message"]["text"] = json!("v6.6.6");
+        bridge.inbound(&event).await.unwrap();
+        bridge.inbound(&event).await.unwrap();
+        assert!(
+            bridge.state.mappings[&key]
+                .decision
+                .as_ref()
+                .unwrap()
+                .submitted
+        );
+        bridge.save().unwrap();
+        drop(bridge);
+        let mut bridge = Bridge::open(config).unwrap();
+        bridge.agents.insert(key.clone(), blocked);
+        bridge.herdr_available = true;
+        bridge.inbound(&event).await.unwrap();
+        event["message"]["message_id_hex"] = json!("custom-again");
+        bridge.inbound(&event).await.unwrap();
+        let posts: Vec<Value> = std::fs::read_to_string(root.path().join("question-posts.jsonl"))
+            .expect("Custom answers must use the native form endpoint")
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0]["path"], "/api/session/ses_1/form/frm_amber/reply");
+        assert_eq!(posts[0]["body"], json!({"answer":{"q0":"v6.6.6"}}));
+        assert!(bridge.state.mappings[&key].prompt_queue.is_empty());
+        assert!(!calls.lock().unwrap().iter().any(|r| matches!(
+            r["method"].as_str(),
+            Some("agent.prompt" | "agent.send_keys" | "agent.read")
+        )));
+        herdr.abort();
+    }
+}
+
+#[tokio::test]
+async fn custom_question_answers_fail_closed_for_changed_requests_foreign_input_and_failed_saves() {
+    for scenario in [
+        "custom-disabled",
+        "changed-form",
+        "foreign",
+        "changed-session",
+        "stale-code",
+        "truncated",
+        "attachment",
+        "prepared-file",
+        "failed-save",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let config = editable_config(root.path());
+        let form_path = custom_decision_export(&config.opencode_bin);
+        let mut blocked = agent();
+        blocked.agent_status = "blocked".into();
+        blocked.state_change_seq = 2;
+        let current = Arc::new(Mutex::new(blocked.clone()));
+        let calls = Arc::new(Mutex::new(vec![]));
+        let herdr = decision_herdr(
+            &config.herdr_socket,
+            current.clone(),
+            Arc::new(Mutex::new(String::new())),
+            calls.clone(),
+        )
+        .await;
+        let mut bridge = Bridge::open(config.clone()).unwrap();
+        let key = blocked.key();
+        bridge.state.mappings.insert(
+            key.clone(),
+            activity_mapping(blocked.clone(), &"bb".repeat(16)),
+        );
+        if scenario == "custom-disabled" {
+            let mut form: Value =
+                serde_json::from_slice(&std::fs::read(&form_path).unwrap()).unwrap();
+            form["fields"][0]["custom"] = json!(false);
+            std::fs::write(&form_path, form.to_string()).unwrap();
+        }
+        bridge.reconcile(vec![blocked]).await.unwrap();
+        let mut event = inbound(HEX, "unsafe-custom");
+        event["message"]["text"] = json!("v6.6.6");
+        match scenario {
+            "changed-form" => {
+                let mut form: Value =
+                    serde_json::from_slice(&std::fs::read(&form_path).unwrap()).unwrap();
+                form["id"] = json!("frm_replaced");
+                std::fs::write(&form_path, form.to_string()).unwrap();
+            }
+            "foreign" => event["message"]["sender"]["account_id_hex"] = json!("22".repeat(32)),
+            "changed-session" => {
+                current
+                    .lock()
+                    .unwrap()
+                    .agent_session
+                    .as_mut()
+                    .unwrap()
+                    .value = "ses_replaced".into()
+            }
+            "stale-code" => event["message"]["text"] = json!("qold001 v6.6.6"),
+            "truncated" => event["message"]["text_truncated"] = json!(true),
+            "attachment" => event["message"]["attachments"] = json!([{"file_name":"version.txt"}]),
+            "failed-save" => {
+                std::fs::remove_file(&config.state_path).unwrap();
+                std::fs::create_dir(&config.state_path).unwrap();
+            }
+            _ => {}
+        }
+        if scenario == "prepared-file" {
+            event["_codr_prepared_text"] = json!("v6.6.6");
+            bridge.state.media_pending.push(event);
+            let _ = bridge.process_media().await;
+            assert_eq!(
+                bridge.state.media_pending.len(),
+                1,
+                "Prepared media is not a custom decision answer"
+            );
+        } else {
+            let _ = bridge.inbound(&event).await;
+        }
+        assert!(
+            !root.path().join("question-posts.jsonl").exists(),
+            "Unsafe native form submission: {scenario}"
+        );
+        if scenario == "failed-save" {
+            assert!(
+                !bridge.state.mappings[&key]
+                    .decision
+                    .as_ref()
+                    .unwrap()
+                    .submitted
+            );
+        }
+        assert!(!calls.lock().unwrap().iter().any(|r| matches!(
+            r["method"].as_str(),
+            Some("agent.prompt" | "agent.send_keys")
+        )));
+        herdr.abort();
+    }
+}
+
+#[tokio::test]
+async fn an_old_custom_question_code_cannot_answer_an_already_announced_replacement_form() {
+    let root = tempfile::tempdir().unwrap();
+    let config = editable_config(root.path());
+    let form_path = custom_decision_export(&config.opencode_bin);
+    let mut blocked = agent();
+    blocked.agent_status = "blocked".into();
+    blocked.state_change_seq = 2;
+    let calls = Arc::new(Mutex::new(vec![]));
+    let herdr = decision_herdr(
+        &config.herdr_socket,
+        Arc::new(Mutex::new(blocked.clone())),
+        Arc::new(Mutex::new(String::new())),
+        calls.clone(),
+    )
+    .await;
+    let mut bridge = Bridge::open(config).unwrap();
+    let key = blocked.key();
+    bridge.state.mappings.insert(
+        key.clone(),
+        activity_mapping(blocked.clone(), &"bb".repeat(16)),
+    );
+    bridge.reconcile(vec![blocked]).await.unwrap();
+    let old_code = bridge.state.mappings[&key]
+        .decision
+        .as_ref()
+        .unwrap()
+        .token();
+    let mut form: Value = serde_json::from_slice(&std::fs::read(&form_path).unwrap()).unwrap();
+    form["id"] = json!("frm_replaced");
+    std::fs::write(&form_path, form.to_string()).unwrap();
+    let mut event = inbound(HEX, "announce-replacement");
+    event["message"]["text"] = json!("v6.6.6");
+    bridge.inbound(&event).await.unwrap();
+    assert!(
+        bridge.state.mappings[&key]
+            .decision
+            .as_ref()
+            .unwrap()
+            .requires_token
+    );
+    event["message"]["message_id_hex"] = json!("old-coded-answer");
+    event["message"]["text"] = json!(format!("{old_code} v6.6.6"));
+    bridge.inbound(&event).await.unwrap();
+    assert!(
+        !root.path().join("question-posts.jsonl").exists(),
+        "A delayed old coded answer must not reach the replacement form"
+    );
+    let new_code = bridge.state.mappings[&key]
+        .decision
+        .as_ref()
+        .unwrap()
+        .token();
+    event["message"]["message_id_hex"] = json!("new-coded-answer");
+    event["message"]["text"] = json!(format!("{new_code} v6.6.6"));
+    bridge.inbound(&event).await.unwrap();
+    let posts: Vec<Value> = std::fs::read_to_string(root.path().join("question-posts.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(posts.len(), 1);
+    assert_eq!(
+        posts[0]["path"],
+        "/api/session/ses_1/form/frm_replaced/reply"
+    );
+    herdr.abort();
 }
 
 #[tokio::test]
@@ -5632,11 +6448,30 @@ async fn an_uncertain_progress_send_does_not_delay_or_duplicate_the_final() {
         1,
         "The final is independent of the uncertain progress send"
     );
+    let requests = calls.lock().unwrap().clone();
+    assert_eq!(requests[0]["text"], "Latest final");
+    assert_ne!(requests[0]["idempotency_key"], original["idempotency_key"]);
+    assert_eq!(requests[0]["type"], "send_final");
+    assert_eq!(restarted.state.outbox.len(), 1);
+    restarted.state.outbox[0]
+        .response
+        .as_mut()
+        .unwrap()
+        .last_attempt_at = 0;
+    restarted.flush().await.unwrap();
+    restarted.state.outbox[0]
+        .response
+        .as_mut()
+        .unwrap()
+        .last_attempt_at = 0;
+    restarted.flush().await.unwrap();
+    assert_eq!(
+        restarted.state.outbox.len(),
+        1,
+        "Keep an unresolved target for inspection, never replay it after completion"
+    );
     let calls = calls.lock().unwrap();
-    assert_eq!(calls[0]["text"], "Latest final");
-    assert_ne!(calls[0]["idempotency_key"], original["idempotency_key"]);
-    assert_eq!(calls[0]["type"], "send_final");
-    assert!(restarted.state.outbox.is_empty());
+    assert_eq!(calls.len(), 1);
     mdk.abort();
 }
 
@@ -6103,7 +6938,7 @@ async fn a_failed_progress_edit_does_not_block_the_standalone_final() {
                 .unwrap();
         }
     });
-    let mut bridge = Bridge::open(config).unwrap();
+    let mut bridge = Bridge::open(config.clone()).unwrap();
     let key = agent().key();
     let group = "bb".repeat(16);
     bridge.state.mappings.insert(
@@ -6121,13 +6956,261 @@ async fn a_failed_progress_edit_does_not_block_the_standalone_final() {
     progress.response.as_mut().unwrap().sent_text = Some("State: working".into());
     bridge.reconcile(vec![agent()]).await.unwrap();
     bridge.flush().await.unwrap();
-    let calls = calls.lock().unwrap();
-    assert_eq!(calls.len(), 2);
-    assert_eq!(calls[0]["type"], "send_final");
-    assert_eq!(calls[0]["text"], "Final reply");
-    assert_eq!(calls[1]["type"], "edit_message");
-    assert_eq!(calls[1]["text"], "> done");
+    let requests = calls.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["type"], "send_final");
+    assert_eq!(requests[0]["text"], "Final reply");
+    assert_eq!(requests[1]["type"], "edit_message");
+    assert_eq!(requests[1]["text"], "> done");
+    assert_eq!(
+        bridge.state.outbox.len(),
+        1,
+        "A failed done edit must retain its target for recovery"
+    );
+    drop(bridge);
+    server.abort();
+    let _ = server.await;
+    std::fs::remove_file(&config.wn_agent_socket).unwrap();
+    let recovered = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let mut bridge = Bridge::open(config).unwrap();
+    bridge.state.outbox[0]
+        .response
+        .as_mut()
+        .unwrap()
+        .last_attempt_at = 0;
+    bridge.flush().await.unwrap();
     assert!(bridge.state.outbox.is_empty());
+    let requests = calls.lock().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|r| r["type"] == "send_final")
+            .count(),
+        1
+    );
+    assert_eq!(
+        requests.last().unwrap()["target_message_id_hex"],
+        "cc".repeat(32)
+    );
+    assert_eq!(requests.last().unwrap()["text"], "> done");
+    recovered.abort();
+}
+
+#[tokio::test]
+async fn a_completed_progress_send_with_a_lost_ack_is_retained_without_creating_a_replacement() {
+    let root = tempfile::tempdir().unwrap();
+    let config = editable_config(root.path());
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    let key = agent().key();
+    let group = "bb".repeat(16);
+    bridge
+        .state
+        .mappings
+        .insert(key.clone(), activity_mapping(agent(), &group));
+    bridge.state.begin_response(&key, &group);
+    let id = bridge.state.mappings[&key].response_id.clone().unwrap();
+    bridge.state.outbox[0]
+        .response
+        .as_mut()
+        .unwrap()
+        .initial_text = Some("> working...".into());
+    bridge.state.complete_progress(&key);
+    assert_eq!(
+        bridge.state.outbox.len(),
+        1,
+        "An attempted send may already be visible; retain it for target inspection"
+    );
+    bridge.save().unwrap();
+    drop(bridge);
+    let calls = Arc::new(Mutex::new(vec![]));
+    let server = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge.flush().await.unwrap();
+    assert_eq!(bridge.state.outbox.len(), 1);
+    bridge.state.outbox[0]
+        .response
+        .as_mut()
+        .unwrap()
+        .last_attempt_at = 0;
+    bridge.flush().await.unwrap();
+    assert_eq!(bridge.state.outbox.len(), 1);
+    assert_eq!(bridge.state.outbox[0].id, id);
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "Do not assume an old transport deduplication receipt still exists"
+    );
+    assert!(forwarding_command(&config, "status").await.status.success());
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_herdr-white-noise-bridge"))
+        .args([
+            "--config",
+            config
+                .state_path
+                .with_file_name("test-config.toml")
+                .to_str()
+                .unwrap(),
+            "status",
+        ])
+        .output()
+        .await
+        .unwrap();
+    assert!(output.status.success());
+    let reported: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(reported["unresolved_progress"], 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn mute_resume_keeps_one_progress_bubble_until_a_real_completed_reply() {
+    for status in ["working", "idle"] {
+        let root = tempfile::tempdir().unwrap();
+        let config = editable_config(root.path());
+        export_script(&config.opencode_bin, "Previous reply", "old-final");
+        let calls = Arc::new(Mutex::new(vec![]));
+        let server = peer(&config.wn_agent_socket, true, calls.clone()).await;
+        let mut observed = agent();
+        observed.agent_status = status.into();
+        let mut bridge = Bridge::open(config.clone()).unwrap();
+        let key = observed.key();
+        let group = "bb".repeat(16);
+        let mut mapping = activity_mapping(observed.clone(), &group);
+        mapping.last_agent_status = "working".into();
+        mapping.final_ids.push("old-final".into());
+        bridge.state.mappings.insert(key.clone(), mapping);
+        bridge.state.begin_response(&key, &group);
+        let id = bridge.state.mappings[&key].response_id.clone().unwrap();
+        let delivery = bridge.state.outbox[0].response.as_mut().unwrap();
+        delivery.target = Some("same-progress".into());
+        delivery.initial_text = Some("> working...".into());
+        delivery.sent_text = Some("> working...".into());
+        herdr_white_noise_bridge::forwarding::set(&config.state_path, false).unwrap();
+        bridge.flush().await.unwrap();
+        herdr_white_noise_bridge::forwarding::set(&config.state_path, true).unwrap();
+        bridge.reconcile(vec![observed.clone()]).await.unwrap();
+        bridge.flush().await.unwrap();
+        assert_eq!(
+            bridge.state.mappings[&key].response_id.as_deref(),
+            Some(id.as_str())
+        );
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "Neither early idle nor resuming a working task recreates or completes progress"
+        );
+        export_script(&config.opencode_bin, "New reply", "new-final");
+        observed.agent_status = "idle".into();
+        observed.state_change_seq += 1;
+        bridge.reconcile(vec![observed]).await.unwrap();
+        bridge.flush().await.unwrap();
+        let requests = calls.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| r["type"] == "send_final" && r["text"] == "New reply")
+                .count(),
+            1
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| r["type"] == "edit_message"
+                    && r["target_message_id_hex"] == "same-progress"
+                    && r["text"] == "> done")
+                .count(),
+            1
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|r| r["type"] == "send_final" && r["text"] == "> working...")
+        );
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn resume_remembers_a_completed_muted_reply_until_runtime_idle_across_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let config = editable_config(root.path());
+    export_script(&config.opencode_bin, "Completed while muted", "muted-final");
+    let calls = Arc::new(Mutex::new(vec![]));
+    let server = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let mut working = agent();
+    working.agent_status = "working".into();
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    let key = working.key();
+    let group = "bb".repeat(16);
+    let mut mapping = activity_mapping(working.clone(), &group);
+    mapping.last_agent_status = "working".into();
+    bridge.state.mappings.insert(key.clone(), mapping);
+    bridge.state.begin_response(&key, &group);
+    let delivery = bridge.state.outbox[0].response.as_mut().unwrap();
+    delivery.target = Some("muted-progress".into());
+    delivery.initial_text = Some("> working...".into());
+    delivery.sent_text = Some("> working...".into());
+    herdr_white_noise_bridge::forwarding::set(&config.state_path, false).unwrap();
+    bridge.flush().await.unwrap();
+    herdr_white_noise_bridge::forwarding::set(&config.state_path, true).unwrap();
+    bridge.reconcile(vec![working]).await.unwrap();
+    bridge.flush().await.unwrap();
+    assert!(calls.lock().unwrap().is_empty());
+    bridge.save().unwrap();
+    drop(bridge);
+    let mut bridge = Bridge::open(config).unwrap();
+    bridge.reconcile(vec![agent()]).await.unwrap();
+    bridge.flush().await.unwrap();
+    let calls = calls.lock().unwrap();
+    assert_eq!(
+        calls.len(),
+        1,
+        "A completed muted reply observed before idle must still finish its progress later"
+    );
+    assert_eq!(calls[0]["type"], "edit_message");
+    assert_eq!(calls[0]["text"], "> done");
+    assert_eq!(calls[0]["target_message_id_hex"], "muted-progress");
+    assert!(bridge.state.outbox.is_empty());
+    server.abort();
+}
+
+#[tokio::test]
+async fn muting_keeps_the_published_progress_target_and_resume_finishes_it_without_old_answers() {
+    let root = tempfile::tempdir().unwrap();
+    let config = editable_config(root.path());
+    export_script(&config.opencode_bin, "Completed while muted", "muted-final");
+    let calls = Arc::new(Mutex::new(vec![]));
+    let server = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    let key = agent().key();
+    let group = "bb".repeat(16);
+    bridge
+        .state
+        .mappings
+        .insert(key.clone(), activity_mapping(agent(), &group));
+    bridge.state.begin_response(&key, &group);
+    let id = bridge.state.mappings[&key].response_id.clone().unwrap();
+    let delivery = bridge.state.outbox[0].response.as_mut().unwrap();
+    delivery.target = Some("old-progress".into());
+    delivery.initial_text = Some("> working...".into());
+    delivery.sent_text = Some("> working...".into());
+    herdr_white_noise_bridge::forwarding::set(&config.state_path, false).unwrap();
+    bridge.flush().await.unwrap();
+    assert_eq!(
+        bridge.state.mappings[&key].response_id.as_deref(),
+        Some(id.as_str())
+    );
+    assert_eq!(bridge.state.outbox.len(), 1);
+    assert!(calls.lock().unwrap().is_empty());
+    bridge.save().unwrap();
+    drop(bridge);
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge.reconcile(vec![agent()]).await.unwrap();
+    herdr_white_noise_bridge::forwarding::set(&config.state_path, true).unwrap();
+    bridge.reconcile(vec![agent()]).await.unwrap();
+    bridge.flush().await.unwrap();
+    assert!(bridge.state.outbox.is_empty());
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["type"], "edit_message");
+    assert_eq!(calls[0]["target_message_id_hex"], "old-progress");
+    assert_eq!(calls[0]["text"], "> done");
     server.abort();
 }
 
@@ -6174,7 +7257,7 @@ async fn a_standalone_final_retries_with_its_own_stable_id_after_restart() {
 }
 
 #[tokio::test]
-async fn detached_cancelled_progress_cannot_post_working_after_a_final() {
+async fn detached_cancelled_progress_retains_its_uncertain_target_without_blocking_a_final() {
     let dir = tempfile::tempdir().unwrap();
     let config = editable_config(dir.path());
     let mut bridge = Bridge::open(config.clone()).unwrap();
@@ -6207,15 +7290,22 @@ async fn detached_cancelled_progress_cannot_post_working_after_a_final() {
     let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
     let mut restarted = Bridge::open(config).unwrap();
     restarted.flush().await.unwrap();
+    assert_eq!(restarted.state.outbox.len(), 1);
+    restarted.state.outbox[0]
+        .response
+        .as_mut()
+        .unwrap()
+        .last_attempt_at = 0;
+    restarted.flush().await.unwrap();
     let calls = calls.lock().unwrap();
     assert_eq!(
         calls.len(),
         1,
-        "Do not retry detached progress after the final"
+        "Send the final independently; do not replay an uncertain initial status"
     );
     assert_eq!(calls[0]["type"], "send_final");
     assert_eq!(calls[0]["text"], "The next final answer");
-    assert!(restarted.state.outbox.is_empty());
+    assert_eq!(restarted.state.outbox.len(), 1);
     mdk.abort();
 }
 
@@ -7689,57 +8779,60 @@ async fn muted_new_sessions_are_invited_once_without_sending_messages() {
 
 #[tokio::test]
 async fn introduction_messages_use_the_current_agent_label() {
-    let root = tempfile::tempdir().unwrap();
-    let config = config(root.path());
-    export_script(&config.opencode_bin, "Historical reply", "old");
-    let calls = Arc::new(Mutex::new(vec![]));
-    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
-    let mut observed = agent();
-    observed.terminal_title_stripped = Some("OC | Casual greeting".into());
-    let mut bridge = Bridge::open(config.clone()).unwrap();
-    bridge.reconcile(vec![observed.clone()]).await.unwrap();
-    assert!(bridge.state.outbox.iter().any(|item| {
-        item.text
-            .contains("Connected to herdr: [oc] Casual greeting.")
-    }));
-    assert!(
-        bridge
-            .state
-            .outbox
-            .iter()
-            .all(|item| !item.text.contains("OC |"))
-    );
-    let greeting = "Hi, I'm Pat. I'll be delivering messages between White Noise and herdr for you. Type /help from any message to see what commands are available.";
-    assert!(
-        bridge
-            .state
-            .outbox
-            .iter()
-            .any(|item| item.text.starts_with(greeting))
-    );
-    drop(bridge);
-    let mut bridge = Bridge::open(config).unwrap();
-    bridge.reconcile(vec![observed.clone()]).await.unwrap();
-    bridge.reconcile(vec![observed]).await.unwrap();
-    assert_eq!(
-        bridge
-            .state
-            .outbox
-            .iter()
-            .filter(|item| item.text.starts_with(greeting))
-            .count(),
-        1
-    );
-    assert_eq!(
-        calls
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|call| call["type"] == "group_create_with_admins")
-            .count(),
-        1
-    );
-    mdk.abort();
+    for suffix in [None, Some("opencode")] {
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path());
+        export_script(&config.opencode_bin, "Historical reply", "old");
+        let calls = Arc::new(Mutex::new(vec![]));
+        let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+        let mut observed = agent();
+        observed.terminal_title_stripped = Some("OC | Outdated title".into());
+        observed.tab_label = Some("lockr".into());
+        observed.workspace_label = Some("bits".into());
+        let mut bridge = Bridge::open(config.clone()).unwrap();
+        if let Some(suffix) = suffix {
+            bridge
+                .state
+                .pending_chat_agents
+                .insert(observed.terminal_id.clone(), suffix.into());
+        }
+        bridge.reconcile(vec![observed.clone()]).await.unwrap();
+        let name = observed.group_name_with_suffix(suffix);
+        let greeting =
+            format!("Connected to {name}.\n\nType /help from anywhere to view commands.");
+        assert!(bridge.state.outbox.iter().any(|item| item.text == greeting));
+        assert!(
+            bridge
+                .state
+                .outbox
+                .iter()
+                .all(|item| !item.text.contains("OC |"))
+        );
+        assert!(bridge.state.outbox.iter().any(|item| item.text == greeting));
+        drop(bridge);
+        let mut bridge = Bridge::open(config).unwrap();
+        bridge.reconcile(vec![observed.clone()]).await.unwrap();
+        bridge.reconcile(vec![observed]).await.unwrap();
+        assert_eq!(
+            bridge
+                .state
+                .outbox
+                .iter()
+                .filter(|item| item.text == greeting)
+                .count(),
+            1
+        );
+        assert_eq!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|call| call["type"] == "group_create_with_admins")
+                .count(),
+            1
+        );
+        mdk.abort();
+    }
 }
 
 #[tokio::test]

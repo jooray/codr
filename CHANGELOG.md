@@ -1,6 +1,29 @@
 # Changelog
 
-## [0.7.0] - 2026-10-24
+## [0.8.0] - Unreleased
+
+Phone-driven worker updates, immediate prepared-media delivery, and more reliable
+project setup and progress completion. These changes are not in published 0.7.0.
+
+### Fixed
+
+- Deliver incoming ZIP archives, documents and other file attachments as private local files, with their caption and quoted original name. Do not send them to image/audio-only validation or require a transcription service; archives are not automatically extracted or executed. Preserve bounded downloads, restart recovery and duplicate protection, and distinguish file-preparation errors from audio-transcription errors.
+- Keep progress edit targets through failed completion edits, lost initial acknowledgements, restarts and mute/resume, so visible working bubbles can finish as `done` without holding up final replies. Do not complete progress on an early idle signal alone.
+- Accept OpenCode's explicit `default` variant when confirming a model chosen without a variant. Previously, a successfully created session could be reported as uncertain, preventing its tab and agent from starting; in-place model changes could also be misreported. Keep exact provider/model and explicit-variant checks, with no automatic retry of earlier uncertain launches.
+
+### Changed
+
+- Shorten new-chat welcomes to the current chat name followed by `/help` guidance, without the obsolete bracketed agent title.
+- Confirm new project setup by typing the repository folder name rather than the destination workspace label. Keep the destination visible separately, including workspace-rename revalidation and zero-cancel safety.
+- Download images and transcribe voice while agents are working, then submit prepared media immediately without waiting for idle or interrupting. Keep image preparation order, existing accepted deliveries and uncertain-submission safeguards. Describe image acceptance as preparation rather than task queuing.
+- Reuse the existing progress bubble for follow-ups and blocked-to-working transitions instead of appending extra `working...` notices. Preserve historical messages.
+
+### Added
+
+- Answer supported OpenCode V2 questions with custom text directly from the phone, such as a version number, or `/answer TEXT`. Bind the reply to the fresh native form and session, retain question-code and duplicate guards, and never turn it into a queued prompt or arbitrary terminal input. Legacy, multi-select and multi-question custom replies remain terminal-only.
+- Owner-only `/update` discovers stable releases from the pinned ngit maintainer, asks for a chat-bound confirmation, and verifies independent Blossom downloads before replacing only the managed bridge worker. Updates retain state and accepted work, reject connector/storage-cohort changes, and restore the previous executable after failed startup without rewinding routing state.
+
+## [0.7.0] - 2026-10-25
 
 ### Added
 
@@ -41,6 +64,12 @@
 - Validate replacement session readers before saving an OpenCode repair. Restore the old configuration after a failed worker restart so setup can retry the repair.
 - Read Claude transcripts larger than 128 MiB and parse only appended bytes, retaining the bounded 32-entry transcript cache and eviction order.
 - OpenCode V2 decision replies no longer reject a matching live question when the sidebar shows a repository-path footer instead of the older version footer. The bridge still checks the current request identity, exact question and options, visible selection controls, and unchanged terminal session before sending a choice.
+
+### Contributors
+
+- **Paul Eipper ([@lkraider](https://github.com/lkraider))** — Claude transcripts above 128 MiB, incremental parsing, bounded-cache and eviction tests, and load-tolerant bridge test waits. These contributions came through ngit; original commit authorship is preserved.
+- **Juraj Bednar ([@jooray](https://github.com/jooray))** — stable OpenCode executable paths across Homebrew upgrades, via [GitHub PR #6](https://github.com/tidley/codr/pull/6).
+- **Tom Dwyer ([@tidley](https://github.com/tidley))** — phone controls, project/model setup, media delivery, integration, follow-up fixes, documentation and release work.
 
 ## [0.6.2] - 2026-10-23 (Linux preview)
 
