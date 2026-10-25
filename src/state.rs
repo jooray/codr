@@ -70,6 +70,9 @@ pub struct Mapping {
     pub manual_reply_after: u64,
     #[serde(default)]
     pub agent_record: Option<crate::herdr::Agent>,
+    /// A new identity appeared on an established terminal. No routing until confirmed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_change_from: Option<String>,
     #[serde(default)]
     pub last_export_at: u64,
     /// Local observation time of a new final reply, not baseline history.

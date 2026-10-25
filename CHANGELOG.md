@@ -7,6 +7,7 @@ project setup and progress completion. These changes are not in published 0.7.0.
 
 ### Fixed
 
+- Pause an unexpected new native session on an established terminal before creating another phone group. Retain the original chat and accepted work, persist the hold across restarts, and require local `confirm-session-change` approval against the current terminal and native session. Intentional launches in new terminals remain unchanged.
 - Deliver incoming ZIP archives, documents and other file attachments as private local files, with their caption and quoted original name. Do not send them to image/audio-only validation or require a transcription service; archives are not automatically extracted or executed. Preserve bounded downloads, restart recovery and duplicate protection, and distinguish file-preparation errors from audio-transcription errors.
 - Keep progress edit targets through failed completion edits, lost initial acknowledgements, restarts and mute/resume, so visible working bubbles can finish as `done` without holding up final replies. Do not complete progress on an early idle signal alone.
 - Accept OpenCode's explicit `default` variant when confirming a model chosen without a variant. Previously, a successfully created session could be reported as uncertain, preventing its tab and agent from starting; in-place model changes could also be misreported. Keep exact provider/model and explicit-variant checks, with no automatic retry of earlier uncertain launches.

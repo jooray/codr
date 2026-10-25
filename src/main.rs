@@ -35,6 +35,8 @@ enum Action {
     Status,
     /// Validate live session history readers without changing bridge state.
     CheckReaders,
+    /// Approve a paused replacement after inspection. Stop only the worker first.
+    ConfirmSessionChange { key: String },
     /// Control global White Noise forwarding without stopping the worker.
     Forwarding {
         #[arg(value_enum, default_value = "status")]
@@ -129,7 +131,7 @@ async fn main() -> Result<()> {
         for (key, m) in s.mappings {
             println!(
                 "{}",
-                serde_json::json!({"session":key,"group":m.group_id_hex,"control":m.control,"creating_uncertain":m.creating,"active":m.active,"state":m.last_agent_status,"pending_prompt":m.pending_prompt,"queued_prompts":m.prompt_queue.len(),"queue_submission_uncertain":m.queue_flight.as_ref().is_some_and(|flight| !flight.confirmed),"unresolved_progress":s.outbox.iter().filter(|item| Some(&item.group)==m.group_id_hex.as_ref() && item.response.as_ref().is_some_and(|delivery| delivery.finished && delivery.target.is_none() && delivery.initial_text.is_some() && !delivery.durable)).count(),"forwarding_enabled":forwarding_enabled,"forwarding_resume_pending":resume_pending})
+                serde_json::json!({"session":key,"group":m.group_id_hex,"control":m.control,"creating_uncertain":m.creating,"active":m.active,"state":m.last_agent_status,"session_change_from":m.session_change_from,"pending_prompt":m.pending_prompt,"queued_prompts":m.prompt_queue.len(),"queue_submission_uncertain":m.queue_flight.as_ref().is_some_and(|flight| !flight.confirmed),"unresolved_progress":s.outbox.iter().filter(|item| Some(&item.group)==m.group_id_hex.as_ref() && item.response.as_ref().is_some_and(|delivery| delivery.finished && delivery.target.is_none() && delivery.initial_text.is_some() && !delivery.durable)).count(),"forwarding_enabled":forwarding_enabled,"forwarding_resume_pending":resume_pending})
             );
         }
         return Ok(());
@@ -218,6 +220,7 @@ async fn main() -> Result<()> {
             }
             bridge.save()
         }
+        Action::ConfirmSessionChange { key } => bridge.confirm_session_change(&key).await,
         Action::RenameGroups => bridge.rename_groups().await,
         Action::Status => unreachable!(),
         Action::CheckReaders => unreachable!(),

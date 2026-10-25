@@ -17,6 +17,7 @@ The bridge uses one dedicated MDK identity across all mapped groups. Setup keeps
 - `/status` reports the mapped session state.
 - `unmute` or `/unmute` resumes forwarding for all chats without sending a prompt or answering an agent question.
 - Ended sessions retain their group. A restored native session reuses its group.
+- A previously unseen native session on a terminal with a retained chat pauses that connection before creating another group. The original chat, history and accepted deliveries are retained. Local `status` shows the candidate's `session_change_from`; returning to the original native session reconnects its existing chat. Confirmed `/new` and `/agent` launches in new terminals are unchanged.
 - Images and audio use the media route below. Other attachment types and arbitrary terminal key commands are not supported.
 - Other detected agent backends get groups, prompts, and state notices. Structured final-reply extraction supports **OpenCode, Codex, and Claude Code**.
 
@@ -466,6 +467,16 @@ tail -n 50 ~/Library/Logs/codr/herdr-white-noise-bridge.err.log
 ```
 
 State and the pending outbox use owner-only files. Keep them on persistent storage, with the MDK account home. Do not put these files in Git.
+
+If histories appear empty and identically named invitations arrive, stop only the bridge worker and back up its current state before changing anything. Compare native session IDs, not chat names. Reattach the original OpenCode session in its Herdr pane; its retained group mapping reconnects without a new invitation. Keep replacement sessions and groups separate. Do not restore an older whole-state file, merge histories, reset an account, or migrate connector storage as a repair.
+
+An unexpected new identity on an established terminal now requires local approval. Inspect both sessions and the `session_change_from` entry in `status`. To deliberately accept the candidate, stop only the worker and run:
+
+```sh
+~/.local/bin/herdr-white-noise-bridge confirm-session-change 'CANDIDATE_SESSION_KEY_FROM_STATUS'
+```
+
+Start the worker after approval. The command checks a fresh Herdr snapshot and refuses a changed selection or terminal. Approval creates a separate chat on reconciliation; it never transfers the original group's history or accepted deliveries. To recover the original instead, reselect its native session without approving the candidate. This command needs the same local state lock as the other repair commands.
 
 The bridge saves consumed phone-message IDs before it submits terminal input. It never retries an uncertain prompt automatically. This favours avoiding duplicate actions over automatic replay after a crash.
 

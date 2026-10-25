@@ -7821,6 +7821,244 @@ async fn ended_groups_do_not_route_to_a_replacement_agent() {
 }
 
 #[tokio::test]
+async fn session_change_on_an_established_terminal_pauses_before_creating_a_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path());
+    export_script(&config.opencode_bin, "old", "old");
+    let calls = Arc::new(Mutex::new(vec![]));
+    let server = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let original = agent();
+    let mut replacement = original.clone();
+    replacement.agent_session.as_mut().unwrap().value = "ses_replacement".into();
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    let mut mapping = activity_mapping(original.clone(), &"bb".repeat(16));
+    mapping.pending_prompt = true;
+    mapping.final_ids.push("old".into());
+    mapping
+        .prompt_queue
+        .push(herdr_white_noise_bridge::state::QueuedPrompt {
+            id: "accepted-original-delivery".into(),
+            group: "bb".repeat(16),
+            text: "Accepted work for the original session only".into(),
+            media: None,
+        });
+    mapping.queue_flight = Some(herdr_white_noise_bridge::state::QueueFlight {
+        before_final: Some("old".into()),
+        confirmed: true,
+    });
+    let accepted = mapping.prompt_queue.clone();
+    let flight = mapping.queue_flight.clone();
+    bridge.state.mappings.insert(original.key(), mapping);
+    bridge.reconcile(vec![replacement.clone()]).await.unwrap();
+    assert!(calls.lock().unwrap().iter().all(|call| {
+        call["type"] != "group_create_with_admins" && call["type"] != "group_create_capabilities"
+    }));
+    assert!(!bridge.agents.contains_key(&replacement.key()));
+    assert!(bridge.state.mappings[&original.key()].active);
+    let paused = &bridge.state.mappings[&replacement.key()];
+    assert!(paused.group_id_hex.is_none());
+    assert_eq!(
+        serde_json::to_value(paused).unwrap()["session_change_from"],
+        original.key()
+    );
+    bridge.save().unwrap();
+    drop(bridge);
+    let mut bridge = Bridge::open(config).unwrap();
+    bridge.reconcile(vec![replacement]).await.unwrap();
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|call| call["type"] != "group_create_with_admins")
+    );
+    let mut text = inbound(HEX, "paused-phone-prompt");
+    text["message"]["text"] = json!("Do not send this to the replacement");
+    assert!(bridge.inbound(&text).await.is_err());
+    assert!(bridge.state.mappings[&original.key()].pending_prompt);
+    assert_eq!(
+        bridge.state.mappings[&original.key()].prompt_queue,
+        accepted
+    );
+    assert_eq!(bridge.state.mappings[&original.key()].queue_flight, flight);
+    assert!(
+        !bridge.state.mappings[&original.key()]
+            .seen_messages
+            .contains(&"paused-phone-prompt".into())
+    );
+    bridge.reconcile(vec![original.clone()]).await.unwrap();
+    assert!(bridge.agents.contains_key(&original.key()));
+    assert_eq!(
+        bridge.state.mappings[&original.key()].group_id_hex,
+        Some("bb".repeat(16))
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn session_change_guard_allows_an_intentional_new_terminal() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path());
+    export_script(&config.opencode_bin, "old", "old");
+    let calls = Arc::new(Mutex::new(vec![]));
+    let server = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let original = agent();
+    let mut launched = original.clone();
+    launched.terminal_id = "new-terminal".into();
+    launched.pane_id = "w1:p2".into();
+    launched.agent_session.as_mut().unwrap().value = "ses_launched".into();
+    let mut bridge = Bridge::open(config).unwrap();
+    bridge
+        .state
+        .mappings
+        .insert(original.key(), activity_mapping(original, &"bb".repeat(16)));
+    bridge
+        .state
+        .pending_chat_agents
+        .insert(launched.terminal_id.clone(), "opencode".into());
+    bridge.reconcile(vec![launched.clone()]).await.unwrap();
+    assert!(
+        bridge.state.mappings[&launched.key()]
+            .group_id_hex
+            .is_some()
+    );
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call["type"] == "group_create_with_admins")
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn session_change_rejects_duplicate_native_identities_before_guard_mutations() {
+    for reverse in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        export_script(&config.opencode_bin, "old", "old");
+        let calls = Arc::new(Mutex::new(vec![]));
+        let connector = peer(&config.wn_agent_socket, true, calls.clone()).await;
+        let original = agent();
+        let mut replacement = original.clone();
+        replacement.agent_session.as_mut().unwrap().value = "ses_replacement".into();
+        let mut fresh = replacement.clone();
+        fresh.terminal_id = "fresh-terminal".into();
+        fresh.pane_id = "w1:p2".into();
+        let mut bridge = Bridge::open(config).unwrap();
+        bridge
+            .state
+            .mappings
+            .insert(original.key(), activity_mapping(original, &"bb".repeat(16)));
+        let before = bridge.state.clone();
+        let mut snapshot = vec![fresh, replacement];
+        if reverse {
+            snapshot.reverse();
+        }
+        assert!(bridge.reconcile(snapshot).await.is_err());
+        assert_eq!(bridge.state, before);
+        assert!(calls.lock().unwrap().is_empty());
+        connector.abort();
+    }
+}
+
+#[tokio::test]
+async fn session_change_confirmation_rechecks_live_identity_and_seeds_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path());
+    export_script(
+        &config.opencode_bin,
+        "already in the replacement",
+        "prior-replacement-final",
+    );
+    let calls = Arc::new(Mutex::new(vec![]));
+    let connector = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let original = agent();
+    let mut replacement = original.clone();
+    replacement.agent_session.as_mut().unwrap().value = "ses_replacement".into();
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    let mut mapping = activity_mapping(original.clone(), &"bb".repeat(16));
+    mapping.final_ids.push("prior-replacement-final".into());
+    bridge.state.mappings.insert(original.key(), mapping);
+    bridge.reconcile(vec![replacement.clone()]).await.unwrap();
+    // Restoring the original before confirmation must reject the stale candidate.
+    let native = peer_for_agent(
+        &config.herdr_socket,
+        false,
+        Arc::new(Mutex::new(vec![])),
+        original.clone(),
+    )
+    .await;
+    assert!(
+        bridge
+            .confirm_session_change(&replacement.key())
+            .await
+            .is_err()
+    );
+    assert!(
+        bridge.state.mappings[&replacement.key()]
+            .session_change_from
+            .is_some()
+    );
+    native.abort();
+    let _ = native.await;
+    std::fs::remove_file(&config.herdr_socket).unwrap();
+    let native = peer_for_agent(
+        &config.herdr_socket,
+        false,
+        Arc::new(Mutex::new(vec![])),
+        replacement.clone(),
+    )
+    .await;
+    bridge
+        .confirm_session_change(&replacement.key())
+        .await
+        .unwrap();
+    drop(bridge);
+    let mut bridge = Bridge::open(config).unwrap();
+    assert!(
+        bridge.state.mappings[&replacement.key()]
+            .session_change_from
+            .is_none()
+    );
+    bridge.reconcile(vec![replacement.clone()]).await.unwrap();
+    assert!(
+        bridge.state.mappings[&replacement.key()]
+            .group_id_hex
+            .is_some()
+    );
+    assert!(
+        bridge.state.mappings[&replacement.key()]
+            .final_ids
+            .contains(&"prior-replacement-final".into())
+    );
+    assert!(
+        bridge.state.mappings[&original.key()]
+            .group_id_hex
+            .is_some()
+    );
+    assert!(
+        bridge
+            .state
+            .outbox
+            .iter()
+            .all(|m| m.text != "already in the replacement")
+    );
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call["type"] == "group_create_with_admins")
+            .count(),
+        1
+    );
+    native.abort();
+    connector.abort();
+}
+
+#[tokio::test]
 async fn a_missing_connector_before_submission_retries_when_it_appears() {
     let dir = tempfile::tempdir().unwrap();
     let config = config(dir.path());

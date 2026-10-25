@@ -642,6 +642,15 @@ impl Bridge {
     }
 
     pub async fn reconcile(&mut self, agents: Vec<Agent>) -> Result<()> {
+        let mut identities = HashSet::new();
+        for agent in &agents {
+            if agent.agent_session.is_some() {
+                ensure!(
+                    identities.insert(agent.key()),
+                    "Two live agents report the same session identity"
+                );
+            }
+        }
         self.refresh_forwarding()?;
         self.ensure_control_group().await;
         self.last_snapshot = agents.clone();
@@ -656,6 +665,45 @@ impl Bridge {
             if agent.agent.is_empty() {
                 agent.agent = session.agent.clone();
                 agent.agent_status = "unknown".into();
+            }
+            let key = agent.key();
+            if !self.state.mappings.contains_key(&key)
+                && let Some(previous) = self.state.mappings.iter().find_map(|(key, mapping)| {
+                    (mapping.group_id_hex.is_some()
+                        && !agent.terminal_id.is_empty()
+                        && mapping
+                            .agent_record
+                            .as_ref()
+                            .is_some_and(|old| old.terminal_id == agent.terminal_id))
+                    .then(|| key.clone())
+                })
+            {
+                self.state.mappings.insert(
+                    key.clone(),
+                    Mapping {
+                        agent_record: Some(agent.clone()),
+                        session_change_from: Some(previous.clone()),
+                        last_agent_status: "session_changed".into(),
+                        ..Mapping::default()
+                    },
+                );
+                let group = self.state.mappings[&previous].group_id_hex.clone().unwrap();
+                self.state.enqueue_manual(
+                    &group,
+                    "Session changed unexpectedly. This connection is paused; no replacement chat was created. Restore the original native session, or inspect local status and use confirm-session-change to approve the exact new session. No prompt was sent.",
+                    &format!("session-change:{key}"),
+                );
+                // Persist the hold before any transcript, group creation, or input I/O.
+                self.save()?;
+            }
+            if self
+                .state
+                .mappings
+                .get(&key)
+                .is_some_and(|m| m.session_change_from.is_some())
+            {
+                uncertain_terminals.insert(agent.terminal_id.clone());
+                continue;
             }
             ensure!(
                 current.insert(agent.key(), agent).is_none(),
@@ -766,6 +814,37 @@ impl Bridge {
         self.save()?;
         self.process_prompt_queues().await;
         Ok(())
+    }
+
+    /// Approve only the replacement still selected on the recorded terminal.
+    pub async fn confirm_session_change(&mut self, key: &str) -> Result<()> {
+        let mapping = self
+            .state
+            .mappings
+            .get(key)
+            .ok_or_else(|| anyhow::anyhow!("Unknown session key"))?;
+        ensure!(
+            mapping.session_change_from.is_some() && mapping.group_id_hex.is_none(),
+            "This session has no pending identity change"
+        );
+        let expected = mapping
+            .agent_record
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Pending session has no terminal identity"))?;
+        let agents = herdr::snapshot(&self.herdr).await?;
+        ensure!(
+            agents.iter().filter(|a| a.key() == key).count() == 1
+                && agents.iter().any(|a| a.key() == key
+                    && a.terminal_id == expected.terminal_id
+                    && a.pane_id == expected.pane_id),
+            "Session selection changed; no identity change was approved"
+        );
+        self.state
+            .mappings
+            .get_mut(key)
+            .unwrap()
+            .session_change_from = None;
+        self.save()
     }
 
     async fn seed_native_history(&mut self, key: &str, agent: &Agent) -> Result<bool> {
@@ -906,7 +985,9 @@ impl Bridge {
                 }
             }
         }
-        if !self.state.mappings.contains_key(key) {
+        if self.state.mappings.get(key).is_none_or(|mapping| {
+            !mapping.output_initialised && !mapping.creating && mapping.group_id_hex.is_none()
+        }) {
             // Capture the initial final-message watermark before exposing a new group.
             let mut m = Mapping {
                 joined_at: now(),
