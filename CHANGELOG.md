@@ -32,6 +32,10 @@
 - Retained media acknowledgements say only `Queued prompt at position N.`, including position 1; immediate text no longer receives a queue acknowledgement.
 - `/recent` skips unchanged source messages already confirmed sent or pending in each chat, including previous catch-ups and ordinary replies. Per-source delivery records survive restarts and confirm only after every message chunk succeeds. Excerpts preserve conversation order, can include older context or unanswered user prompts, and exclude tool output and unfinished replies.
 
+### Added
+
+- Add `scripts/transcribe_gemini.py`, an optional voice transcriber that uses the Gemini API. It sends the voice audio to Google. The API key is read from `~/.config/codr/gemini-api-key`.
+
 ### Fixed
 
 - Clear expired project menus after one expiry notice so later phone messages return to normal agent routing. Preserve uncertain actions and retry safely after a failed state save.
