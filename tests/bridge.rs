@@ -4115,6 +4115,7 @@ async fn background_reads_limit_parallel_exports_and_ignore_results_after_desk_s
 }
 
 fn editable_config(dir: &std::path::Path) -> BridgeConfig {
+    // tempfile's macOS root sits behind the /var symlink; launch roots must be real paths.
     let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
     serde_json::from_value(json!({
         "phone_npub":phone_npub(), "herdr_socket":dir.join("herdr.sock"),

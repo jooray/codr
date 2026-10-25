@@ -266,7 +266,7 @@ async fn typing_the_displayed_workspace_name_confirms_but_wrong_or_unsafe_names_
     let (server, calls) = host(&config, None).await;
     new_model_preview(&mut bridge, &key).await;
     assert!(last(&bridge).contains("Confirm within ten minutes"));
-    assert!(last(&bridge).contains("Confirm by typing:\nmy-idea\n\n**0. Cancel**"));
+    assert!(last(&bridge).contains("Reply confirm (or type: my-idea)"));
     bridge.inbound(&event("wrong", "other-name")).await.unwrap();
     assert!(last(&bridge).contains("my-idea"));
     assert!(bridge.state.mappings[&key].prompt_queue.is_empty());
@@ -383,10 +383,10 @@ async fn workspace_name_confirmation_rechecks_renames_and_expiry() {
     ]));
     let (server, calls) = host_with_workspaces(&config, None, workspaces.clone()).await;
     existing_workspace_preview(&mut bridge, &key, 1).await;
-    assert!(last(&bridge).contains("Confirm by typing:\nMain\n\n**0. Cancel**"));
+    assert!(last(&bridge).contains("Reply confirm (or type: Main)"));
     workspaces.lock().unwrap()[0]["label"] = json!("Renamed");
     bridge.inbound(&event("old-name", "Main")).await.unwrap();
-    assert!(last(&bridge).contains("Confirm by typing:\nRenamed"));
+    assert!(last(&bridge).contains("Reply confirm (or type: Renamed)"));
     assert!(!config.launch_root.join("side-project").exists());
     bridge.inbound(&event("wrong-name", "Main")).await.unwrap();
     assert!(last(&bridge).contains("does not match"));
@@ -819,7 +819,7 @@ async fn code_free_menu_choices_survive_restart_and_require_explicit_confirmatio
     let request = bridge.state.mappings[&key].launch.as_ref().unwrap();
     assert_eq!(request.model.as_ref().unwrap().id, "model-12");
     assert!(!last(&bridge).contains(&request.code));
-    assert!(last(&bridge).contains("Confirm by typing:\nside-project"));
+    assert!(last(&bridge).contains("Reply confirm (or type: side-project)"));
     assert!(!config.launch_root.join("side-project").exists());
     bridge.inbound(&event("select", "12")).await.unwrap(); // Same message cannot become a prompt after the menu advances.
     assert!(
@@ -2261,4 +2261,29 @@ async fn failed_menu_or_model_intent_save_prevents_api_mutations() {
         assert!(!config.launch_root.join("idea").exists());
         server.abort();
     }
+}
+
+#[tokio::test]
+async fn confirm_word_starts_without_typing_the_workspace_name() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    api(&config);
+    let (mut bridge, key) = bridge(&config, None);
+    let (server, calls) = host(&config, None).await;
+    new_model_preview(&mut bridge, &key).await;
+    assert!(last(&bridge).contains("Reply confirm (or type: my-idea)"));
+    bridge
+        .inbound(&event("confirm-word", "confirm"))
+        .await
+        .unwrap();
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c["method"] == "workspace.create")
+            .count(),
+        1
+    );
+    server.abort();
 }
