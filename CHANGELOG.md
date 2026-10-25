@@ -6,6 +6,7 @@
 
 - Add `scripts/transcribe_gemini.py`, an optional voice transcriber that uses the Gemini API. It sends the voice audio to Google. The API key is read from `~/.config/codr/gemini-api-key`.
 - Optional standalone control chat (`control_chat = true`): one owner-only White Noise group that accepts `/new` and general commands without being mapped to an agent session. Plain text, session-only commands, and uncertain creation are handled explicitly.
+- The `/new` folder step accepts `ls` to list selectable directories under `launch_root` and choose one by number.
 
 ## [0.7.0] - 2026-10-24
 
