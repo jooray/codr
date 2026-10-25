@@ -110,13 +110,35 @@ impl Bridge {
                                 .map(|attachment| attachment.path.clone())
                         }),
                 );
+                let cancelled_blocks: HashSet<_> = self
+                    .state
+                    .outbox
+                    .iter()
+                    .filter(|item| {
+                        !item.manual
+                            && item.text.starts_with("> blocked Agent needs input")
+                            && item.response.as_ref().is_none_or(|response| {
+                                response.sent_text.as_deref() != Some(item.text.as_str())
+                            })
+                    })
+                    .map(|item| item.group.clone())
+                    .collect();
                 self.state.outbox.retain(|item| item.manual);
                 for mapping in self.state.mappings.values_mut() {
                     mapping.response_id = None;
                     mapping.task_revision = None;
                     // The control chat has no transcript and never needs a checkpoint.
                     mapping.forwarding_baseline_pending = !mapping.control;
-                    mapping.blocked_context_seq = None;
+                    // Keep the announced blocked context across mute/wake cycles;
+                    // an unchanged block must not notify the phone again.
+                    // A cancelled, undelivered notice still needs one delivery on wake.
+                    if mapping
+                        .group_id_hex
+                        .as_ref()
+                        .is_some_and(|group| cancelled_blocks.contains(group))
+                    {
+                        mapping.blocked_context_seq = None;
+                    }
                     mapping.decision_checked_at = 0;
                     mapping.decision_refresh_pending = true;
                     if let Some(decision) = mapping.decision.as_mut() {
