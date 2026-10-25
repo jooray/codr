@@ -465,7 +465,7 @@ pub async fn handle(
                 group,
                 id,
                 &format!(
-                    "That name does not match the pending workspace. Reply confirm (or type: {}), or 0 to cancel.",
+                    "That name does not match the pending workspace. Reply confirm, yes or y (or type: {}), or 0 to cancel.",
                     request.confirmation_name()
                 ),
             );

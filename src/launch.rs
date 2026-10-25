@@ -103,7 +103,7 @@ impl Request {
     }
     pub(crate) fn preview(&self) -> String {
         format!(
-            "{}: {}\nWorkspace destination: {}\nAgent: {}\nModel: {}\nFolder: {}\n{}\nNothing has started. Confirm within ten minutes.\nReply confirm (or type: {}), or\n\n**0. Cancel**",
+            "{}: {}\nWorkspace destination: {}\nAgent: {}\nModel: {}\nFolder: {}\n{}\nNothing has started. Confirm within ten minutes.\nReply confirm, yes or y (or type: {}), or\n\n**0. Cancel**",
             if self.destination_workspace().is_some() {
                 "New tab in existing workspace"
             } else {
