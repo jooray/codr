@@ -1,6 +1,7 @@
 pub mod activity;
 pub mod bridge;
 pub mod catalogue;
+mod commands;
 pub mod config;
 pub mod herdr;
 pub mod launch;
