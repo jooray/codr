@@ -114,7 +114,8 @@ impl Bridge {
                 for mapping in self.state.mappings.values_mut() {
                     mapping.response_id = None;
                     mapping.task_revision = None;
-                    mapping.forwarding_baseline_pending = true;
+                    // The control chat has no transcript and never needs a checkpoint.
+                    mapping.forwarding_baseline_pending = !mapping.control;
                     mapping.blocked_context_seq = None;
                     mapping.decision_checked_at = 0;
                     mapping.decision_refresh_pending = true;
@@ -156,7 +157,8 @@ impl Bridge {
             .mappings
             .iter()
             .filter(|(key, mapping)| {
-                mapping.forwarding_baseline_pending
+                !mapping.control
+                    && mapping.forwarding_baseline_pending
                     && (mapping.active || self.agents.contains_key(*key))
             })
             .map(|(key, _)| key.clone())
