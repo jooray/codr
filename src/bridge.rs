@@ -14,6 +14,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+const CONTROL_KEY: &str = "control";
+
 pub struct Bridge {
     pub config: BridgeConfig,
     pub state: BridgeState,
@@ -69,6 +71,15 @@ impl Bridge {
             porter_updates: tokio::sync::watch::channel(Value::Null).0,
         };
         bridge.refresh_forwarding()?;
+        if bridge.config.control_chat {
+            let mapping = bridge.state.mappings.entry(CONTROL_KEY.into()).or_default();
+            let changed = !mapping.control || !mapping.active;
+            mapping.control = true;
+            mapping.active = true;
+            if changed {
+                bridge.save()?;
+            }
+        }
         Ok(bridge)
     }
 
@@ -103,7 +114,8 @@ impl Bridge {
                 for mapping in self.state.mappings.values_mut() {
                     mapping.response_id = None;
                     mapping.task_revision = None;
-                    mapping.forwarding_baseline_pending = true;
+                    // The control chat has no transcript and never needs a checkpoint.
+                    mapping.forwarding_baseline_pending = !mapping.control;
                     mapping.blocked_context_seq = None;
                     mapping.decision_checked_at = 0;
                     mapping.decision_refresh_pending = true;
@@ -145,7 +157,8 @@ impl Bridge {
             .mappings
             .iter()
             .filter(|(key, mapping)| {
-                mapping.forwarding_baseline_pending
+                !mapping.control
+                    && mapping.forwarding_baseline_pending
                     && (mapping.active || self.agents.contains_key(*key))
             })
             .map(|(key, _)| key.clone())
@@ -523,8 +536,94 @@ impl Bridge {
         Ok(())
     }
 
+    /// Create the standalone control group once; an uncertain creation is never retried.
+    async fn ensure_control_group(&mut self) {
+        if !self.config.control_chat {
+            return;
+        }
+        let (has_group, creating) = match self.state.mappings.get(CONTROL_KEY) {
+            Some(mapping) if mapping.control => (mapping.group_id_hex.is_some(), mapping.creating),
+            _ => return,
+        };
+        if has_group || creating {
+            return;
+        }
+        let name = "codr control";
+        let description =
+            "Owner-only codr control chat. Send /new to start a project, /help for commands.";
+        let capabilities = match self
+            .marmot
+            .marmot(json!({"type":"group_create_capabilities"}))
+            .await
+        {
+            Ok(value) => value,
+            Err(_) => return,
+        };
+        if capabilities["type"] != "group_create_capabilities"
+            || capabilities["initial_admins"] != true
+        {
+            eprintln!("Control chat needs the current connector; no group was created.");
+            return;
+        }
+        {
+            let mapping = self.state.mappings.get_mut(CONTROL_KEY).unwrap();
+            mapping.creating = true;
+            mapping.group_name = Some(name.into());
+            mapping.group_description = Some(description.into());
+        }
+        if self.save().is_err() {
+            return;
+        }
+        let created = self
+            .marmot
+            .marmot(json!({
+                "type": "group_create_with_admins",
+                "account_id_hex": self.config.account_id_hex,
+                "name": name,
+                "members": [self.config.phone_npub],
+                "admins": [self.config.phone_npub],
+                "description": description,
+            }))
+            .await;
+        match created {
+            Ok(response) if response["type"] == "group_created" => {
+                let Some(group) = response["group_id_hex"]
+                    .as_str()
+                    .filter(|group| !group.is_empty())
+                else {
+                    eprintln!("Control chat creation needs inspection.");
+                    return;
+                };
+                {
+                    let mapping = self.state.mappings.get_mut(CONTROL_KEY).unwrap();
+                    mapping.group_id_hex = Some(group.to_owned());
+                    mapping.creating = false;
+                }
+                self.state.enqueue_manual(
+                    group,
+                    "codr control chat. Send /new to start a project, /help for commands.",
+                    &format!("control-welcome:{group}"),
+                );
+                let _ = self.save();
+            }
+            Ok(_) => eprintln!("Control chat creation needs inspection."),
+            Err(error) => {
+                if error.downcast_ref::<crate::wire::NotSubmitted>().is_some() {
+                    let mapping = self.state.mappings.get_mut(CONTROL_KEY).unwrap();
+                    mapping.creating = false;
+                    let _ = self.save();
+                } else {
+                    eprintln!(
+                        "Control chat creation needs inspection. Use status and resolve-create."
+                    );
+                }
+            }
+        }
+    }
+
     pub async fn reconcile(&mut self, agents: Vec<Agent>) -> Result<()> {
         self.refresh_forwarding()?;
+        self.ensure_control_group().await;
         self.last_snapshot = agents.clone();
         let mut current = BTreeMap::new();
         let mut uncertain_terminals = HashSet::new();
@@ -602,6 +701,7 @@ impl Bridge {
             .iter()
             .filter(|(key, m)| {
                 m.active
+                    && !m.control
                     && !self.agents.contains_key(*key)
                     && !m
                         .agent_record
@@ -1395,7 +1495,49 @@ impl Bridge {
         Ok(())
     }
 
+    async fn control_message(
+        &mut self,
+        key: &str,
+        group: &str,
+        id: &str,
+        text: &str,
+    ) -> Result<()> {
+        let trimmed = text.trim();
+        let response = if trimmed.eq_ignore_ascii_case("/status") {
+            let sessions = self
+                .state
+                .mappings
+                .values()
+                .filter(|mapping| !mapping.control && mapping.group_id_hex.is_some())
+                .count();
+            let control = forwarding::load(&self.config.state_path)?;
+            format!(
+                "codr control chat. {sessions} mapped session(s). Forwarding: {}. Use /new to start a project, /help for commands.",
+                control.mode.label()
+            )
+        } else if trimmed.eq_ignore_ascii_case("/unmute") || trimmed.eq_ignore_ascii_case("unmute")
+        {
+            forwarding::set_mode(&self.config.state_path, forwarding::Mode::Auto)?;
+            self.refresh_forwarding()?;
+            "White Noise forwarding is enabled for all chats. No prompt was sent.".into()
+        } else if trimmed.is_empty() {
+            "Send /new to start a project, /help for commands.".into()
+        } else {
+            "This is the codr control chat, not a session. Use /new to start a project, /help for commands. To prompt an agent, open its chat.".into()
+        };
+        crate::launch::reply(self, key, group, id, &response)
+    }
+
     async fn cancel_task(&mut self, key: &str, group: &str, id: &str, plain: bool) -> Result<()> {
+        if self.state.mappings[key].control {
+            return crate::launch::reply(
+                self,
+                key,
+                group,
+                id,
+                "The control chat has no active task. Open a session chat to cancel its task.",
+            );
+        }
         if !plain {
             return crate::launch::reply(
                 self,
@@ -1701,6 +1843,18 @@ impl Bridge {
             return self
                 .chat_command(&key, group, id, text.trim().eq_ignore_ascii_case("/recent"))
                 .await;
+        }
+        if self.state.mappings[&key].control {
+            if queued || prepared || !plain_command {
+                return crate::launch::reply(
+                    self,
+                    &key,
+                    group,
+                    id,
+                    "The control chat accepts complete standalone text commands only.",
+                );
+            }
+            return self.control_message(&key, group, id, text).await;
         }
         self.refresh_forwarding()?;
         if !queued {
@@ -2647,6 +2801,9 @@ impl Bridge {
         let keys: Vec<_> = self.state.mappings.keys().cloned().collect();
         for key in keys {
             let mapping = &self.state.mappings[&key];
+            if mapping.control {
+                continue;
+            }
             let Some(group) = mapping.group_id_hex.clone() else {
                 continue;
             };
@@ -2726,6 +2883,9 @@ impl Bridge {
     /// Keep a live group's title and description in step with herdr. A title the
     /// user changed is never overwritten, and an uncertain profile update is never retried.
     async fn sync_group_profile(&mut self, key: &str, agent: &Agent, group: &str) {
+        if self.state.mappings[key].control {
+            return;
+        }
         let desired_name =
             agent.group_name_with_suffix(self.state.mappings[key].group_agent_suffix.as_deref());
         let desired_description = agent.group_description();

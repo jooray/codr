@@ -884,15 +884,12 @@ async fn start(
 mod model_argument_tests {
     #[test]
     fn backend_launches_only_use_structured_model_or_session_arguments() {
-        let root = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        // macOS temp directories sit behind the /var symlink; launch roots must be real paths.
+        let root = directory.path().canonicalize().unwrap();
         for kind in ["codex", "claude"] {
-            let mut request = super::proposal(
-                &format!("/new project project {kind}"),
-                root.path(),
-                root.path(),
-                0,
-            )
-            .unwrap();
+            let mut request =
+                super::proposal(&format!("/new project project {kind}"), &root, &root, 0).unwrap();
             assert!(request.agent_args().is_empty());
             request.model = Some(crate::catalogue::Model {
                 id: "chosen-model".into(),
@@ -904,7 +901,7 @@ mod model_argument_tests {
             assert_eq!(request.agent_args(), vec!["--model", "chosen-model"]);
         }
         let mut request =
-            super::proposal("/new project project opencode", root.path(), root.path(), 0).unwrap();
+            super::proposal("/new project project opencode", &root, &root, 0).unwrap();
         request.native_session = Some("ses_chosen".into());
         assert_eq!(request.agent_args(), vec!["--session", "ses_chosen"]);
     }
