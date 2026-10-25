@@ -61,6 +61,12 @@ New phone text does not join a worker-scheduled task queue. Messages are deliver
 
 Handoff is automatic. Manual controls remain available through **herdr**'s **White Noise forwarding: At desk / Away** action. [Controls and limits →](docs/REFERENCE.md#at-desk--away-forwarding)
 
+### Control chat
+
+Session chats exist only while their herdr session does. Set `control_chat = true` in the bridge config and restart the worker to add one owner-only chat called `codr control`. The bridge invites your phone on the next start and keeps the chat when sessions are renamed or end.
+
+Send `/new` there to start a project, or use `/help`, `/status`, `/recent`, `/queue`, `/sync`, and `/unmute`. `/agent`, `/model`, and `/cancel` need a session chat. Plain text gets a short hint instead of reaching an agent. This is also where `/new` works on a fresh install before any session chat exists. [Control chat reference →](docs/REFERENCE.md#control-chat)
+
 ## How it works
 
 White Noise ↔ MDK ↔ **codr** ↔ **herdr** ↔ your agent
