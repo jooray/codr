@@ -601,7 +601,7 @@ impl Bridge {
                 }
                 self.state.enqueue_manual(
                     group,
-                    "codr control chat. Send /new to start a project, /help for commands.",
+                    "codr control chat. Send /new (or just new) to start a project, /help for commands.",
                     &format!("control-welcome:{group}"),
                 );
                 let _ = self.save();
@@ -1476,7 +1476,7 @@ impl Bridge {
             status
         } else {
             format!(
-                "# codr commands\n\n### General\n\n**`/help`**  \nShow commands\n\n**`/status`**  \nConnection, state, queue and unmute\n\n**`/recent`**  \nGet newest 3 of all active <1h\n\n### Projects & Agents\n\n**`/new`**  \nSet up a project\n\n**`/agent`**  \nChoose agent (separate chat)\n\n**`/model`**  \nChoose model\n\n### Tasks\n\n**`/queue`**  \nView pending deliveries\n\n**`/cancel`**  \nInterrupt the current task\n\n### Sync\n\n**`/unmute`**  \nUnmute all chats and return to automatic sync\n\n**`/sync auto|on|off`**  \nSet persistent sync mode\nCurrent sync mode: {}",
+                "# codr commands\n\n### General\n\n**`/help`**  \nShow commands\n\n**`/status`**  \nConnection, state, queue and unmute\n\n**`/recent`**  \nGet newest 3 of all active <1h\n\n### Projects & Agents\n\n**`/new`**  \nSet up a project\n\n**`/agent`**  \nChoose agent (separate chat)\n\n**`/model`**  \nChoose model\n\n### Tasks\n\n**`/queue`**  \nView pending deliveries\n\n**`/cancel`**  \nInterrupt the current task\n\n### Sync\n\n**`/unmute`**  \nUnmute all chats and return to automatic sync\n\n**`/sync auto|on|off`**  \nSet persistent sync mode\nCurrent sync mode: {}\n\nCommands accept unambiguous prefixes (/n, /st, /sy). In the control chat the leading / is optional.",
                 forwarding::load(&self.config.state_path)?.mode.label()
             )
         };
@@ -1523,7 +1523,7 @@ impl Bridge {
         } else if trimmed.is_empty() {
             "Send /new to start a project, /help for commands.".into()
         } else {
-            "This is the codr control chat, not a session. Use /new to start a project, /help for commands. To prompt an agent, open its chat.".into()
+            "This is the codr control chat, not a session. Use /new (or just new) to start a project, /help for commands. To prompt an agent, open its chat.".into()
         };
         crate::launch::reply(self, key, group, id, &response)
     }
@@ -1707,7 +1707,32 @@ impl Bridge {
             }
             return Ok(());
         }
-        let text = msg["text"].as_str().unwrap_or("");
+        let raw_text = msg["text"].as_str().unwrap_or("");
+        let control = self.state.mappings[&key].control;
+        let menu_open = self.state.mappings[&key].launch_draft.is_some()
+            || self.state.mappings[&key]
+                .launch
+                .as_ref()
+                .is_some_and(|request| request.phase == crate::launch::Phase::Awaiting);
+        let normalized = crate::commands::normalize(raw_text, control, menu_open);
+        let text = match &normalized {
+            crate::commands::Normalized::Text(value) => value.as_str(),
+            crate::commands::Normalized::Ambiguous(options) if control => {
+                let options = options
+                    .iter()
+                    .map(|command| format!("/{command}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return crate::launch::reply(
+                    self,
+                    &key,
+                    group,
+                    id,
+                    &format!("Ambiguous command. Did you mean {options}? Add another letter."),
+                );
+            }
+            _ => raw_text,
+        };
         let plain_command = !prepared
             && msg["text_truncated"] != true
             && msg["attachments_truncated"] != true
@@ -1764,7 +1789,7 @@ impl Bridge {
                 group,
                 id,
                 &format!(
-                    "Current sync mode: {}.\n/sync auto — Automatic\n/sync on — Always on\n/sync off — Always off\n/unmute — Clear override and resume automatic sync",
+                    "Current sync mode: {}\n\nCommands accept unambiguous prefixes (/n, /st, /sy). In the control chat the leading / is optional..\n/sync auto — Automatic\n/sync on — Always on\n/sync off — Always off\n/unmute — Clear override and resume automatic sync",
                     control.mode.label()
                 ),
             );
