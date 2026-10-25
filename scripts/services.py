@@ -249,7 +249,17 @@ class LaunchdServices:
 
     def ensure_loaded(self, name):
         if not self.loaded(name):
+            self.bootstrap(name)
+
+    def bootstrap(self, name):
+        try:
             self.runner(["launchctl", "bootstrap", self.domain(), str(self.path(name))])
+        except Exception:
+            # Right after a bootout launchd can refuse the job with
+            # "Bootstrap failed: 5: Input/output error"; a later attempt loads it.
+            time.sleep(2)
+            if not self.loaded(name):
+                self.runner(["launchctl", "bootstrap", self.domain(), str(self.path(name))])
 
     def start(self, names):
         for name in _names(names):
@@ -258,7 +268,7 @@ class LaunchdServices:
             if self.loaded(name):
                 self.runner(["launchctl", "kickstart", f"{self.domain()}/{_label(name)}"])
             else:
-                self.runner(["launchctl", "bootstrap", self.domain(), str(self.path(name))])
+                self.bootstrap(name)
 
     def restart(self, name):
         self.ensure_loaded(name)
@@ -266,15 +276,20 @@ class LaunchdServices:
 
     def is_active(self, names):
         pending = {_label(name) for name in _names(names)}
-        deadline = time.monotonic() + 15
+        started = time.monotonic()
         while pending:
+            spawning = False
             for label in list(pending):
                 output = _capture(["launchctl", "print", f"{self.domain()}/{label}"])
                 if output and re.search(r"(?m)^\s*state = running\s*$", output):
                     pending.remove(label)
+                elif output and re.search(r"(?m)^\s*state = xpcproxy\s*$", output):
+                    spawning = True
             if not pending:
                 return
-            if time.monotonic() >= deadline:
+            # The first launch of a new executable can wait in xpcproxy for
+            # about half a minute while macOS registers the background item.
+            if time.monotonic() >= started + (90 if spawning else 15):
                 raise self.error(f"Service did not stay running: {', '.join(sorted(pending))}")
             time.sleep(0.25)
 

@@ -47,6 +47,48 @@ class LaunchdTests(unittest.TestCase):
             with self.assertRaises(services.ServiceError):
                 manager.install(services.Service("codr-phonon", "speech", ["/bin/echo", "changed"]))
 
+    def test_a_refused_bootstrap_after_bootout_is_retried_once(self):
+        calls = []
+        def runner(argv):
+            calls.append(argv)
+            if len(calls) == 1:
+                raise services.ServiceError("launchctl failed (exit 5)")
+            return ""
+        manager = services.LaunchdServices(runner, lambda path, text: None, "/unused")
+        with patch.object(manager, "domain", return_value="gui/123"), patch.object(manager, "loaded", return_value=False), patch.object(services.time, "sleep"):
+            manager.start("wn-agent-herdr")
+        self.assertEqual([argv[:2] for argv in calls], [["launchctl", "bootstrap"]] * 2)
+
+    def test_a_bootstrap_that_loaded_the_job_anyway_is_not_repeated(self):
+        calls = []
+        def runner(argv):
+            calls.append(argv)
+            raise services.ServiceError("launchctl failed (exit 5)")
+        manager = services.LaunchdServices(runner, lambda path, text: None, "/unused")
+        with patch.object(manager, "domain", return_value="gui/123"), patch.object(manager, "loaded", side_effect=[False, True]), patch.object(services.time, "sleep"):
+            manager.start("wn-agent-herdr")
+        self.assertEqual(len(calls), 1)
+
+    def test_activation_waits_for_a_slow_first_spawn(self):
+        clock = [0.0]
+        states = iter(["xpcproxy"] * 120 + ["running"])
+        def sleep(seconds):
+            clock[0] += seconds
+        manager = self.manager()
+        with patch.object(manager, "domain", return_value="gui/123"), patch.object(services, "_capture", side_effect=lambda argv: f"\tstate = {next(states)}\n"), patch.object(services.time, "monotonic", side_effect=lambda: clock[0]), patch.object(services.time, "sleep", side_effect=sleep):
+            manager.is_active("wn-agent-herdr")
+        self.assertGreater(clock[0], 15)
+
+    def test_activation_still_fails_a_job_that_is_not_spawning(self):
+        clock = [0.0]
+        def sleep(seconds):
+            clock[0] += seconds
+        manager = self.manager()
+        with patch.object(manager, "domain", return_value="gui/123"), patch.object(services, "_capture", return_value="\tstate = spawn scheduled\n"), patch.object(services.time, "monotonic", side_effect=lambda: clock[0]), patch.object(services.time, "sleep", side_effect=sleep):
+            with self.assertRaises(services.ServiceError):
+                manager.is_active("wn-agent-herdr")
+        self.assertLess(clock[0], 16)
+
     def test_plugin_start_uses_the_same_label(self):
         text = (SCRIPTS.parent / "plugin-start.sh").read_text()
         self.assertIn(services.LABEL_PREFIX + ".herdr-white-noise-bridge", text)
