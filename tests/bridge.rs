@@ -8294,6 +8294,15 @@ async fn forwarding_reset_does_not_reannounce_an_unchanged_blocked_context() {
             let mut blocked = agent();
             blocked.agent_status = "blocked".into();
             blocked.state_change_seq = 2;
+            let observed = Arc::new(Mutex::new(blocked.clone()));
+            let calls = Arc::new(Mutex::new(vec![]));
+            let herdr = decision_herdr(
+                &config.herdr_socket,
+                observed.clone(),
+                Arc::new(Mutex::new("Input required".into())),
+                calls.clone(),
+            )
+            .await;
             bridge.state.mappings.insert(
                 blocked.key(),
                 Mapping {
@@ -8311,7 +8320,7 @@ async fn forwarding_reset_does_not_reannounce_an_unchanged_blocked_context() {
                     .state
                     .outbox
                     .iter()
-                    .any(|item| item.text.contains("Agent needs input in the terminal"))
+                    .any(|item| item.text.contains("Agent needs input"))
             };
             for _ in 0..1000 {
                 let _ = bridge.poll_sessions(vec![blocked.clone()]).await;
@@ -8334,7 +8343,18 @@ async fn forwarding_reset_does_not_reannounce_an_unchanged_blocked_context() {
             }
 
             herdr_white_noise_bridge::forwarding::set(&config.state_path, false).unwrap();
-            let _ = bridge.poll_sessions(vec![blocked.clone()]).await;
+            for _ in 0..20 {
+                let _ = bridge.poll_sessions(vec![blocked.clone()]).await;
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert!(
+                calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|call| call["method"] != "agent.read"),
+                "muted blocks must not consume an announcement"
+            );
             herdr_white_noise_bridge::forwarding::set(&config.state_path, true).unwrap();
             for _ in 0..20 {
                 let _ = bridge.poll_sessions(vec![blocked.clone()]).await;
@@ -8347,6 +8367,7 @@ async fn forwarding_reset_does_not_reannounce_an_unchanged_blocked_context() {
 
             bridge.state.outbox.clear();
             blocked.state_change_seq = 3;
+            *observed.lock().unwrap() = blocked.clone();
             for _ in 0..1000 {
                 let _ = bridge.poll_sessions(vec![blocked.clone()]).await;
                 if announced(&bridge) {
@@ -8355,6 +8376,7 @@ async fn forwarding_reset_does_not_reannounce_an_unchanged_blocked_context() {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
             assert!(announced(&bridge), "a new blocked context is announced");
+            herdr.abort();
         }
     }
 }

@@ -1136,7 +1136,8 @@ impl Bridge {
                     .unwrap()
                     .blocked_context_seq = Some(agent.state_change_seq);
             }
-        } else if agent.agent_status == "blocked"
+        } else if self.state.forwarding_enabled
+            && agent.agent_status == "blocked"
             && self.state.mappings[key].blocked_context_seq != Some(agent.state_change_seq)
         {
             let response = self
