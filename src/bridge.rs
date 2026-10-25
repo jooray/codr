@@ -1709,11 +1709,16 @@ impl Bridge {
         }
         let raw_text = msg["text"].as_str().unwrap_or("");
         let control = self.state.mappings[&key].control;
-        let menu_open = self.state.mappings[&key].launch_draft.is_some()
+        let menu_open = self.state.mappings[&key]
+            .launch_draft
+            .as_ref()
+            .is_some_and(|draft| now() < draft.expires_at)
             || self.state.mappings[&key]
                 .launch
                 .as_ref()
-                .is_some_and(|request| request.phase == crate::launch::Phase::Awaiting);
+                .is_some_and(|request| {
+                    request.phase == crate::launch::Phase::Awaiting && now() < request.expires_at
+                });
         let normalized = crate::commands::normalize(raw_text, control, menu_open);
         let text = match &normalized {
             crate::commands::Normalized::Text(value) => value.as_str(),
@@ -1789,7 +1794,7 @@ impl Bridge {
                 group,
                 id,
                 &format!(
-                    "Current sync mode: {}\n\nCommands accept unambiguous prefixes (/n, /st, /sy). In the control chat the leading / is optional..\n/sync auto — Automatic\n/sync on — Always on\n/sync off — Always off\n/unmute — Clear override and resume automatic sync",
+                    "Current sync mode: {}.\n/sync auto — Automatic\n/sync on — Always on\n/sync off — Always off\n/unmute — Clear override and resume automatic sync",
                     control.mode.label()
                 ),
             );
@@ -1877,6 +1882,15 @@ impl Bridge {
                     group,
                     id,
                     "The control chat accepts complete standalone text commands only.",
+                );
+            }
+            if menu_open {
+                return crate::launch::reply(
+                    self,
+                    &key,
+                    group,
+                    id,
+                    "A setup menu is open. Reply with a listed number, 0 to cancel, or /new to restart.",
                 );
             }
             return self.control_message(&key, group, id, text).await;
