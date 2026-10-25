@@ -34,6 +34,7 @@
 
 ### Fixed
 
+- Clear expired project menus after one expiry notice so later phone messages return to normal agent routing. Preserve uncertain actions and retry safely after a failed state save.
 - Keep control replies after owner inputs across whole-second timestamp ties and small clock differences. Persist the per-chat send deadline across restarts. Do not delay native agent input or replies in other chats.
 - Keep stable executable paths across Homebrew upgrades and report missing OpenCode executables without exposing transcript data.
 - Preserve optional OpenCode support for Claude-only and Codex-only installations, including repeat setup and check mode. Bare commands retain PATH lookup.

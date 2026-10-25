@@ -694,6 +694,15 @@ async fn single_page_model_menus_have_no_page_counter_and_zero_cannot_clear_unce
         .as_mut()
         .unwrap()
         .step = herdr_white_noise_bridge::launch_flow::Step::Uncertain;
+    bridge
+        .state
+        .mappings
+        .get_mut(&key)
+        .unwrap()
+        .launch_draft
+        .as_mut()
+        .unwrap()
+        .expires_at = 0;
     let before = bridge.state.mappings[&key].launch_draft.clone();
     bridge.inbound(&event("cancel", "0")).await.unwrap();
     assert_eq!(bridge.state.mappings[&key].launch_draft, before);
@@ -840,6 +849,92 @@ async fn code_free_menu_choices_survive_restart_and_require_explicit_confirmatio
 }
 
 #[tokio::test]
+async fn expired_folder_menu_is_cleared_before_later_messages_and_after_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let (mut bridge, key) = bridge(&config, None);
+    bridge.inbound(&event("open", "/new")).await.unwrap();
+    bridge.inbound(&event("workspace", "new")).await.unwrap();
+    assert_eq!(
+        bridge.state.mappings[&key]
+            .launch_draft
+            .as_ref()
+            .unwrap()
+            .step,
+        herdr_white_noise_bridge::launch_flow::Step::Folder
+    );
+    bridge
+        .state
+        .mappings
+        .get_mut(&key)
+        .unwrap()
+        .launch_draft
+        .as_mut()
+        .unwrap()
+        .expires_at = 0;
+    bridge.save().unwrap();
+    bridge
+        .inbound(&event("expired-folder", "Unmute"))
+        .await
+        .unwrap();
+    assert!(last(&bridge).contains("expired"));
+    assert!(bridge.state.mappings[&key].launch_draft.is_none());
+    assert!(
+        bridge.state.mappings[&key]
+            .seen_messages
+            .iter()
+            .any(|id| id == "expired-folder")
+    );
+    let count = bridge.state.outbox.len();
+    bridge
+        .inbound(&event("expired-folder", "Unmute"))
+        .await
+        .unwrap();
+    assert_eq!(bridge.state.outbox.len(), count);
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    assert!(bridge.state.mappings[&key].launch_draft.is_none());
+    // No live agent is attached: normal text must take the normal defer path,
+    // not produce another expired-menu reply or be mistaken for a folder.
+    assert!(
+        bridge
+            .inbound(&event("ordinary", "Are you just sending this every time?"))
+            .await
+            .is_err()
+    );
+    assert_eq!(bridge.state.outbox.len(), count);
+    assert!(!config.launch_root.join("Unmute").exists());
+    assert!(bridge.state.mappings[&key].prompt_queue.is_empty());
+}
+
+#[tokio::test]
+async fn expired_menu_save_failure_keeps_the_draft_and_input_unconsumed() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let (mut bridge, key) = bridge(&config, None);
+    bridge.inbound(&event("open", "/new")).await.unwrap();
+    bridge
+        .state
+        .mappings
+        .get_mut(&key)
+        .unwrap()
+        .launch_draft
+        .as_mut()
+        .unwrap()
+        .expires_at = 0;
+    let before = serde_json::to_value(&bridge.state).unwrap();
+    // Force the atomic state replacement to fail without changing forwarding state.
+    std::fs::remove_file(&config.state_path).unwrap();
+    std::fs::create_dir(&config.state_path).unwrap();
+    assert!(
+        bridge
+            .inbound(&event("expired-save-fails", "1"))
+            .await
+            .is_err()
+    );
+    assert_eq!(serde_json::to_value(&bridge.state).unwrap(), before);
+}
+
+#[tokio::test]
 async fn expired_invalid_and_unsafe_numbers_do_not_escape_the_menu() {
     let root = tempfile::tempdir().unwrap();
     let config = config(root.path());
@@ -879,6 +974,7 @@ async fn expired_invalid_and_unsafe_numbers_do_not_escape_the_menu() {
         .expires_at = 0;
     bridge.inbound(&event("expired", "1")).await.unwrap();
     assert!(last(&bridge).contains("expired"));
+    assert!(bridge.state.mappings[&key].launch_draft.is_none());
     assert!(bridge.state.mappings[&key].prompt_queue.is_empty());
     assert!(
         calls

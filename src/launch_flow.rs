@@ -417,13 +417,18 @@ pub async fn handle(
     let text = expand_reply(bridge, key, text);
     match route(bridge, key, group, id, &text).await {
         Ok(()) => Ok(()),
-        Err(error) => launch::reply(
-            bridge,
-            key,
-            group,
-            id,
-            &format!("Project configuration stopped: {error}. No automatic retry will run."),
-        ),
+        Err(error) => {
+            let draft = bridge.state.mappings[key].launch_draft.clone();
+            persist(
+                bridge,
+                key,
+                group,
+                id,
+                draft,
+                &format!("Project configuration stopped: {error}. No automatic retry will run."),
+                false,
+            )
+        }
     }
 }
 
@@ -528,10 +533,17 @@ async fn route(bridge: &mut Bridge, key: &str, group: &str, id: &str, text: &str
     }
     let mut draft = draft
         .ok_or_else(|| anyhow::anyhow!("No matching menu. Start with /new, /agent, or /model"))?;
-    ensure!(
-        now() < draft.expires_at,
-        "This menu expired. Start again with /new, /agent, or /model"
-    );
+    if now() >= draft.expires_at {
+        return persist(
+            bridge,
+            key,
+            group,
+            id,
+            None,
+            "Project configuration stopped: This menu expired. Start again with /new, /agent, or /model. No automatic retry will run.",
+            true,
+        );
+    }
     if command == "/new" && args.len() == 4 && args[1].eq_ignore_ascii_case("workspace") {
         ensure!(
             draft.step == Step::Workspace && args[2] == draft.code,
