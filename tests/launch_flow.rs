@@ -2315,7 +2315,9 @@ async fn confirm_words_start_without_typing_the_workspace_name() {
         );
         server.abort();
     }
+}
 
+#[tokio::test]
 async fn a_busy_fresh_pane_is_retried_until_its_shell_is_ready() {
     let root = tempfile::tempdir().unwrap();
     let config = config(root.path());
