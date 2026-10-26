@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- On macOS, retry a connector or worker bootstrap once when launchd refuses it right after a bootout (`Bootstrap failed: 5: Input/output error`), and wait up to 90 s for a job that launchd is still spawning (`state = xpcproxy`, seen on the first launch of a new executable). Setup's connector upgrade no longer rolls back a working upgrade because of either. A job that is not spawning still fails after 15 s.
+
 ## [0.8.0] - 2026-10-25
 
 Phone-driven worker updates, immediate prepared-media delivery, and more reliable
