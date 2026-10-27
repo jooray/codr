@@ -130,7 +130,7 @@ impl Reads {
                 .map_err(|_| anyhow::anyhow!("Session reader failed"))?;
             if job.context == context {
                 let snapshot = Arc::new(result.inspect_err(|error| {
-                    eprintln!(
+                    eprintln_throttled!(
                         "Session history read failed: {}.",
                         output::read_error_message(error)
                     );

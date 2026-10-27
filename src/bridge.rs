@@ -607,7 +607,7 @@ impl Bridge {
         if capabilities["type"] != "group_create_capabilities"
             || capabilities["initial_admins"] != true
         {
-            eprintln!("Control chat needs the current connector; no group was created.");
+            eprintln_throttled!("Control chat needs the current connector; no group was created.");
             return;
         }
         {
@@ -636,7 +636,7 @@ impl Bridge {
                     .as_str()
                     .filter(|group| !group.is_empty())
                 else {
-                    eprintln!("Control chat creation needs inspection.");
+                    eprintln_throttled!("Control chat creation needs inspection.");
                     return;
                 };
                 {
@@ -651,14 +651,14 @@ impl Bridge {
                 );
                 let _ = self.save();
             }
-            Ok(_) => eprintln!("Control chat creation needs inspection."),
+            Ok(_) => eprintln_throttled!("Control chat creation needs inspection."),
             Err(error) => {
                 if error.downcast_ref::<crate::wire::NotSubmitted>().is_some() {
                     let mapping = self.state.mappings.get_mut(CONTROL_KEY).unwrap();
                     mapping.creating = false;
                     let _ = self.save();
                 } else {
-                    eprintln!(
+                    eprintln_throttled!(
                         "Control chat creation needs inspection. Use status and resolve-create."
                     );
                 }
@@ -775,7 +775,7 @@ impl Bridge {
             let agent = self.agents[&key].clone();
             if let Err(error) = self.reconcile_agent(&key, &agent).await {
                 if error.downcast_ref::<crate::reads::Pending>().is_none() {
-                    eprintln!("A session could not reconcile; other sessions remain available.");
+                    eprintln_throttled!("A session could not reconcile; other sessions remain available.");
                 }
             } else {
                 let mapping = &self.state.mappings[&key];
@@ -810,7 +810,7 @@ impl Bridge {
                 if let Some(agent) = self.state.mappings[&key].agent_record.clone()
                     && self.collect_finals(&key, &agent, &group).await.is_err()
                 {
-                    eprintln!("Final reply for an ended session remains pending.");
+                    eprintln_throttled!("Final reply for an ended session remains pending.");
                     continue;
                 }
                 self.reads.finish(&key);
@@ -1100,7 +1100,7 @@ impl Bridge {
                     Err(error) => {
                         if error.downcast_ref::<crate::wire::NotSubmitted>().is_some() {
                             self.state.mappings.get_mut(key).unwrap().creating = false; self.save()?;
-                        } else { eprintln!("Group creation needs inspection. Use status and resolve-create before retrying."); }
+                        } else { eprintln_throttled!("Group creation needs inspection. Use status and resolve-create before retrying."); }
                         return Ok(());
                     }
                 }
@@ -1179,7 +1179,7 @@ impl Bridge {
                     self.state.mappings.get_mut(key).unwrap().task_revision = Some(tasks.revision);
                 }
                 Ok(_) => {}
-                Err(_) => eprintln!("Task list unavailable; response delivery remains active."),
+                Err(_) => eprintln_throttled!("Task list unavailable; response delivery remains active."),
             }
         }
         let opencode = agent
@@ -1328,7 +1328,7 @@ impl Bridge {
                 return Err(error);
             }
             self.refresh_forwarding()?;
-            eprintln!("Local native user input muted White Noise forwarding for all groups.");
+            eprintln_throttled!("Local native user input muted White Noise forwarding for all groups.");
         }
         self.save()
     }
@@ -1458,7 +1458,7 @@ impl Bridge {
                 Box::pin(self.route_inbound(&event, prompt.media.is_some(), true)).await
                 && !error.is::<crate::reads::Pending>()
             {
-                eprintln!("A queued prompt remains paused; other chats can continue.");
+                eprintln_throttled!("A queued prompt remains paused; other chats can continue.");
             }
             self.reads.finish(&key);
         }
@@ -3151,7 +3151,7 @@ impl Bridge {
             Ok(info) => info,
             Err(error) => {
                 if error.downcast_ref::<crate::wire::NotSubmitted>().is_none() {
-                    eprintln!("Group profile check failed; keeping the current title.");
+                    eprintln_throttled!("Group profile check failed; keeping the current title.");
                 }
                 return;
             }
@@ -3161,7 +3161,7 @@ impl Bridge {
             let mapping = self.state.mappings.get_mut(key).unwrap();
             mapping.group_name_locked = true;
             let _ = self.save();
-            eprintln!("Group title was changed outside codr; leaving it unchanged.");
+            eprintln_throttled!("Group title was changed outside codr; leaving it unchanged.");
             return;
         }
         let current_description = info["description"].as_str().or(last_description.as_deref());
@@ -3174,7 +3174,7 @@ impl Bridge {
         }
         self.state.mappings.get_mut(key).unwrap().rename_uncertain = true;
         if self.save().is_err() {
-            eprintln!("Group rename intent could not be saved; no update was submitted.");
+            eprintln_throttled!("Group rename intent could not be saved; no update was submitted.");
             return;
         }
         let update = self
@@ -3209,11 +3209,11 @@ impl Bridge {
                     mapping.group_description = Some(desired_description);
                     mapping.rename_uncertain = false;
                     let _ = self.save();
-                    eprintln!("Renamed group: {desired_name}");
+                    eprintln_throttled!("Renamed group: {desired_name}");
                 } else {
                     mapping.rename_uncertain = true;
                     let _ = self.save();
-                    eprintln!(
+                    eprintln_throttled!(
                         "Group profile update was not confirmed; automatic renames stopped until rename-groups runs."
                     );
                 }
@@ -3229,7 +3229,7 @@ impl Bridge {
                 let mapping = self.state.mappings.get_mut(key).unwrap();
                 mapping.rename_uncertain = true;
                 let _ = self.save();
-                eprintln!(
+                eprintln_throttled!(
                     "Group profile update is uncertain; automatic renames stopped until rename-groups runs."
                 );
             }
@@ -3282,7 +3282,7 @@ impl Bridge {
             tokio::select! {
                 Ok(stream) = crate::porter::accept(&porter_listener) => {
                     if crate::porter::serve(self, stream).await.is_err() {
-                        eprintln!("Porter request failed; no automatic mutation retry.");
+                        eprintln_throttled!("Porter request failed; no automatic mutation retry.");
                     }
                 },
                 _ = tokio::signal::ctrl_c() => {
@@ -3292,20 +3292,20 @@ impl Bridge {
                 },
                 _ = tick.tick() => {
                     match herdr::snapshot(&self.herdr).await {
-                        Ok(agents) => if self.reconcile(agents).await.is_err() { eprintln!("Session reconciliation failed; will retry."); },
-                        Err(_) => { self.herdr_available = false; recovery_due = true; eprintln!("herdr is unavailable; waiting for reconnection."); }
+                        Ok(agents) => if self.reconcile(agents).await.is_err() { eprintln_throttled!("Session reconciliation failed; will retry."); },
+                        Err(_) => { self.herdr_available = false; recovery_due = true; eprintln_throttled!("herdr is unavailable; waiting for reconnection."); }
                     }
                 },
                 _ = reads_ready.notified() => {
                     if self.herdr_available && self.poll_ready_sessions().await.is_err() {
-                        eprintln!("Session reads remain pending.");
+                        eprintln_throttled!("Session reads remain pending.");
                     }
                 },
                 Some(event) = rx.recv() => {
                     if event["type"] == "reconcile_inbound" || event["type"] == "resync_required" {
                         // Refresh current agent identities before recovering any queued phone prompts.
                         recovery_due = true;
-                    } else if self.inbound(&event).await.is_err() { recovery_due = true; eprintln!("Inbound message deferred; will reconcile history."); }
+                    } else if self.inbound(&event).await.is_err() { recovery_due = true; eprintln_throttled!("Inbound message deferred; will reconcile history."); }
                 },
                 _ = recovery_tick.tick() => { recovery_due = true; }
             }
@@ -3313,14 +3313,14 @@ impl Bridge {
                 recovery_due = self.recover_inbound().await.is_err();
             }
             if crate::update::poll(self).await.is_err() {
-                eprintln!("Update result remains pending; no automatic installation retry.");
+                eprintln_throttled!("Update result remains pending; no automatic installation retry.");
             }
             if self.process_media().await.is_err() {
                 recovery_due = true;
-                eprintln!("Prepared media input deferred; will reconcile history.");
+                eprintln_throttled!("Prepared media input deferred; will reconcile history.");
             }
             if self.flush().await.is_err() {
-                eprintln!("MDK send unavailable; private outbox retained for retry.");
+                eprintln_throttled!("MDK send unavailable; private outbox retained for retry.");
             }
             crate::porter::publish(self);
         }

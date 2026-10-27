@@ -1,3 +1,8 @@
+pub mod logging;
+/// Like `eprintln!`, for lines that recur on every poll: each distinct line prints once per ten minutes.
+macro_rules! eprintln_throttled {
+    ($($arg:tt)*) => { $crate::logging::throttled(format!($($arg)*)) };
+}
 pub mod activity;
 pub mod bridge;
 pub mod catalogue;
