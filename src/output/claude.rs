@@ -99,7 +99,13 @@ pub(super) fn snapshot(
     let session = native::session_id(session)?;
     let name = format!("{session}.jsonl");
     // Only project roots, never nested session/subagent directories. This also handles custom project keys.
-    let path = native::find(&[(home.join("projects"), 1)], |candidate| candidate == name)?;
+    // Claude writes its transcript at the first prompt, so a new session has an empty history.
+    let path = match native::find(&[(home.join("projects"), 1)], |candidate| candidate == name) {
+        Err(error) if error.downcast_ref::<native::NotWritten>().is_some() => {
+            return Ok((super::SessionHistory::default(), None));
+        }
+        found => found?,
+    };
     let mut transcript = TRANSCRIPTS
         .lock()
         .unwrap()

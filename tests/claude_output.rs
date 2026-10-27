@@ -317,3 +317,12 @@ fn a_rewritten_transcript_is_parsed_again() {
     let replies = claude::read(home.path(), SESSION).unwrap();
     assert_eq!(replies[0].text, "New");
 }
+
+#[test]
+fn a_session_that_has_not_written_its_transcript_yet_reads_as_empty() {
+    let home = tempfile::tempdir().unwrap();
+    assert!(claude::read(home.path(), SESSION).unwrap().is_empty());
+    fs::create_dir_all(home.path().join("projects/project")).unwrap();
+    assert!(claude::read(home.path(), SESSION).unwrap().is_empty());
+    assert!(claude::read(home.path(), "../../credentials").is_err());
+}
