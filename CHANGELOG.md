@@ -1,9 +1,10 @@
 # Changelog
 
-## Unreleased
+## [0.8.1] - 2026-10-27
 
 ### Fixed
 
+- Repeat an OpenCode CLI session export that ends before its JSON document is complete, up to three times per API shape, and report a distinct read error when it stays incomplete. A short write no longer discards a readable session's history or leaves its checkpoint pending.
 - On macOS, retry a connector or worker bootstrap once when launchd refuses it right after a bootout (`Bootstrap failed: 5: Input/output error`), and wait up to 90 s for a job that launchd is still spawning (`state = xpcproxy`, seen on the first launch of a new executable). Setup's connector upgrade no longer rolls back a working upgrade because of either. A job that is not spawning still fails after 15 s.
 
 ## [0.8.0] - 2026-10-25

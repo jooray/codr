@@ -313,6 +313,11 @@ pub async fn export(bin: &Path, session: &str) -> Result<Vec<FinalMessage>> {
 const EXPORT_UNKNOWN: u8 = 0;
 const EXPORT_V1: u8 = 1;
 const EXPORT_V2: u8 = 2;
+/// A CLI export occasionally ends before the JSON document does, for example when the
+/// process exits under I/O pressure and leaves a short write behind. Repeating the read
+/// is cheap next to losing a session's history to one incomplete attempt.
+const EXPORT_ATTEMPTS: usize = 3;
+const EXPORT_RETRY_DELAY: Duration = Duration::from_millis(200);
 
 /// The first successful command selects the API for later reads. OpenCode 2.x removed
 /// the v1 `--pure export` command, so one failed attempt is expected after an upgrade.
@@ -321,6 +326,22 @@ static EXPORT_API: AtomicU8 = AtomicU8::new(EXPORT_UNKNOWN);
 #[derive(Debug, thiserror::Error)]
 #[error("Configured OpenCode executable is missing; rerun setup")]
 struct MissingExecutable;
+
+/// The CLI stopped writing before the JSON document ended. Only this class of failure is
+/// repeated; a refusal, a timeout, or an oversized read stays final.
+#[derive(Debug, thiserror::Error)]
+#[error("OpenCode export ended before its document was complete: {0}")]
+struct IncompleteExport(serde_json::Error);
+
+/// Both API attempts failed. `incomplete` keeps the bounded diagnostic for read errors so
+/// an export that never completed is distinguishable from a refused or missing command.
+#[derive(Debug, thiserror::Error)]
+#[error("OpenCode export failed (v1: {v1}; v2: {v2})")]
+struct ExportFailed {
+    v1: String,
+    v2: String,
+    incomplete: bool,
+}
 
 async fn export_data(bin: &Path, session: &str) -> Result<Export> {
     Ok(export_with_api(bin, session).await?.0)
@@ -336,20 +357,27 @@ async fn export_with_api(bin: &Path, session: &str) -> Result<(Export, u8)> {
         [EXPORT_V1, EXPORT_V2]
     };
     let mut failures = [String::new(), String::new()];
+    let mut incomplete = false;
     for api in attempts {
-        match run_export(bin, session, api).await {
-            Ok(export) => {
-                EXPORT_API.store(api, Ordering::Relaxed);
-                return Ok((export, api));
+        for attempt in 1..=EXPORT_ATTEMPTS {
+            match run_export(bin, session, api).await {
+                Ok(export) => {
+                    EXPORT_API.store(api, Ordering::Relaxed);
+                    return Ok((export, api));
+                }
+                Err(error) => {
+                    incomplete = error.downcast_ref::<IncompleteExport>().is_some();
+                    failures[usize::from(api - EXPORT_V1)] = format!("{error:#}");
+                    if !incomplete || attempt == EXPORT_ATTEMPTS {
+                        break;
+                    }
+                }
             }
-            Err(error) => failures[usize::from(api - EXPORT_V1)] = format!("{error:#}"),
+            tokio::time::sleep(EXPORT_RETRY_DELAY).await;
         }
     }
-    anyhow::bail!(
-        "OpenCode export failed (v1: {}; v2: {})",
-        failures[0],
-        failures[1]
-    )
+    let [v1, v2] = failures;
+    Err(ExportFailed { v1, v2, incomplete }.into())
 }
 
 async fn run_export(bin: &Path, session: &str, api: u8) -> Result<Export> {
@@ -359,18 +387,19 @@ async fn run_export(bin: &Path, session: &str, api: u8) -> Result<Export> {
         &["--pure", "export", session]
     };
     let output = run_command(bin, args, 128 * 1024 * 1024).await?;
-    match api {
-        EXPORT_V2 => tokio::task::spawn_blocking(move || {
-            Ok(from_v2(serde_json::from_reader(BufReader::new(output))?))
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("OpenCode export reader failed"))?,
-        _ => tokio::task::spawn_blocking(move || {
-            Ok(serde_json::from_reader(BufReader::new(output))?)
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("OpenCode export reader failed"))?,
-    }
+    tokio::task::spawn_blocking(move || {
+        let export = if api == EXPORT_V2 {
+            serde_json::from_reader::<_, ExportV2>(BufReader::new(output))
+                .map(from_v2)
+                .map_err(IncompleteExport)?
+        } else {
+            serde_json::from_reader::<_, Export>(BufReader::new(output))
+                .map_err(IncompleteExport)?
+        };
+        Ok(export)
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("OpenCode export reader failed"))?
 }
 
 pub(crate) async fn run_command(
@@ -538,6 +567,13 @@ pub struct SessionSnapshot {
 pub fn read_error_message(error: &anyhow::Error) -> &'static str {
     if error.downcast_ref::<MissingExecutable>().is_some() {
         return "configured OpenCode executable is missing; rerun setup";
+    }
+    if error.downcast_ref::<IncompleteExport>().is_some()
+        || error
+            .downcast_ref::<ExportFailed>()
+            .is_some_and(|failure| failure.incomplete)
+    {
+        return "OpenCode export stayed incomplete after retries";
     }
     if let Some(rusqlite::Error::SqliteFailure(code, _)) = error.downcast_ref::<rusqlite::Error>() {
         return match code.code {
