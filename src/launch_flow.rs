@@ -166,17 +166,17 @@ impl Draft {
                 if self.page>0 {text.push_str("\nPrevious page: previous");}
                 text
             }
-            Step::Folder=>format!("{}\nReply with your chosen folder name, or ls to list existing folders.\n\n**0. Cancel**\nNothing will be created yet.",self.heading(2,"Folder name:")),
+            Step::Folder=>format!("{}\nReply with your chosen folder name, or ls to list existing folders (ls and part of a name filters them).\n\n**0. Cancel**\nNothing will be created yet.",self.heading(2,"Folder name:")),
             Step::FolderList=>{
                 let mut text=self.heading(2,"Choose a folder:");
                 if self.folder_choices.is_empty() {
                     text.push_str("\nNo folders found under the launch root. Type a folder name.");
                 } else {
-                    for (i,name) in self.folder_choices.iter().take(40).enumerate() {
+                    for (i,name) in self.folder_choices.iter().take(FOLDER_LIST_LIMIT).enumerate() {
                         text.push_str(&format!("\n{}. {name}",i+1));
                     }
-                    if self.folder_choices.len()>40 {
-                        text.push_str("\nShowing the first 40; type a name for another.");
+                    if self.folder_choices.len()>FOLDER_LIST_LIMIT {
+                        text.push_str(&format!("\nShowing the first {FOLDER_LIST_LIMIT}; send ls and part of a name to narrow the list."));
                     }
                 }
                 text.push_str("\n\n**0. Cancel**\nReply with a listed number, a folder name, or ls again.");
@@ -227,7 +227,11 @@ impl Draft {
     }
 }
 
-fn folder_choices(root: &std::path::Path) -> Vec<String> {
+/// Folders shown in one menu; the list is read one past this so the menu can say it is cut.
+const FOLDER_LIST_LIMIT: usize = 200;
+
+fn folder_choices(root: &std::path::Path, filter: &str) -> Vec<String> {
+    let filter = filter.trim().to_ascii_lowercase();
     let Ok(directory) = launch::directory(root) else {
         return Vec::new();
     };
@@ -254,12 +258,11 @@ fn folder_choices(root: &std::path::Path) -> Vec<String> {
                 && name
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'));
-            valid.then_some(name)
+            (valid && name.to_ascii_lowercase().contains(&filter)).then_some(name)
         })
         .collect();
     names.sort_by_key(|name| name.to_ascii_lowercase());
-    // One past the 40 shown, so the menu knows when to say the list is cut.
-    names.truncate(41);
+    names.truncate(FOLDER_LIST_LIMIT + 1);
     names
 }
 
@@ -272,6 +275,14 @@ pub fn is_command(text: &str) -> bool {
     })
 }
 
+fn is_ls(answer: &str) -> bool {
+    answer == "ls" || answer.strip_prefix("ls").is_some_and(|rest| rest.starts_with(char::is_whitespace))
+}
+
+fn ls_filter(answer: &str) -> &str {
+    answer.strip_prefix("ls").unwrap_or_default().trim()
+}
+
 /// Resolve only selection replies against the current chat's menu, never a confirmation.
 pub fn short_reply(draft: &Draft, text: &str) -> Option<String> {
     if text.trim() == "0" {
@@ -281,11 +292,11 @@ pub fn short_reply(draft: &Draft, text: &str) -> Option<String> {
     let number = !answer.is_empty() && answer.bytes().all(|b| b.is_ascii_digit());
     let page = matches!(answer.as_str(), "next" | "previous");
     match draft.step {
-        Step::Folder if answer == "ls" => Some(format!("/new list {}", draft.code)),
+        Step::Folder if is_ls(&answer) => Some(format!("/new list {} {}", draft.code, ls_filter(&answer)).trim_end().to_string()),
         Step::Folder if !text.trim().is_empty() && !text.trim().starts_with('/') => {
             Some(format!("/new folder {} {}", draft.code, text.trim()))
         }
-        Step::FolderList if answer == "ls" => Some(format!("/new list {}", draft.code)),
+        Step::FolderList if is_ls(&answer) => Some(format!("/new list {} {}", draft.code, ls_filter(&answer)).trim_end().to_string()),
         Step::FolderList if number => Some(format!("/new pick {} {answer}", draft.code)),
         Step::FolderList if !text.trim().is_empty() && !text.trim().starts_with('/') => {
             Some(format!("/new folder {} {}", draft.code, text.trim()))
@@ -679,12 +690,12 @@ async fn route(bridge: &mut Bridge, key: &str, group: &str, id: &str, text: &str
         draft.advance(Step::Agent);
         return show(bridge, key, group, id, draft);
     }
-    if command == "/new" && args.len() == 3 && args[1].eq_ignore_ascii_case("list") {
+    if command == "/new" && args.len() >= 3 && args[1].eq_ignore_ascii_case("list") {
         ensure!(
             matches!(draft.step, Step::Folder | Step::FolderList) && args[2] == draft.code,
             "Use the current folder menu code"
         );
-        draft.folder_choices = folder_choices(&bridge.config.launch_root);
+        draft.folder_choices = folder_choices(&bridge.config.launch_root, &args[3..].join(" "));
         draft.step = Step::FolderList;
         draft.page = 0;
         return show(bridge, key, group, id, draft);
@@ -698,7 +709,7 @@ async fn route(bridge: &mut Bridge, key: &str, group: &str, id: &str, text: &str
         let name = draft
             .folder_choices
             .iter()
-            .take(40)
+            .take(FOLDER_LIST_LIMIT)
             .nth(index.wrapping_sub(1))
             .ok_or_else(|| anyhow::anyhow!("Choose a listed folder number"))?
             .clone();
@@ -981,8 +992,8 @@ mod folder_choice_tests {
         std::fs::create_dir_all(root.join("real/projects/secret")).unwrap();
         std::os::unix::fs::symlink(root.join("real/projects"), root.join("linked-root")).unwrap();
         std::os::unix::fs::symlink(root.join("real"), root.join("linked-parent")).unwrap();
-        assert!(folder_choices(&root.join("linked-root")).is_empty());
-        assert!(folder_choices(&root.join("linked-parent/projects")).is_empty());
+        assert!(folder_choices(&root.join("linked-root"), "").is_empty());
+        assert!(folder_choices(&root.join("linked-parent/projects"), "").is_empty());
     }
 
     #[test]
@@ -999,8 +1010,12 @@ mod folder_choice_tests {
         )
         .unwrap();
         assert_eq!(
-            folder_choices(&directory.path().canonicalize().unwrap()),
+            folder_choices(&directory.path().canonicalize().unwrap(), ""),
             vec!["alpha", "Beta"]
+        );
+        assert_eq!(
+            folder_choices(&directory.path().canonicalize().unwrap(), " BE"),
+            vec!["Beta"]
         );
     }
 
@@ -1020,5 +1035,13 @@ mod folder_choice_tests {
             Some(format!("/new folder {code} gamma"))
         );
         assert_eq!(short_reply(&draft, "ls"), Some(format!("/new list {code}")));
+        assert_eq!(
+            short_reply(&draft, "ls here"),
+            Some(format!("/new list {code} here"))
+        );
+        assert_eq!(
+            short_reply(&draft, "lsof"),
+            Some(format!("/new folder {code} lsof"))
+        );
     }
 }
