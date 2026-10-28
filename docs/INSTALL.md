@@ -1,8 +1,5 @@
 # Install **codr**
 
-**Release preparation:** `v0.9.0` is not published. The examples below target that
-upcoming release; the current published stable tag is `v0.8.0`.
-
 **codr** is a **herdr** plugin backed by two per-user services: the Rust bridge and its MDK transport. Linux uses systemd; macOS uses launchd LaunchAgents.
 
 ## One-prompt installation

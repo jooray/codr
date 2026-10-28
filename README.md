@@ -19,12 +19,8 @@ New bridge accounts introduce themselves as **Pat**, your messenger between Whit
 
 ## Install
 
-**Current stable: `v0.8.0`.** Version `0.9.0` is in release preparation, not yet
-published. The new behaviour described below applies to the upcoming version;
-see the [0.9.0 notes](docs/releases/0.9.0.md) and
-[build/readiness status](docs/releases/0.9.0-readiness.md).
-The example targets 0.9.0 after publication. Until then, use `--ref v0.8.0`
-for the published stable version.
+**Current stable: `v0.9.0`.** See the [release notes](docs/releases/0.9.0.md)
+and [release verification and update-test guide](docs/releases/0.9.0-readiness.md).
 
 Needs Linux x86_64 or aarch64 or macOS on Apple silicon or Intel, a per-user service manager (systemd or launchd), Python 3.11+, Git, and **herdr** 0.9.1+. No Rust toolchain required.
 
@@ -41,7 +37,7 @@ Or give your coding agent this prompt, with your own public key:
 
 [Full installation and upgrade guide →](docs/INSTALL.md)
 
-### Coming in 0.9.0
+### New in 0.9.0
 
 - Read this chat's latest message with `/last`, or several with `/last4`, without
   resuming sync. `/recent [hours]` keeps its three-message excerpt per active chat.

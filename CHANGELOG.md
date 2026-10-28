@@ -1,9 +1,9 @@
 # Changelog
 
-## [0.9.0] - Unreleased
+## [0.9.0]
 
-Release preparation is in progress. See the [draft release notes](docs/releases/0.9.0.md)
-and [readiness checklist](docs/releases/0.9.0-readiness.md). No 0.9.0 build has been published.
+See the [release notes](docs/releases/0.9.0.md) and
+[release verification guide](docs/releases/0.9.0-readiness.md).
 
 ### Added
 
