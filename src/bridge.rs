@@ -607,7 +607,7 @@ impl Bridge {
         if capabilities["type"] != "group_create_capabilities"
             || capabilities["initial_admins"] != true
         {
-            eprintln!("Control chat needs the current connector; no group was created.");
+            eprintln_throttled!("Control chat needs the current connector; no group was created.");
             return;
         }
         {
@@ -636,7 +636,7 @@ impl Bridge {
                     .as_str()
                     .filter(|group| !group.is_empty())
                 else {
-                    eprintln!("Control chat creation needs inspection.");
+                    eprintln_throttled!("Control chat creation needs inspection.");
                     return;
                 };
                 {
@@ -651,14 +651,14 @@ impl Bridge {
                 );
                 let _ = self.save();
             }
-            Ok(_) => eprintln!("Control chat creation needs inspection."),
+            Ok(_) => eprintln_throttled!("Control chat creation needs inspection."),
             Err(error) => {
                 if error.downcast_ref::<crate::wire::NotSubmitted>().is_some() {
                     let mapping = self.state.mappings.get_mut(CONTROL_KEY).unwrap();
                     mapping.creating = false;
                     let _ = self.save();
                 } else {
-                    eprintln!(
+                    eprintln_throttled!(
                         "Control chat creation needs inspection. Use status and resolve-create."
                     );
                 }
@@ -775,7 +775,9 @@ impl Bridge {
             let agent = self.agents[&key].clone();
             if let Err(error) = self.reconcile_agent(&key, &agent).await {
                 if error.downcast_ref::<crate::reads::Pending>().is_none() {
-                    eprintln!("A session could not reconcile; other sessions remain available.");
+                    eprintln_throttled!(
+                        "A session could not reconcile; other sessions remain available."
+                    );
                 }
             } else {
                 let mapping = &self.state.mappings[&key];
@@ -810,7 +812,7 @@ impl Bridge {
                 if let Some(agent) = self.state.mappings[&key].agent_record.clone()
                     && self.collect_finals(&key, &agent, &group).await.is_err()
                 {
-                    eprintln!("Final reply for an ended session remains pending.");
+                    eprintln_throttled!("Final reply for an ended session remains pending.");
                     continue;
                 }
                 self.reads.finish(&key);
@@ -1094,13 +1096,13 @@ impl Bridge {
                         let group = response["group_id_hex"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| anyhow::anyhow!("Missing group ID"))?.to_owned();
                         let m = self.state.mappings.get_mut(key).unwrap(); m.group_id_hex = Some(group.clone()); m.creating = false;
                         m.group_name = Some(name.clone()); m.group_description = Some(description.clone());
-                        self.state.enqueue(&group, &format!("Connected to {name}.\n\nType /help from anywhere to view commands."));
+                        self.state.enqueue(&group, &format!("Hi! This is your chat with {name}.\n\nSend /help in any Codr chat to see available commands."));
                         self.save()?;
                     }
                     Err(error) => {
                         if error.downcast_ref::<crate::wire::NotSubmitted>().is_some() {
                             self.state.mappings.get_mut(key).unwrap().creating = false; self.save()?;
-                        } else { eprintln!("Group creation needs inspection. Use status and resolve-create before retrying."); }
+                        } else { eprintln_throttled!("Group creation needs inspection. Use status and resolve-create before retrying."); }
                         return Ok(());
                     }
                 }
@@ -1179,7 +1181,9 @@ impl Bridge {
                     self.state.mappings.get_mut(key).unwrap().task_revision = Some(tasks.revision);
                 }
                 Ok(_) => {}
-                Err(_) => eprintln!("Task list unavailable; response delivery remains active."),
+                Err(_) => {
+                    eprintln_throttled!("Task list unavailable; response delivery remains active.")
+                }
             }
         }
         let opencode = agent
@@ -1328,7 +1332,9 @@ impl Bridge {
                 return Err(error);
             }
             self.refresh_forwarding()?;
-            eprintln!("Local native user input muted White Noise forwarding for all groups.");
+            eprintln_throttled!(
+                "Local native user input muted White Noise forwarding for all groups."
+            );
         }
         self.save()
     }
@@ -1458,7 +1464,7 @@ impl Bridge {
                 Box::pin(self.route_inbound(&event, prompt.media.is_some(), true)).await
                 && !error.is::<crate::reads::Pending>()
             {
-                eprintln!("A queued prompt remains paused; other chats can continue.");
+                eprintln_throttled!("A queued prompt remains paused; other chats can continue.");
             }
             self.reads.finish(&key);
         }
@@ -1512,7 +1518,13 @@ impl Bridge {
     }
 
     /// White Noise-only commands bypass agent input and the global phone-wake path.
-    async fn chat_command(&mut self, key: &str, group: &str, id: &str, sync: bool) -> Result<()> {
+    async fn chat_command(
+        &mut self,
+        key: &str,
+        group: &str,
+        id: &str,
+        recent_window: Option<u64>,
+    ) -> Result<()> {
         use sha2::{Digest, Sha256};
         self.refresh_forwarding()?;
         let request = hex::encode(Sha256::digest(serde_json::to_vec(&(group, id))?));
@@ -1520,7 +1532,7 @@ impl Bridge {
         let mut unavailable = 0;
         let requested_at = now();
         let mut reference = self.state.last_confirmed_send_at;
-        if sync {
+        if let Some(window) = recent_window {
             if reference.is_none() {
                 let groups: HashSet<_> = self
                     .state
@@ -1535,7 +1547,7 @@ impl Bridge {
                     }
                 }
             }
-            let cutoff = requested_at.saturating_sub(3600);
+            let cutoff = requested_at.saturating_sub(window);
             let limit = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
             let mut readers = tokio::task::JoinSet::new();
             for (mapping_key, mapping) in &self.state.mappings {
@@ -1601,7 +1613,7 @@ impl Bridge {
                 messages,
             );
         }
-        let response = if sync {
+        let response = if recent_window.is_some() {
             let mut status = if count == 0 {
                 "Recent: nothing new".into()
             } else {
@@ -1617,12 +1629,50 @@ impl Bridge {
             status
         } else {
             format!(
-                "# codr commands\n\n### General\n\n**`/help`**  \nShow commands\n\n**`/status`**  \nConnection, state, queue and unmute\n\n**`/recent`**  \nGet newest 3 of all active <1h\n\n**`/update`**  \nCheck ngit for a stable bridge update; confirm before installing\n\n### Projects & Agents\n\n**`/new`**  \nSet up a project\n\n**`/agent`**  \nChoose agent (separate chat)\n\n**`/model`**  \nChoose model\n\n### Tasks\n\n**`/queue`**  \nView pending deliveries\n\n**`/cancel`**  \nInterrupt the current task\n\n### Sync\n\n**`/unmute`**  \nUnmute all chats and return to automatic sync\n\n**`/sync auto|on|off`**  \nSet persistent sync mode\nCurrent sync mode: {}\n\nCommands accept unambiguous prefixes (/n, /st, /sy). In the control chat the leading / is optional.",
+                "# codr commands\n\n### General\n\n**`/help`**  \nShow commands\n\n**`/status`**  \nConnection, state, queue and unmute\n\n**`/last [count]`**  \nReplay the newest message in this chat without unmuting. Use /last4 or /last 4 for four; count 1–100.\n\n**`/recent [hours]`**  \nGet newest 3 messages per chat active in the past hour. Use /recent2 or /recent 2 for two hours.\n\n**`/update`**  \nCheck ngit for a stable bridge update; confirm before installing\n\n### Projects & Agents\n\n**`/new`**  \nSet up a project\n\n**`/agent`**  \nChoose agent (separate chat)\n\n**`/model`**  \nChoose model\n\n### Tasks\n\n**`/queue`**  \nView pending deliveries\n\n**`/cancel`**  \nInterrupt the current task\n\n### Sync\n\n**`/unmute`**  \nUnmute all chats and return to automatic sync\n\n**`/sync auto|on|off`**  \nSet persistent sync mode\nCurrent sync mode: {}\n\nCommands accept unambiguous prefixes (/n, /st, /sy). In the control chat the leading / is optional.",
                 forwarding::load(&self.config.state_path)?.mode.label()
             )
         };
         self.state
             .enqueue_manual(group, &response, &format!("command:{request}"));
+        self.state
+            .mappings
+            .get_mut(key)
+            .unwrap()
+            .seen_messages
+            .push(id.into());
+        if let Err(error) = self.save() {
+            self.state = before;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn last_command(&mut self, key: &str, group: &str, id: &str, count: usize) -> Result<()> {
+        let session = (!self.state.mappings[key].control)
+            .then(|| {
+                self.agents
+                    .get(key)
+                    .or(self.state.mappings[key].agent_record.as_ref())
+            })
+            .flatten()
+            .filter(|agent| agent.key() == key)
+            .and_then(|agent| agent.agent_session.clone())
+            .filter(|session| output::supported(&session.agent));
+        let response = if let Some(session) = session {
+            match output::read_history(&self.config, &session).await {
+                Ok(history) => history
+                    .last(count)
+                    .unwrap_or_else(|| "No conversation messages yet.".into()),
+                Err(_) => "Chat history is unavailable. Try /last again.".into(),
+            }
+        } else {
+            "Use /last in an agent chat with a saved session.".into()
+        };
+        // Explicit replays bypass mute, but must not consume automatic delivery keys.
+        let before = self.state.clone();
+        self.state
+            .enqueue_manual(group, &response, &format!("last:{group}:{id}"));
         self.state
             .mappings
             .get_mut(key)
@@ -1670,15 +1720,6 @@ impl Bridge {
     }
 
     async fn cancel_task(&mut self, key: &str, group: &str, id: &str, plain: bool) -> Result<()> {
-        if self.state.mappings[key].control {
-            return crate::launch::reply(
-                self,
-                key,
-                group,
-                id,
-                "The control chat has no active task. Open a session chat to cancel its task.",
-            );
-        }
         if !plain {
             return crate::launch::reply(
                 self,
@@ -1686,6 +1727,41 @@ impl Bridge {
                 group,
                 id,
                 "Send /cancel as complete standalone text without attachments or a voice transcript.",
+            );
+        }
+        // Reset routing even if the runtime is idle, ended or unreachable. Keep
+        // uncertain external operations and accepted deliveries for reconciliation.
+        let before_reset = self.state.clone();
+        let mapping = self.state.mappings.get_mut(key).unwrap();
+        mapping.decision = None;
+        mapping.decision_checked_at = 0;
+        mapping.decision_refresh_pending = false;
+        mapping.permission = None;
+        mapping.update_offer = None;
+        if mapping.launch_draft.as_ref().is_some_and(|draft| {
+            !matches!(
+                draft.step,
+                crate::launch_flow::Step::Applying | crate::launch_flow::Step::Uncertain
+            )
+        }) {
+            mapping.launch_draft = None;
+        }
+        if let Some(request) = mapping.launch.as_mut()
+            && request.phase == crate::launch::Phase::Awaiting
+        {
+            request.phase = crate::launch::Phase::Cancelled;
+        }
+        if let Err(error) = self.save() {
+            self.state = before_reset;
+            return Err(error);
+        }
+        if self.state.mappings[key].control {
+            return crate::launch::reply(
+                self,
+                key,
+                group,
+                id,
+                "Pending questions and menus cleared in this chat. The control chat has no task to interrupt. History and accepted deliveries were kept.",
             );
         }
         let record = self
@@ -1699,7 +1775,7 @@ impl Bridge {
                 key,
                 group,
                 id,
-                "This session has ended. No interrupt was sent.",
+                "Pending questions and menus cleared. This session has ended; no interrupt was sent. History and accepted deliveries were kept.",
             );
         };
         let current = herdr::get(&self.herdr, &record).await?;
@@ -1713,7 +1789,7 @@ impl Bridge {
                 key,
                 group,
                 id,
-                "No task is running in this chat. No interrupt was sent.",
+                "Pending questions and menus cleared. No task is running in this chat; no interrupt was sent. History and accepted deliveries were kept.",
             );
         }
         ensure!(
@@ -1737,7 +1813,7 @@ impl Bridge {
             .await;
         let message = match response {
             Ok(response) if response["result"]["type"] == "ok" => {
-                "Interrupt sent to the current task. Accepted deliveries and chat history were kept."
+                "Pending questions and menus cleared. Interrupt sent to the current task. Accepted deliveries and chat history were kept."
             }
             Err(error) if error.downcast_ref::<crate::wire::NotSubmitted>().is_some() => {
                 self.state = before;
@@ -1745,7 +1821,7 @@ impl Bridge {
                 return Err(error);
             }
             _ => {
-                "The interrupt could not be confirmed. Inspect the agent before trying again. No automatic retry will run."
+                "Pending questions and menus cleared, but the interrupt could not be confirmed. Inspect the agent before trying again. No automatic retry will run."
             }
         };
         self.state
@@ -1902,6 +1978,45 @@ impl Bridge {
         if !prepared && !queued && text.trim().eq_ignore_ascii_case("/cancel") {
             return self.cancel_task(&key, group, id, plain_command).await;
         }
+        if !prepared
+            && !queued
+            && text.split_whitespace().next().is_some_and(|command| {
+                command
+                    .to_ascii_lowercase()
+                    .strip_prefix("/last")
+                    .is_some_and(|suffix| suffix.bytes().all(|byte| byte.is_ascii_digit()))
+            })
+        {
+            self.refresh_forwarding()?;
+            if !plain_command {
+                return crate::launch::reply(
+                    self,
+                    &key,
+                    group,
+                    id,
+                    "Send /last as complete standalone text without attachments or a voice transcript.",
+                );
+            }
+            let args: Vec<_> = text.split_whitespace().collect();
+            let count = match args.as_slice() {
+                [_] => Some(1),
+                [_, count] if count.bytes().all(|byte| byte.is_ascii_digit()) => {
+                    count.parse::<usize>().ok()
+                }
+                _ => None,
+            }
+            .filter(|count| (1..=output::MAX_LAST_MESSAGES).contains(count));
+            let Some(count) = count else {
+                return crate::launch::reply(
+                    self,
+                    &key,
+                    group,
+                    id,
+                    "Use /last for the newest message, or /last 4 (also /last4) for four. Count must be a whole number from 1 to 100. Sync stays unchanged.",
+                );
+            };
+            return self.last_command(&key, group, id, count).await;
+        }
         let status_command = plain_command && text == "/status";
         let immediate_prompt =
             (!queued && plain_command || prepared) && !status_command && !text.trim().is_empty();
@@ -2031,12 +2146,35 @@ impl Bridge {
             return Ok(());
         }
         if plain_command
-            && (text.trim().eq_ignore_ascii_case("/recent")
-                || text.trim().eq_ignore_ascii_case("/help"))
+            && text
+                .split_whitespace()
+                .next()
+                .is_some_and(|command| command.eq_ignore_ascii_case("/recent"))
         {
-            return self
-                .chat_command(&key, group, id, text.trim().eq_ignore_ascii_case("/recent"))
-                .await;
+            let args: Vec<_> = text.split_whitespace().collect();
+            let hours = match args.as_slice() {
+                [_] => Some(1_u64),
+                [_, hours] if hours.bytes().all(|byte| byte.is_ascii_digit()) => {
+                    hours.parse::<u64>().ok()
+                }
+                _ => None,
+            };
+            let window = hours
+                .filter(|hours| *hours > 0)
+                .and_then(|hours| hours.checked_mul(3600));
+            let Some(window) = window else {
+                return crate::launch::reply(
+                    self,
+                    &key,
+                    group,
+                    id,
+                    "Use /recent for the past hour, or /recent 2 (also /recent2) for the past two hours. Hours must be a positive whole number; the value is invalid or too large. Each chat still gets at most three messages.",
+                );
+            };
+            return self.chat_command(&key, group, id, Some(window)).await;
+        }
+        if plain_command && text.trim().eq_ignore_ascii_case("/help") {
+            return self.chat_command(&key, group, id, None).await;
         }
         if self.state.mappings[&key].control {
             if queued || prepared || !plain_command {
@@ -3151,7 +3289,7 @@ impl Bridge {
             Ok(info) => info,
             Err(error) => {
                 if error.downcast_ref::<crate::wire::NotSubmitted>().is_none() {
-                    eprintln!("Group profile check failed; keeping the current title.");
+                    eprintln_throttled!("Group profile check failed; keeping the current title.");
                 }
                 return;
             }
@@ -3161,7 +3299,7 @@ impl Bridge {
             let mapping = self.state.mappings.get_mut(key).unwrap();
             mapping.group_name_locked = true;
             let _ = self.save();
-            eprintln!("Group title was changed outside codr; leaving it unchanged.");
+            eprintln_throttled!("Group title was changed outside codr; leaving it unchanged.");
             return;
         }
         let current_description = info["description"].as_str().or(last_description.as_deref());
@@ -3174,7 +3312,7 @@ impl Bridge {
         }
         self.state.mappings.get_mut(key).unwrap().rename_uncertain = true;
         if self.save().is_err() {
-            eprintln!("Group rename intent could not be saved; no update was submitted.");
+            eprintln_throttled!("Group rename intent could not be saved; no update was submitted.");
             return;
         }
         let update = self
@@ -3209,11 +3347,11 @@ impl Bridge {
                     mapping.group_description = Some(desired_description);
                     mapping.rename_uncertain = false;
                     let _ = self.save();
-                    eprintln!("Renamed group: {desired_name}");
+                    eprintln_throttled!("Renamed group: {desired_name}");
                 } else {
                     mapping.rename_uncertain = true;
                     let _ = self.save();
-                    eprintln!(
+                    eprintln_throttled!(
                         "Group profile update was not confirmed; automatic renames stopped until rename-groups runs."
                     );
                 }
@@ -3229,7 +3367,7 @@ impl Bridge {
                 let mapping = self.state.mappings.get_mut(key).unwrap();
                 mapping.rename_uncertain = true;
                 let _ = self.save();
-                eprintln!(
+                eprintln_throttled!(
                     "Group profile update is uncertain; automatic renames stopped until rename-groups runs."
                 );
             }
@@ -3282,7 +3420,7 @@ impl Bridge {
             tokio::select! {
                 Ok(stream) = crate::porter::accept(&porter_listener) => {
                     if crate::porter::serve(self, stream).await.is_err() {
-                        eprintln!("Porter request failed; no automatic mutation retry.");
+                        eprintln_throttled!("Porter request failed; no automatic mutation retry.");
                     }
                 },
                 _ = tokio::signal::ctrl_c() => {
@@ -3292,20 +3430,20 @@ impl Bridge {
                 },
                 _ = tick.tick() => {
                     match herdr::snapshot(&self.herdr).await {
-                        Ok(agents) => if self.reconcile(agents).await.is_err() { eprintln!("Session reconciliation failed; will retry."); },
-                        Err(_) => { self.herdr_available = false; recovery_due = true; eprintln!("herdr is unavailable; waiting for reconnection."); }
+                        Ok(agents) => if self.reconcile(agents).await.is_err() { eprintln_throttled!("Session reconciliation failed; will retry."); },
+                        Err(_) => { self.herdr_available = false; recovery_due = true; eprintln_throttled!("herdr is unavailable; waiting for reconnection."); }
                     }
                 },
                 _ = reads_ready.notified() => {
                     if self.herdr_available && self.poll_ready_sessions().await.is_err() {
-                        eprintln!("Session reads remain pending.");
+                        eprintln_throttled!("Session reads remain pending.");
                     }
                 },
                 Some(event) = rx.recv() => {
                     if event["type"] == "reconcile_inbound" || event["type"] == "resync_required" {
                         // Refresh current agent identities before recovering any queued phone prompts.
                         recovery_due = true;
-                    } else if self.inbound(&event).await.is_err() { recovery_due = true; eprintln!("Inbound message deferred; will reconcile history."); }
+                    } else if self.inbound(&event).await.is_err() { recovery_due = true; eprintln_throttled!("Inbound message deferred; will reconcile history."); }
                 },
                 _ = recovery_tick.tick() => { recovery_due = true; }
             }
@@ -3313,14 +3451,16 @@ impl Bridge {
                 recovery_due = self.recover_inbound().await.is_err();
             }
             if crate::update::poll(self).await.is_err() {
-                eprintln!("Update result remains pending; no automatic installation retry.");
+                eprintln_throttled!(
+                    "Update result remains pending; no automatic installation retry."
+                );
             }
             if self.process_media().await.is_err() {
                 recovery_due = true;
-                eprintln!("Prepared media input deferred; will reconcile history.");
+                eprintln_throttled!("Prepared media input deferred; will reconcile history.");
             }
             if self.flush().await.is_err() {
-                eprintln!("MDK send unavailable; private outbox retained for retry.");
+                eprintln_throttled!("MDK send unavailable; private outbox retained for retry.");
             }
             crate::porter::publish(self);
         }

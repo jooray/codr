@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::PathBuf;
 
+const FOLDER_PAGE_SIZE: usize = 200;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Mode {
     New,
@@ -21,6 +23,7 @@ pub enum Step {
     Workspace,
     Folder,
     FolderList,
+    Conversation,
     Agent,
     Model,
     ModelGroup,
@@ -56,6 +59,8 @@ pub struct Draft {
     pub visible_models: Vec<usize>,
     #[serde(default)]
     pub folder_choices: Vec<String>,
+    #[serde(default)]
+    pub conversations: Vec<Agent>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -87,6 +92,7 @@ impl Draft {
             model_group: None,
             visible_models: vec![],
             folder_choices: vec![],
+            conversations: vec![],
         }
     }
     fn advance(&mut self, step: Step) {
@@ -166,20 +172,30 @@ impl Draft {
                 if self.page>0 {text.push_str("\nPrevious page: previous");}
                 text
             }
-            Step::Folder=>format!("{}\nReply with your chosen folder name, or ls to list existing folders.\n\n**0. Cancel**\nNothing will be created yet.",self.heading(2,"Folder name:")),
+            Step::Folder=>format!("{}\nReply with your chosen folder name, **`ls`** to list existing folders, or **`ls <part>`** to filter them.\n\n**0. Cancel**\nNothing will be created yet.",self.heading(2,"Folder name:")),
             Step::FolderList=>{
                 let mut text=self.heading(2,"Choose a folder:");
                 if self.folder_choices.is_empty() {
-                    text.push_str("\nNo folders found under the launch root. Type a folder name.");
+                    text.push_str("\nNo matching folders. Use ls to show all folders, ls <part> to search, or type a folder name.");
                 } else {
-                    for (i,name) in self.folder_choices.iter().take(40).enumerate() {
+                    if self.folder_choices.len()>FOLDER_PAGE_SIZE {
+                        text.push_str(&format!("\npage {} of {}",self.page+1,self.folder_choices.len().div_ceil(FOLDER_PAGE_SIZE)));
+                    }
+                    for (i,name) in self.folder_choices.iter().enumerate().skip(self.page*FOLDER_PAGE_SIZE).take(FOLDER_PAGE_SIZE) {
                         text.push_str(&format!("\n{}. {name}",i+1));
                     }
-                    if self.folder_choices.len()>40 {
-                        text.push_str("\nShowing the first 40; type a name for another.");
-                    }
                 }
-                text.push_str("\n\n**0. Cancel**\nReply with a listed number, a folder name, or ls again.");
+                text.push_str("\n\n**0. Cancel**\nReply with a listed number or folder name. **`ls <part>`** filters the list; **`ls`** refreshes all folders.");
+                if (self.page+1)*FOLDER_PAGE_SIZE<self.folder_choices.len() {text.push_str("\nNext page: **`next`**");}
+                if self.page>0 {text.push_str("\nPrevious page: **`previous`**");}
+                text
+            }
+            Step::Conversation=>{
+                let mut text=self.heading(2,"Folder already exists. Choose an existing conversation:");
+                for (i,agent) in self.conversations.iter().enumerate() {
+                    text.push_str(&format!("\n{}. {} — {} ({})",i+1,agent.group_name(),catalogue::agent_name(&agent.agent),agent.pane_id));
+                }
+                text.push_str("\n\n**0. Cancel**\nReply with a listed number. Existing history and queues will be kept; no new session will be started.");
                 text
             }
             Step::Agent=>{
@@ -227,7 +243,8 @@ impl Draft {
     }
 }
 
-fn folder_choices(root: &std::path::Path) -> Vec<String> {
+fn folder_choices(root: &std::path::Path, filter: &str) -> Vec<String> {
+    let filter = filter.trim().to_ascii_lowercase();
     let Ok(directory) = launch::directory(root) else {
         return Vec::new();
     };
@@ -254,12 +271,10 @@ fn folder_choices(root: &std::path::Path) -> Vec<String> {
                 && name
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'));
-            valid.then_some(name)
+            (valid && name.to_ascii_lowercase().contains(&filter)).then_some(name)
         })
         .collect();
     names.sort_by_key(|name| name.to_ascii_lowercase());
-    // One past the 40 shown, so the menu knows when to say the list is cut.
-    names.truncate(41);
     names
 }
 
@@ -272,6 +287,13 @@ pub fn is_command(text: &str) -> bool {
     })
 }
 
+fn ls_filter(answer: &str) -> Option<&str> {
+    answer
+        .strip_prefix("ls")
+        .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        .map(str::trim)
+}
+
 /// Resolve only selection replies against the current chat's menu, never a confirmation.
 pub fn short_reply(draft: &Draft, text: &str) -> Option<String> {
     if text.trim() == "0" {
@@ -280,16 +302,25 @@ pub fn short_reply(draft: &Draft, text: &str) -> Option<String> {
     let answer = text.trim().to_ascii_lowercase();
     let number = !answer.is_empty() && answer.bytes().all(|b| b.is_ascii_digit());
     let page = matches!(answer.as_str(), "next" | "previous");
+    if matches!(draft.step, Step::Folder | Step::FolderList)
+        && let Some(filter) = ls_filter(&answer)
+    {
+        return Some(if filter.is_empty() {
+            format!("/new list {}", draft.code)
+        } else {
+            format!("/new list {} filter {filter}", draft.code)
+        });
+    }
     match draft.step {
-        Step::Folder if answer == "ls" => Some(format!("/new list {}", draft.code)),
         Step::Folder if !text.trim().is_empty() && !text.trim().starts_with('/') => {
             Some(format!("/new folder {} {}", draft.code, text.trim()))
         }
-        Step::FolderList if answer == "ls" => Some(format!("/new list {}", draft.code)),
+        Step::FolderList if page => Some(format!("/new list {} {answer}", draft.code)),
         Step::FolderList if number => Some(format!("/new pick {} {answer}", draft.code)),
         Step::FolderList if !text.trim().is_empty() && !text.trim().starts_with('/') => {
             Some(format!("/new folder {} {}", draft.code, text.trim()))
         }
+        Step::Conversation if number => Some(format!("/new conversation {} {answer}", draft.code)),
         Step::Workspace if number || page || answer == "new" => {
             Some(format!("/new workspace {} {answer}", draft.code))
         }
@@ -389,6 +420,115 @@ fn show(bridge: &mut Bridge, key: &str, group: &str, id: &str, draft: Draft) -> 
     persist(bridge, key, group, id, Some(draft), &text, true)
 }
 
+async fn reuse_conversation(
+    bridge: &mut Bridge,
+    key: &str,
+    group: &str,
+    id: &str,
+    directory: &std::path::Path,
+    agent: &Agent,
+) -> Result<()> {
+    let current = herdr::get(&bridge.herdr, agent).await.map_err(|_| {
+        anyhow::anyhow!("The existing conversation is unavailable or changed. Reattach the original session in herdr and retry /new; no replacement will be started")
+    })?;
+    ensure!(
+        std::path::Path::new(&current.cwd) == directory,
+        "The existing conversation moved to another folder. Retry /new"
+    );
+    let mapping = bridge.state.mappings.get(&current.key());
+    ensure!(
+        mapping.is_none_or(|m| m.session_change_from.is_none()),
+        "The existing conversation needs local identity confirmation. No replacement will be started"
+    );
+    let destination = match mapping.filter(|m| m.group_id_hex.is_some()) {
+        Some(mapping) if mapping.group_id_hex.as_deref() == Some(group) => "this chat".to_string(),
+        Some(mapping) => format!(
+            "White Noise chat: {}",
+            mapping
+                .group_name
+                .clone()
+                .unwrap_or_else(|| current.group_name())
+        ),
+        None => format!(
+            "the existing herdr conversation: {}. Its White Noise chat will be available after normal bridge reconciliation",
+            current.group_name()
+        ),
+    };
+    persist(
+        bridge,
+        key,
+        group,
+        id,
+        None,
+        &format!(
+            "Folder already exists. Continue the existing conversation in {destination}. No new session was started. Project contents, history, and queues stay unchanged."
+        ),
+        true,
+    )
+}
+
+/// Guided /new reuses known conversations; explicit fresh-session commands remain separate.
+pub(crate) async fn offer_existing(
+    bridge: &mut Bridge,
+    key: &str,
+    group: &str,
+    id: &str,
+    directory: &std::path::Path,
+) -> Result<bool> {
+    let folder = launch::inspect(&bridge.config.launch_root, directory)?;
+    let live = if folder.exists() {
+        herdr::snapshot(&bridge.herdr).await.map_err(|_| anyhow::anyhow!("Could not check existing conversations. Reconnect herdr and retry /new; no new session will be started"))?
+    } else {
+        Vec::new()
+    };
+    // Retained mappings prevent a closed conversation from being silently replaced.
+    let mut conversations = std::collections::BTreeMap::new();
+    for agent in bridge
+        .state
+        .mappings
+        .values()
+        .filter_map(|m| m.agent_record.as_ref())
+        .chain(live.iter())
+    {
+        let backend = agent
+            .agent_session
+            .as_ref()
+            .map(|s| s.agent.as_str())
+            .unwrap_or(agent.agent.as_str());
+        if std::path::Path::new(&agent.cwd) == directory
+            && matches!(backend, "opencode" | "codex" | "claude")
+        {
+            let mut agent = agent.clone();
+            if agent.agent.is_empty() {
+                agent.agent = backend.to_string();
+            }
+            conversations.insert(agent.key(), agent);
+        }
+    }
+    if !folder.exists() {
+        ensure!(
+            conversations.is_empty(),
+            "The folder for an existing conversation is missing. Restore its folder and reattach the original session; no replacement will be started"
+        );
+        return Ok(false);
+    }
+    let conversations: Vec<_> = conversations.into_values().collect();
+    match conversations.as_slice() {
+        [] => Ok(false),
+        [agent] => {
+            reuse_conversation(bridge, key, group, id, directory, agent).await?;
+            Ok(true)
+        }
+        _ => {
+            let mut draft = Draft::new(Mode::New, Step::Conversation);
+            draft.directory = Some(directory.to_path_buf());
+            draft.conversations = conversations;
+            show(bridge, key, group, id, draft)?;
+            Ok(true)
+        }
+    }
+}
+
 async fn live(bridge: &Bridge, key: &str) -> Result<Agent> {
     let record = bridge.state.mappings[key]
         .agent_record
@@ -428,6 +568,7 @@ fn request(bridge: &Bridge, draft: &Draft) -> Result<launch::Request> {
         now(),
     )?;
     request.model = draft.selected.clone();
+    request.reuse_existing = draft.mode == Mode::New;
     request.target_workspace = draft.target_workspace.clone();
     if let Mode::Fresh(source) = &draft.mode {
         request.source_agent = Some(source.clone());
@@ -530,11 +671,11 @@ async fn route(bridge: &mut Bridge, key: &str, group: &str, id: &str, text: &str
         && args.len() > 1
         && (!matches!(
             args[1].to_ascii_lowercase().as_str(),
-            "folder" | "workspace" | "list" | "pick"
+            "folder" | "workspace" | "list" | "pick" | "conversation"
         ) || (args.len() == 4
             && matches!(
                 args[1].to_ascii_lowercase().as_str(),
-                "workspace" | "list" | "pick"
+                "workspace" | "list" | "pick" | "conversation"
             )
             && draft.as_ref().is_none_or(|draft| args[2] != draft.code)
             && matches!(args[3], "opencode" | "codex" | "claude")))
@@ -623,6 +764,23 @@ async fn route(bridge: &mut Bridge, key: &str, group: &str, id: &str, text: &str
             true,
         );
     }
+    if command == "/new" && args.len() == 4 && args[1].eq_ignore_ascii_case("conversation") {
+        ensure!(
+            draft.step == Step::Conversation && args[2] == draft.code,
+            "Use the current conversation menu code"
+        );
+        let index = args[3].parse::<usize>()?;
+        let agent = draft
+            .conversations
+            .get(index.wrapping_sub(1))
+            .ok_or_else(|| anyhow::anyhow!("Choose a listed conversation number"))?;
+        let directory = draft
+            .directory
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Choose a folder first"))?;
+        launch::inspect(&bridge.config.launch_root, directory)?;
+        return reuse_conversation(bridge, key, group, id, directory, agent).await;
+    }
     if command == "/new" && args.len() == 4 && args[1].eq_ignore_ascii_case("workspace") {
         ensure!(
             draft.step == Step::Workspace && args[2] == draft.code,
@@ -670,6 +828,11 @@ async fn route(bridge: &mut Bridge, key: &str, group: &str, id: &str, text: &str
             &PathBuf::from(std::env::var_os("HOME").unwrap_or_default()),
             now(),
         )?;
+        if draft.mode == Mode::New
+            && offer_existing(bridge, key, group, id, &proposed.directory).await?
+        {
+            return Ok(());
+        }
         draft.directory = Some(proposed.directory);
         draft.agents = catalogue::installed(&bridge.config);
         ensure!(
@@ -679,12 +842,31 @@ async fn route(bridge: &mut Bridge, key: &str, group: &str, id: &str, text: &str
         draft.advance(Step::Agent);
         return show(bridge, key, group, id, draft);
     }
-    if command == "/new" && args.len() == 3 && args[1].eq_ignore_ascii_case("list") {
+    if command == "/new" && args.len() >= 3 && args[1].eq_ignore_ascii_case("list") {
         ensure!(
             matches!(draft.step, Step::Folder | Step::FolderList) && args[2] == draft.code,
             "Use the current folder menu code"
         );
-        draft.folder_choices = folder_choices(&bridge.config.launch_root);
+        if args.len() > 3 && !args[3].eq_ignore_ascii_case("filter") {
+            ensure!(args.len() == 4, "Use ls <part> to filter folders");
+            ensure!(
+                draft.step == Step::FolderList,
+                "List folders before changing pages"
+            );
+            let page = match args[3].to_ascii_lowercase().as_str() {
+                "next" => draft.page + 1,
+                "previous" => draft.page.saturating_sub(1),
+                _ => bail!("Use next or previous to change folder pages"),
+            };
+            ensure!(
+                page * FOLDER_PAGE_SIZE < draft.folder_choices.len(),
+                "That folder page is unavailable"
+            );
+            draft.page = page;
+            return show(bridge, key, group, id, draft);
+        }
+        let filter = args.get(4..).unwrap_or_default().join(" ");
+        draft.folder_choices = folder_choices(&bridge.config.launch_root, &filter);
         draft.step = Step::FolderList;
         draft.page = 0;
         return show(bridge, key, group, id, draft);
@@ -695,11 +877,13 @@ async fn route(bridge: &mut Bridge, key: &str, group: &str, id: &str, text: &str
             "Use the current folder menu code"
         );
         let index = args[3].parse::<usize>()?;
+        ensure!(
+            index > draft.page * FOLDER_PAGE_SIZE && index <= (draft.page + 1) * FOLDER_PAGE_SIZE,
+            "Choose a listed folder number"
+        );
         let name = draft
             .folder_choices
-            .iter()
-            .take(40)
-            .nth(index.wrapping_sub(1))
+            .get(index.wrapping_sub(1))
             .ok_or_else(|| anyhow::anyhow!("Choose a listed folder number"))?
             .clone();
         let proposed = launch::proposal(
@@ -708,7 +892,13 @@ async fn route(bridge: &mut Bridge, key: &str, group: &str, id: &str, text: &str
             &PathBuf::from(std::env::var_os("HOME").unwrap_or_default()),
             now(),
         )?;
+        if draft.mode == Mode::New
+            && offer_existing(bridge, key, group, id, &proposed.directory).await?
+        {
+            return Ok(());
+        }
         draft.directory = Some(proposed.directory);
+        draft.page = 0;
         draft.agents = catalogue::installed(&bridge.config);
         ensure!(
             !draft.agents.is_empty(),
@@ -975,14 +1165,65 @@ mod folder_choice_tests {
     use super::{Draft, Mode, Step, folder_choices, short_reply};
 
     #[test]
+    fn folder_prompt_emphasizes_ls_as_a_command() {
+        let draft = Draft::new(Mode::New, Step::Folder);
+        assert!(draft.prompt().contains("**`ls`**"));
+    }
+
+    #[test]
+    fn folder_listing_keeps_all_pages() {
+        let directory = tempfile::tempdir().unwrap();
+        let expected: Vec<_> = (1..=401).map(|i| format!("project-{i:03}")).collect();
+        for name in expected.iter().rev() {
+            std::fs::create_dir(directory.path().join(name)).unwrap();
+        }
+        assert_eq!(
+            folder_choices(&directory.path().canonicalize().unwrap(), ""),
+            expected
+        );
+    }
+
+    #[test]
+    fn folder_pages_show_200_entries_and_only_available_navigation() {
+        for count in [0, 1, 199, 200, 201, 400, 401] {
+            let mut draft = Draft::new(Mode::New, Step::FolderList);
+            draft.folder_choices = (1..=count).map(|i| format!("project-{i:03}")).collect();
+            for page in 0..count.max(1_usize).div_ceil(200) {
+                draft.page = page;
+                let text = draft.prompt();
+                for number in 1..=count {
+                    assert_eq!(
+                        text.contains(&format!("\n{number}. project-{number:03}")),
+                        number > page * 200 && number <= (page + 1) * 200
+                    );
+                }
+                assert_eq!(text.contains("Next page:"), (page + 1) * 200 < count);
+                assert_eq!(text.contains("Previous page:"), page > 0);
+                assert!(text.contains("**`ls`**"));
+            }
+        }
+    }
+
+    #[test]
+    fn folder_navigation_replies_are_not_folder_names() {
+        let draft = Draft::new(Mode::New, Step::FolderList);
+        for reply in ["next", "previous"] {
+            assert_eq!(
+                short_reply(&draft, reply),
+                Some(format!("/new list {} {reply}", draft.code))
+            );
+        }
+    }
+
+    #[test]
     fn folder_listing_rejects_symlinked_roots_and_ancestors() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
         std::fs::create_dir_all(root.join("real/projects/secret")).unwrap();
         std::os::unix::fs::symlink(root.join("real/projects"), root.join("linked-root")).unwrap();
         std::os::unix::fs::symlink(root.join("real"), root.join("linked-parent")).unwrap();
-        assert!(folder_choices(&root.join("linked-root")).is_empty());
-        assert!(folder_choices(&root.join("linked-parent/projects")).is_empty());
+        assert!(folder_choices(&root.join("linked-root"), "").is_empty());
+        assert!(folder_choices(&root.join("linked-parent/projects"), "").is_empty());
     }
 
     #[test]
@@ -999,9 +1240,14 @@ mod folder_choice_tests {
         )
         .unwrap();
         assert_eq!(
-            folder_choices(&directory.path().canonicalize().unwrap()),
+            folder_choices(&directory.path().canonicalize().unwrap(), ""),
             vec!["alpha", "Beta"]
         );
+        assert_eq!(
+            folder_choices(&directory.path().canonicalize().unwrap(), " BE "),
+            vec!["Beta"]
+        );
+        assert!(folder_choices(&directory.path().canonicalize().unwrap(), "link").is_empty());
     }
 
     #[test]
@@ -1020,5 +1266,38 @@ mod folder_choice_tests {
             Some(format!("/new folder {code} gamma"))
         );
         assert_eq!(short_reply(&draft, "ls"), Some(format!("/new list {code}")));
+    }
+
+    #[test]
+    fn folder_filter_short_replies_distinguish_queries_from_navigation() {
+        for step in [Step::Folder, Step::FolderList] {
+            let mut draft = Draft::new(Mode::New, step);
+            for (input, query) in [
+                ("ls BeTa", "beta"),
+                ("LS next", "next"),
+                ("ls previous", "previous"),
+                ("ls filter", "filter"),
+                ("ls\talpha", "alpha"),
+            ] {
+                assert_eq!(
+                    short_reply(&draft, input),
+                    Some(format!("/new list {} filter {query}", draft.code))
+                );
+            }
+            assert_eq!(
+                short_reply(&draft, "ls  "),
+                Some(format!("/new list {}", draft.code))
+            );
+            assert_eq!(
+                short_reply(&draft, "lspace"),
+                Some(format!("/new folder {} lspace", draft.code))
+            );
+            assert_eq!(
+                short_reply(&draft, "ls-project"),
+                Some(format!("/new folder {} ls-project", draft.code))
+            );
+            draft.step = Step::Agent;
+            assert!(short_reply(&draft, "ls beta").is_none());
+        }
     }
 }

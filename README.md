@@ -19,10 +19,17 @@ New bridge accounts introduce themselves as **Pat**, your messenger between Whit
 
 ## Install
 
+**Current stable: `v0.8.0`.** Version `0.9.0` is in release preparation, not yet
+published. The new behaviour described below applies to the upcoming version;
+see the [0.9.0 notes](docs/releases/0.9.0.md) and
+[build/readiness status](docs/releases/0.9.0-readiness.md).
+The example targets 0.9.0 after publication. Until then, use `--ref v0.8.0`
+for the published stable version.
+
 Needs Linux x86_64 or aarch64 or macOS on Apple silicon or Intel, a per-user service manager (systemd or launchd), Python 3.11+, Git, and **herdr** 0.9.1+. No Rust toolchain required.
 
 ```sh
-herdr plugin install tidley/codr --ref v0.8.0
+herdr plugin install tidley/codr --ref v0.9.0
 herdr plugin action invoke local.white-noise.setup
 ```
 
@@ -33,6 +40,24 @@ Or give your coding agent this prompt, with your own public key:
 > Install https://github.com/tidley/codr. My White Noise public key is npub1…. Follow docs/INSTALL.md and report what you verified.
 
 [Full installation and upgrade guide →](docs/INSTALL.md)
+
+### Coming in 0.9.0
+
+- Read this chat's latest message with `/last`, or several with `/last4`, without
+  resuming sync. `/recent [hours]` keeps its three-message excerpt per active chat.
+- Search existing project folders with `ls <part>` in `/new`. Results keep
+  200-folder pages, `next`/`previous` navigation and restart-safe selection.
+  Bare `ls` clears the search and refreshes the full list.
+- Use an optional non-owning OpenCode HTTP reader: failed reads cannot start or
+  replace the shared server. CLI fallback retries only incomplete JSON.
+- Start fresh Claude chats before a transcript exists, and reduce repeated
+  warnings without hiding first-occurrence errors when the logging cache fills.
+- Keep history and accepted deliveries when `/cancel` clears stale chat controls.
+  History excerpts show original UTC source dates rather than the request time.
+
+Juraj Bednar's folder filtering, fresh-Claude-session and logging contributions
+are adapted with fixes and regression tests. His approved macOS launchd fix is
+retained. See the release notes for contributor credits and scope.
 
 ## Usage
 
@@ -47,22 +72,39 @@ Or give your coding agent this prompt, with your own public key:
 | `/help` | Show commands and the current sync mode. |
 | `/update` | Check the maintainer's stable ngit releases; install a verified bridge update only after confirmation. |
 | `/status` | Show connection, state and pending deliveries; resume sync in automatic mode. |
-| `/recent` | Get the newest three text messages from each chat active in the past hour, skipping messages already delivered or pending. |
+| `/recent [hours]` | Get the newest three text messages from each chat active in the past hour, or the specified number of hours. `/recent2` and `/recent 2` are equivalent. Skip messages already delivered or pending. |
+| `/last [count]` | Replay the newest message in this chat without unmuting. `/last4` and `/last 4` replay four messages, including already delivered text. Count: 1–100. |
 | `/new` | Set up a project, with a final name confirmation. |
 | `/agent` | Choose an agent in a separate session and chat. |
 | `/model` | Choose a model; OpenCode supports a confirmed idle-session change in place. |
-| `/cancel` | Interrupt the current task, keeping chat history and accepted deliveries. |
+| `/cancel` | Clear pending questions and menus in this chat and interrupt its current task, keeping history and accepted deliveries. |
 | `/queue` | Inspect pending media and deliveries accepted before the update. |
 | `/unmute` | Resume all chats and clear a forced sync mode. |
 | `/sync auto\|on\|off` | Use automatic sync, always on, or always off. The choice persists across restarts. |
 
-In 0.7.0, **`/recent` replaces the old catch-up `/sync` command**. It sends each eligible chat's excerpt to that chat, with **You** and **Agent** labels. Help and recent-message retrieval do not prompt agents or change sync mode.
+In 0.7.0, **`/recent` replaces the old catch-up `/sync` command**. It sends each eligible chat's excerpt to that chat, with **You** and **Agent** labels. Help and history retrieval do not prompt agents or change sync mode. `/last` is an explicit replay for the current agent chat only; it does not use `/recent`'s activity window or skip already delivered text.
+
+Catch-up messages include each source message's date and time in UTC under its
+sender label. Missing or invalid source timestamps show **Date unknown**, not the
+time of the catch-up request. Adding dates does not reset duplicate protection.
+
+`/cancel` is a chat-scoped soft reset, including when the agent is idle. It clears
+cached questions, permission cards, pending setup/model menus and update offers.
+It does not restart services, stop other sessions, change the selected model, or
+discard accepted deliveries. Records of uncertain external operations remain for
+reconciliation. An interrupt acknowledgement does not prove the agent has stopped.
 
 New phone text does not join a worker-scheduled task queue. Messages are delivered without an interrupt; a backend can still use its own native inbox. A blocked permission or decision requires its supported answer or `/cancel`, not an arbitrary prompt. Media still needs download/transcription, and existing accepted deliveries are preserved across upgrades. `/clear-queue` is retired and does not discard those deliveries. A lost submission acknowledgement is never automatically retried.
 
 Handoff is automatic. Manual controls remain available through **herdr**'s **White Noise forwarding: At desk / Away** action. [Controls and limits →](docs/REFERENCE.md#at-desk--away-forwarding)
 
 **Phone updates:** `/update` shows an available version and a ten-minute confirmation command. `/update cancel` dismisses the offer. Updates use ngit v3 and independent Blossom downloads, not GitHub. Only the managed bridge worker restarts; connector/storage changes require local setup. [Update safety and recovery →](docs/REFERENCE.md#confirmed-updates-from-ngit)
+
+To test an update, wait for the stable release and its verified ngit/Blossom
+mirror, then send `/update` from the owner's phone. Check the offered version
+before using the confirmation command. A CI artifact or GitHub-only release is
+not discoverable by this command. Cancel if the version is not the one you intend
+to test; do not bypass the signature, checksum or connector-cohort checks.
 
 ### Control chat
 

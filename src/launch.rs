@@ -21,6 +21,12 @@ pub struct Folder {
     missing: usize,
 }
 
+impl Folder {
+    pub(crate) fn exists(&self) -> bool {
+        self.missing == 0
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
@@ -50,6 +56,8 @@ pub struct Request {
     pub native_session: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_workspace: Option<crate::herdr::Workspace>,
+    #[serde(default)]
+    pub reuse_existing: bool,
     folder: Folder,
     pub expires_at: u64,
     pub phase: Phase,
@@ -197,6 +205,7 @@ pub fn proposal(text: &str, root: &Path, home: &Path, timestamp: u64) -> Result<
         source_agent: None,
         native_session: None,
         target_workspace: None,
+        reuse_existing: false,
         folder,
         expires_at: timestamp.saturating_add(600),
         phase: Phase::Awaiting,
@@ -494,6 +503,12 @@ pub async fn handle(
                 );
             }
             _ => {}
+        }
+        if request.reuse_existing
+            && crate::launch_flow::offer_existing(bridge, key, group, id, &request.directory)
+                .await?
+        {
+            return Ok(());
         }
         if let Some(model) = &request.model {
             if !crate::catalogue::installed(&bridge.config).contains(&request.kind) {

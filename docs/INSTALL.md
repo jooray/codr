@@ -1,5 +1,8 @@
 # Install **codr**
 
+**Release preparation:** `v0.9.0` is not published. The examples below target that
+upcoming release; the current published stable tag is `v0.8.0`.
+
 **codr** is a **herdr** plugin backed by two per-user services: the Rust bridge and its MDK transport. Linux uses systemd; macOS uses launchd LaunchAgents.
 
 ## One-prompt installation
@@ -32,7 +35,7 @@ The phone account must publish a compatible Marmot KeyPackage before the bridge 
 Run these commands as your normal user, not root:
 
 ```bash
-herdr plugin install tidley/codr --ref v0.8.0
+herdr plugin install tidley/codr --ref v0.9.0
 herdr plugin action invoke local.white-noise.setup
 ```
 
@@ -117,7 +120,7 @@ launchctl kickstart -k "gui/$(id -u)/io.github.tidley.codr.herdr-white-noise-bri
 ```bash
 herdr plugin list
 herdr plugin unlink local.white-noise
-herdr plugin install tidley/codr --ref v0.8.0
+herdr plugin install tidley/codr --ref v0.9.0
 ```
 
 Unlinking leaves the local checkout and account state in place. Do not delete the MDK home or reset the bridge to perform an upgrade.
@@ -184,7 +187,7 @@ Before changing the host:
 Set `OWNER_NPUB` to the public key supplied by the user. Export the selected `HERDR_SOCKET_PATH` before running **herdr** commands.
 
 ```bash
-herdr plugin install tidley/codr --ref v0.8.0 --yes
+herdr plugin install tidley/codr --ref v0.9.0 --yes
 PLUGIN_ROOT="$(herdr plugin list --plugin local.white-noise --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["plugins"][0]["plugin_root"])')"
 python3 "$PLUGIN_ROOT/scripts/setup.py" --npub "$OWNER_NPUB" --herdr-socket "$HERDR_SOCKET_PATH"
 ```

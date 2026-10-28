@@ -16,6 +16,7 @@ pub mod decision;
 mod native;
 pub mod opencode;
 pub mod permission;
+pub mod service;
 pub mod tasks;
 
 pub fn supported(agent: &str) -> bool {
@@ -38,13 +39,19 @@ pub struct SessionHistory {
     pub turns: Vec<String>,
     pub user_inputs: Vec<crate::activity::UserInput>,
     pub recent_messages: Vec<ConversationMessage>,
+    /// Bounded replay window for explicit /last requests; not a delivery cursor.
+    pub last_messages: Vec<ConversationMessage>,
 }
+
+pub(crate) const MAX_LAST_MESSAGES: usize = 100;
 
 #[derive(Clone, Debug)]
 pub struct ConversationMessage {
     pub id: String,
     pub speaker: &'static str,
     pub text: String,
+    /// Unix seconds from the source message, not the catch-up request or file mtime.
+    pub timestamp: Option<i64>,
 }
 
 impl ConversationMessage {
@@ -63,10 +70,25 @@ pub(crate) fn message_key(speaker: &str, id: &str, text: &str) -> String {
 impl SessionHistory {
     /// A bounded conversation excerpt; never prompts an agent or includes tool output.
     pub fn catch_up(&self) -> Option<String> {
-        (!self.recent_messages.is_empty()).then(|| {
-            self.recent_messages
+        Self::excerpt(&self.recent_messages)
+    }
+
+    pub fn last(&self, count: usize) -> Option<String> {
+        Self::excerpt(&self.last_messages[self.last_messages.len().saturating_sub(count)..])
+    }
+
+    fn excerpt(messages: &[ConversationMessage]) -> Option<String> {
+        (!messages.is_empty()).then(|| {
+            messages
                 .iter()
-                .map(|message| format!("**{}:**\n{}", message.speaker, message.text))
+                .map(|message| {
+                    let date = message
+                        .timestamp
+                        .and_then(|at| chrono::DateTime::from_timestamp(at, 0))
+                        .map(|at| at.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                        .unwrap_or_else(|| "Date unknown".into());
+                    format!("**{}:**\n_{date}_\n{}", message.speaker, message.text)
+                })
                 .collect::<Vec<_>>()
                 .join("\n\n---\n\n")
         })
@@ -78,17 +100,25 @@ fn record_message(
     speaker: &'static str,
     id: &str,
     text: &str,
+    timestamp: Option<i64>,
 ) {
     if !id.is_empty() && !text.trim().is_empty() {
         recent.push(ConversationMessage {
             id: id.into(),
             speaker,
             text: text.into(),
+            timestamp,
         });
-        if recent.len() > 3 {
+        if recent.len() > MAX_LAST_MESSAGES {
             recent.remove(0);
         }
     }
+}
+
+fn source_timestamp(value: &Value) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(value.as_str()?)
+        .ok()
+        .map(|at| at.timestamp())
 }
 
 pub async fn read_history(
@@ -100,7 +130,7 @@ pub async fn read_history(
         "Unsupported native session reference kind"
     );
     match session.agent.as_str() {
-        "opencode" if config.opencode_db.is_some() => {
+        "opencode" if config.opencode_db.is_some() || config.opencode_service_file.is_some() => {
             Ok(read_snapshot(config, session).await?.history)
         }
         "opencode" => Ok(select_history(
@@ -212,6 +242,11 @@ fn history_from_data(export: &Export) -> SessionHistory {
     let mut recent_messages = Vec::new();
     for message in &export.messages {
         let info = &message.info;
+        let timestamp = info
+            .time
+            .created
+            .or(info.time.completed)
+            .and_then(|milliseconds| i64::try_from(milliseconds / 1000).ok());
         if info.role == "user" {
             let parts: Vec<_> = message
                 .parts
@@ -233,7 +268,7 @@ fn history_from_data(export: &Export) -> SessionHistory {
                     .collect::<Vec<_>>()
                     .join("\n");
                 let id = format!("opencode:{}", info.id);
-                record_message(&mut recent_messages, "You", &info.id, &text);
+                record_message(&mut recent_messages, "You", &info.id, &text, timestamp);
                 user_inputs.push(if message.parts.is_empty() {
                     crate::activity::UserInput::pending(id)
                 } else {
@@ -272,7 +307,7 @@ fn history_from_data(export: &Export) -> SessionHistory {
             .collect::<Vec<_>>()
             .join("\n");
         if !text.trim().is_empty() {
-            record_message(&mut recent_messages, "Agent", &info.id, &text);
+            record_message(&mut recent_messages, "Agent", &info.id, &text, timestamp);
             out.push(FinalMessage {
                 id: info.id.clone(),
                 text,
@@ -302,7 +337,8 @@ fn history_from_data(export: &Export) -> SessionHistory {
         latest_turn,
         turns: turns.into_iter().collect(),
         user_inputs,
-        recent_messages,
+        recent_messages: recent_messages[recent_messages.len().saturating_sub(3)..].to_vec(),
+        last_messages: recent_messages,
     }
 }
 
@@ -313,6 +349,9 @@ pub async fn export(bin: &Path, session: &str) -> Result<Vec<FinalMessage>> {
 const EXPORT_UNKNOWN: u8 = 0;
 const EXPORT_V1: u8 = 1;
 const EXPORT_V2: u8 = 2;
+// Bounded CLI fallback retries adapted from Juraj Bednar's afe4f38 contribution.
+const EXPORT_ATTEMPTS: usize = 3;
+const EXPORT_RETRY_DELAY: Duration = Duration::from_millis(200);
 
 /// The first successful command selects the API for later reads. OpenCode 2.x removed
 /// the v1 `--pure export` command, so one failed attempt is expected after an upgrade.
@@ -321,6 +360,26 @@ static EXPORT_API: AtomicU8 = AtomicU8::new(EXPORT_UNKNOWN);
 #[derive(Debug, thiserror::Error)]
 #[error("Configured OpenCode executable is missing; rerun setup")]
 struct MissingExecutable;
+
+#[derive(Debug, thiserror::Error)]
+#[error("OpenCode export ended before its document was complete: {0}")]
+struct IncompleteExport(serde_json::Error);
+
+#[derive(Debug, thiserror::Error)]
+#[error("OpenCode export failed (v1: {v1}; v2: {v2})")]
+struct ExportFailed {
+    v1: String,
+    v2: String,
+    incomplete: bool,
+}
+
+fn export_parse_error(error: serde_json::Error) -> anyhow::Error {
+    if error.is_eof() {
+        IncompleteExport(error).into()
+    } else {
+        error.into()
+    }
+}
 
 async fn export_data(bin: &Path, session: &str) -> Result<Export> {
     Ok(export_with_api(bin, session).await?.0)
@@ -336,20 +395,28 @@ async fn export_with_api(bin: &Path, session: &str) -> Result<(Export, u8)> {
         [EXPORT_V1, EXPORT_V2]
     };
     let mut failures = [String::new(), String::new()];
+    let mut incomplete = false;
     for api in attempts {
-        match run_export(bin, session, api).await {
-            Ok(export) => {
-                EXPORT_API.store(api, Ordering::Relaxed);
-                return Ok((export, api));
+        for attempt in 1..=EXPORT_ATTEMPTS {
+            match run_export(bin, session, api).await {
+                Ok(export) => {
+                    EXPORT_API.store(api, Ordering::Relaxed);
+                    return Ok((export, api));
+                }
+                Err(error) => {
+                    let retryable = error.is::<IncompleteExport>();
+                    incomplete |= retryable;
+                    failures[usize::from(api - EXPORT_V1)] = format!("{error:#}");
+                    if !retryable || attempt == EXPORT_ATTEMPTS {
+                        break;
+                    }
+                }
             }
-            Err(error) => failures[usize::from(api - EXPORT_V1)] = format!("{error:#}"),
+            tokio::time::sleep(EXPORT_RETRY_DELAY).await;
         }
     }
-    anyhow::bail!(
-        "OpenCode export failed (v1: {}; v2: {})",
-        failures[0],
-        failures[1]
-    )
+    let [v1, v2] = failures;
+    Err(ExportFailed { v1, v2, incomplete }.into())
 }
 
 async fn run_export(bin: &Path, session: &str, api: u8) -> Result<Export> {
@@ -361,12 +428,14 @@ async fn run_export(bin: &Path, session: &str, api: u8) -> Result<Export> {
     let output = run_command(bin, args, 128 * 1024 * 1024).await?;
     match api {
         EXPORT_V2 => tokio::task::spawn_blocking(move || {
-            Ok(from_v2(serde_json::from_reader(BufReader::new(output))?))
+            Ok(from_v2(
+                serde_json::from_reader(BufReader::new(output)).map_err(export_parse_error)?,
+            ))
         })
         .await
         .map_err(|_| anyhow::anyhow!("OpenCode export reader failed"))?,
         _ => tokio::task::spawn_blocking(move || {
-            Ok(serde_json::from_reader(BufReader::new(output))?)
+            serde_json::from_reader(BufReader::new(output)).map_err(export_parse_error)
         })
         .await
         .map_err(|_| anyhow::anyhow!("OpenCode export reader failed"))?,
@@ -536,6 +605,13 @@ pub struct SessionSnapshot {
 
 /// Fixed diagnostics never include transcript content, IDs, paths, or CLI stderr.
 pub fn read_error_message(error: &anyhow::Error) -> &'static str {
+    if error.is::<IncompleteExport>()
+        || error
+            .downcast_ref::<ExportFailed>()
+            .is_some_and(|failure| failure.incomplete)
+    {
+        return "OpenCode export stayed incomplete after retries";
+    }
     if error.downcast_ref::<MissingExecutable>().is_some() {
         return "configured OpenCode executable is missing; rerun setup";
     }
@@ -561,6 +637,11 @@ pub(crate) async fn read_opencode_snapshot(
     session: &crate::herdr::Session,
     database: std::sync::Arc<std::sync::Mutex<opencode::Reader>>,
 ) -> Result<SessionSnapshot> {
+    if config.opencode_service_file.is_some() {
+        return service::Reader::default()
+            .read(config, &session.value)
+            .await;
+    }
     if let Some(path) = &config.opencode_db {
         let path = path.clone();
         let id = session.value.clone();

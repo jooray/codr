@@ -1,6 +1,6 @@
 [package]
 name = "herdr-white-noise-bridge"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 
 [dependencies]
@@ -20,4 +20,6 @@ unicode-width = "0.2"
 rusqlite = { version = "0.37", features = ["bundled", "limits"] }
 sha2 = "0.10"
 pulldown-cmark = { version = "0.13", default-features = false }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 rustix = { version = "1", features = ["fs"] }

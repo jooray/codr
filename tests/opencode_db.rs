@@ -38,6 +38,58 @@ fn complete() -> Value {
 }
 
 #[test]
+fn database_projection_keeps_last_replay_bounded_and_recent_at_three() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("opencode.db");
+    let db = database(&path);
+    for i in 0..105 {
+        let id = format!("user{i:03}");
+        message(&db, &id, i, json!({"role":"user"}));
+        part(
+            &db,
+            &format!("text{i:03}"),
+            &id,
+            json!({"type":"text","text":format!("Message{i:03}")}),
+        );
+    }
+    let snapshot = Reader::default()
+        .read(&path, "ses_fixture")
+        .unwrap()
+        .snapshot;
+    assert_eq!(snapshot.history.recent_messages.len(), 3);
+    assert_eq!(snapshot.history.last_messages.len(), 100);
+    assert!(snapshot.history.last(4).unwrap().contains("Message101"));
+    assert!(!snapshot.history.last(4).unwrap().contains("Message100"));
+    assert!(snapshot.history.last(100).unwrap().contains("Message005"));
+    assert!(!snapshot.history.last(100).unwrap().contains("Message004"));
+}
+
+#[test]
+fn recent_excerpt_uses_the_database_creation_clock_when_json_has_no_creation_time() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("opencode.db");
+    let db = database(&path);
+    message(&db, "answer", 1_793_189_594_000, complete());
+    part(
+        &db,
+        "text",
+        "answer",
+        json!({"type":"text","text":"Answer"}),
+    );
+    let mut reader = Reader::default();
+    assert_eq!(
+        reader
+            .read(&path, "ses_fixture")
+            .unwrap()
+            .snapshot
+            .history
+            .catch_up()
+            .as_deref(),
+        Some("**Agent:**\n_2026-10-28 12:13:14 UTC_\nAnswer")
+    );
+}
+
+#[test]
 fn sync_excerpt_tracks_database_user_and_assistant_messages_after_updates() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("opencode.db");
@@ -70,7 +122,7 @@ fn sync_excerpt_tracks_database_user_and_assistant_messages_after_updates() {
             .catch_up()
             .as_deref(),
         Some(
-            "**Agent:**\nEarlier answer\n\n---\n\n**You:**\nFollow-up\n\n---\n\n**Agent:**\nLatest answer"
+            "**Agent:**\n_1970-01-01 00:00:00 UTC_\nEarlier answer\n\n---\n\n**You:**\n_1970-01-01 00:00:00 UTC_\nFollow-up\n\n---\n\n**Agent:**\n_1970-01-01 00:00:00 UTC_\nLatest answer"
         )
     );
     part(
@@ -94,7 +146,7 @@ fn sync_excerpt_tracks_database_user_and_assistant_messages_after_updates() {
             .catch_up()
             .as_deref(),
         Some(
-            "**Agent:**\nEarlier answer\n\n---\n\n**You:**\nFollow-up\n\n---\n\n**Agent:**\nUpdated answer"
+            "**Agent:**\n_1970-01-01 00:00:00 UTC_\nEarlier answer\n\n---\n\n**You:**\n_1970-01-01 00:00:00 UTC_\nFollow-up\n\n---\n\n**Agent:**\n_1970-01-01 00:00:00 UTC_\nUpdated answer"
         )
     );
 }

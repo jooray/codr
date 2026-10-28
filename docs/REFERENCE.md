@@ -38,12 +38,14 @@ The phone controls below do not require the optional **portr** desktop/SSH endpo
 Send `/new` in any linked chat or the control chat (below). The plugin guides you through **existing or new herdr workspace → folder name → installed agent → model → confirmation**. The four selection headings use bracketed progress: `[1/4] Choose a herdr workspace:`, `[2/4] Folder name:`, `[3/4] Choose an installed agent:`, and `[4/4] Choose a model for OpenCode:` (or the selected agent). The title is outside the brackets. Each prompt explains how to reply:
 
 1. Existing workspaces are listed first. The final numbered choice is **Create new workspace**, followed by **0. Cancel**. With two workspaces, reply `3` to create a new one. Labels and stable IDs distinguish workspaces with the same name. Use `next` or `previous` for ten-item pages; numbers are global across pages, and the new-workspace number is always one higher than the total workspace count. Page counters appear only when there is more than one page. `/new workspace 1` and `new` also work.
-2. Reply with your chosen folder name, such as `my-idea`, or `0` to cancel. Reply with `ls` to list selectable directories under the launch root and choose one by number. `/new folder my-idea` remains supported. A new workspace uses the folder's final component as its name. An existing workspace receives a new project tab with an explicit cwd; its existing tabs and workspace name stay unchanged.
+2. Reply with your chosen folder name, such as `my-idea`, or `0` to cancel. Reply with **`ls`** to list selectable directories under the launch root, 200 per page, and choose one by its displayed number. **`ls <part>`**, for example `ls api`, filters folder names by a case-insensitive substring. All matching folders remain available through **`next`** and **`previous`** pages; numbers refer to the saved filtered list and selections must belong to the displayed page. A new filter starts at page one. Bare **`ls`** clears the filter, refreshes all folders and returns to page one. `ls next` searches for folders containing `next`; bare `next` changes pages. `/new folder my-idea` remains supported. Existing conversations are reused as described below. For a new conversation, a new workspace uses the folder's final component as its name, or an existing workspace receives a new project tab with an explicit cwd. Existing tabs and workspace names stay unchanged.
 3. Reply with a listed number to choose an installed agent: OpenCode, Codex, or Claude Code. `/agent 1` also works.
 4. Model selection starts with **Backend default**, when supported, then provider groups such as **View OpenAI / Codex models**, **View Claude models**, and **View Free models**. Select a provider/category to receive its **full available model list**, with no pagination. This also applies when only one provider is available. Variants appear only after selecting a model that has them, as a separate full list. Use `back` to return to the preceding model menu. Long lists use the existing encrypted message-size limit and are delivered in consecutive messages without dropping options. `/model 2` also works. A default-only catalogue shows just its default choice. Older saved flat menus keep their original numbering and pagination until you start a fresh selection.
 5. The complete preview shows the workspace destination, full folder path, agent, model, and whether the folder exists or will be created. It says **Confirm within ten minutes**. Reply `confirm`, `yes` or `y`, or type the displayed **repository folder name**, not the workspace label. For `tools/repo.v2` inside workspace `Main`, type `repo.v2`, not `Main`. Reply `0` to cancel. A wrong name stays within confirmation and creates nothing. Destination workspace renames require a fresh preview and confirmation. After expiry, the next plain reply closes the confirmation and reports expiry. Later messages follow normal chat routing. `/new confirm` remains supported, including for a repository folder named `0`.
 
 Workspace selection does not create anything. If the existing-workspace list is unavailable, the menu says so: retry with `/new`, or explicitly choose a new workspace. Before launch, the plugin checks the selected existing workspace again. If it was renamed, a new confirmation is required. If it is gone or unavailable, launch stops without creating a folder or using another workspace. There is no automatic fallback to a new workspace.
+
+Guided `/new` checks existing folders for conversations reported by Herdr or retained in codr's mappings. One match directs you to its existing White Noise chat; several matches show a numbered conversation menu. No chat mappings, histories, or queues are replaced. A closed or changed conversation requires local reattachment, not a new session. If Herdr cannot be checked, setup stops rather than assuming no conversation exists. Native histories never observed by Herdr/codr are not searched. The check runs again before a new launch is confirmed. Explicit fresh-session commands such as `/agent` retain their existing behavior.
 
 No long code is needed. Short answers apply to the current menu in this chat, which survives restarts and expires after ten minutes. All editable setup menus and pending confirmations offer **0. Cancel**. While a selection menu is open, numbers belong to that menu, not to an agent's pending decision. While the folder prompt is open, plain text is treated as a folder name; while a launch confirmation is waiting, it is treated as a confirmation name. Slash commands such as `/help` still work. To answer the agent instead, cancel setup first with `0` or `/new cancel`. Ordinary text and numbers without a setup menu keep their existing behavior. Explicit coded commands remain supported for compatibility and reject stale codes. `/new cancel CODE` cancels a particular launch, and `/new status` inspects the last launch. Starting a new configuration invalidates the previous unconfirmed launch. Uncertain or in-progress operations still require local inspection and cannot be cleared by `0`.
 
@@ -127,13 +129,13 @@ Startup no longer opens the popup automatically. Use the shortcut or action when
 
 - **At desk:** suppress outgoing chat messages while the bridge continues to listen for your phone. New group invitations and chat-name/description updates remain active.
 - **Away:** forward progress and final replies from every mapped session.
-- In automatic mode, a new message from the configured phone to any mapped group switches **all sessions** to Away, except `/help`, `/recent`, sync/queue controls, `/cancel`, and `/new` launch controls. Already processed messages, your bridge's own messages, and other senders do not switch modes.
+- In automatic mode, a new message from the configured phone to any mapped group switches **all sessions** to Away, except `/help`, `/recent`, `/last`, sync/queue controls, `/cancel`, and `/new` launch controls. Already processed messages, your bridge's own messages, and other senders do not switch modes.
 
 To resume forwarding without asking an agent to do work, send `unmute` or `/unmute` by itself in any linked White Noise chat. **codr** consumes the command and confirms in that chat after the normal history checkpoint. It works in busy, blocked, and ended conversations. It does not start a turn or answer a pending decision. Recognition ignores capitalization and surrounding whitespace; longer messages, attachment captions, voice transcripts, and truncated input are not commands. Only the configured phone owner can use it. Muted history is not replayed, and duplicate deliveries cannot unmute again after a later mute.
 
 In the popup, enter **1** for At desk, **2** for Away, **3** to toggle, or **q** to close. Press Enter after your choice. Muting applies to every mapped session; it does not stop the transport or change your groups.
 
-The selected mode survives restarts. Mode changes discard the automatic outgoing backlog, but preserve explicitly requested `/help` and `/recent` replies and the edit targets of already-attempted progress messages. Muting pauses those edits; resuming reuses the same progress bubble or finishes it as `done` if a completed reply was recorded while muted. Before Away becomes active, the bridge checkpoints replies for all active sessions. The popup shows **Away requested** while a transcript checkpoint is pending. Completed muted turns remain suppressed even if their transcript records arrive late. An operation already submitted to MDK can still arrive after you select At desk.
+The selected mode survives restarts. Mode changes discard the automatic outgoing backlog, but preserve explicitly requested `/help`, `/recent` and `/last` replies and the edit targets of already-attempted progress messages. Muting pauses those edits; resuming reuses the same progress bubble or finishes it as `done` if a completed reply was recorded while muted. Before Away becomes active, the bridge checkpoints replies for all active sessions. The popup shows **Away requested** while a transcript checkpoint is pending. Completed muted turns remain suppressed even if their transcript records arrive late. An operation already submitted to MDK can still arrive after you select At desk.
 
 Phone sync overrides are persistent: `/sync on` means **Always on**, `/sync off` means **Always off**, and `/sync auto` restores normal automatic behavior. Local activity, phone wake-up, and the At desk/Away controls do not change a forced mode. `/unmute` clears it and requests automatic sync with all chats unmuted. `/help` and bare `/sync` show the current mode. Always off suppresses automatic outgoing messages but does not hold new phone text from reaching the agent; explicit control replies and `/recent` still work. Returning to an enabled state retains the history checkpoint before outgoing sync resumes.
 
@@ -156,7 +158,8 @@ Send these as standalone text from the configured owner's account in a linked ch
 | --- | --- |
 | `/help` | List commands and the current sync mode in this chat only. |
 | `/update` | Check stable ngit releases and offer a chat-bound confirmation before updating the managed bridge worker. |
-| `/recent` | Get newest 3 of all active <1h: send up to three conversation text messages, labelled You or Agent with section breaks, to each chat active in the past hour. Does not resume sync. |
+| `/recent [hours]` | Send up to three conversation text messages, labelled You or Agent with section breaks, to each chat active in the past hour or the specified number of hours. `/recent2` and `/recent 2` both select two hours. Does not resume sync. |
+| `/last [count]` | Replay the newest conversation message in this agent chat, without changing sync. `/last4` and `/last 4` replay the newest four; counts 1–100 are accepted. |
 | `/sync auto\|on\|off` | Set a persistent sync mode. Bare `/sync` shows the current mode and choices. |
 | `/status` | Show connection, agent state and pending delivery count. Resumes sync in automatic mode; a forced-off override remains off until `/unmute` or a new sync-mode choice. |
 | `/queue` | Show this chat's waiting prompt count and in-flight or uncertain submission state without changing mute settings. |
@@ -169,7 +172,28 @@ Control replies wait until the host clock passes the latest owner input's whole-
 
 `/help` and `/recent` do not prompt agents, answer questions, create groups, or change sync mode. They work while muted or **herdr** is disconnected. Recently ended mapped conversations can participate in catch-up. The command chat receives a count of queued conversations and unavailable readers; a queued send does not prove phone receipt. Retrying the same inbound event does not resend the catch-up. A new `/recent` request skips unchanged source messages already confirmed sent or queued by the bridge, including previous catch-ups and ordinary assistant forwarding.
 
-The cutoff is one hour before the `/recent` request and is fixed for the whole batch. For example, `/recent` at 16:00 selects chats active since 15:00. The last confirmed outgoing-message clock is retained for delivery accounting, but no longer extends this activity window.
+The cutoff defaults to one hour before the `/recent` request and is fixed for the whole batch. For example, `/recent` at 16:00 selects chats active since 15:00; `/recent4` or `/recent 4` selects chats active since 12:00. The number is a positive whole number of hours, not a message count. Zero, negative, fractional, extra or overflowing arguments receive usage guidance without prompting an agent. The last confirmed outgoing-message clock is retained for delivery accounting, but does not extend this activity window.
+
+`/last` reads only the current chat's saved native conversation, including You and
+Agent text, not tool output or command acknowledgements. It sends available
+messages in source order, with sender and source-date labels. It has no activity
+cutoff and deliberately includes already delivered text. A fresh request can
+replay the same text; replaying the same inbound event does not duplicate it.
+Replay replies do not consume automatic delivery keys, unmute chats, change a
+forced sync mode, submit an agent prompt, or answer a pending question. They use
+the manual outbox and can be delivered while muted. The control chat has no native
+conversation and receives guidance to use an agent chat instead. Empty or
+unavailable history receives a short notice. Use complete standalone text without
+attachments or truncation; zero, fractional, extra or out-of-range counts receive
+usage guidance. At most the newest 100 conversation messages are retained for
+replay, while `/recent` continues to use its existing three-message excerpt.
+
+Each excerpt message has a **You** or **Agent** label followed by its source date
+and time, for example `2026-10-28 12:13:14 UTC`. OpenCode uses its message creation
+clock, with completion time as a fallback. Codex and Claude use their transcript
+timestamps. Dates are normalized to UTC. Missing or invalid timestamps show
+`Date unknown`; neither file modification time nor the current time is used as a
+replacement. Date labels do not change source identities or resend known messages.
 
 Delivery accounting survives restarts and mode changes. Older installations without a confirmation clock recover the newest available own chat message from retained MDK history, paging past incoming messages when needed. Unavailable readers are reported without blocking other chats' excerpts. MDK confirmation does not prove receipt on the phone.
 
@@ -380,6 +404,11 @@ Existing history is baselined when a group is first attached or reply support is
 
 ## Roadmap
 
+- [ ] Place a fresh Working bubble below a queued phone message only after confirmed agent submission, not merely after receipt or queue acceptance.
+- [ ] Evaluate one codr executable and service with the MDK connector embedded, while keeping messaging and agent-control modules separate.
+  - Compare reliability, security, upstream support, installation, updates, testing and operational complexity before choosing the process layout. Reuse MDK rather than rewrite messaging or cryptography.
+  - Let desktop/SSH access use the common agent-control core without requiring a White Noise group. Keep slow messaging operations from blocking desktop control.
+  - Preserve existing accounts, chats, native sessions and accepted deliveries. Verify reconnects, duplicate prevention and failed-update rollback before replacing the current two-process setup.
 - [x] Add structured final replies for existing Codex sessions.
 - [x] Add structured final replies for existing Claude Code sessions.
 - [ ] Add structured final replies for further **herdr**-supported agents.
@@ -592,3 +621,19 @@ The phone's `1` reply continues the question fixture, not a live OpenCode dialog
 - [Phonon-2](https://github.com/fermionresearch/phonon): the local speech model and Fermion runtime used for audio transcription. Its model weights and runtime remain upstream software.
 
 **codr** provides the routing bridge between these systems. The messaging protocol, encryption, transport, mobile app, and agent runtimes come from the upstream projects above.
+# Non-owning OpenCode V2 polling
+
+Set `opencode_service_file` to the local V2 server registration file, for example
+`/home/YOUR_USER/.local/state/opencode/service.json`. This selects authenticated,
+loopback-only HTTP reads instead of CLI exports for bridge snapshots and history.
+The bridge does not start, stop, replace, or write the server registration. Failed
+reads retry through the normal bridge poll loop, without a CLI fallback. Start or
+recover the service through its normal owner when necessary.
+
+The reader checks a bounded durable log watermark. Unchanged history is reused;
+changed history is rebuilt from an export. Pending forms and permissions are read
+separately on each snapshot because they need not share that durable log. Cursor
+and snapshot updates are committed only after all reads succeed. Cache state is
+memory-only; restarting the bridge rebuilds it without changing delivery keys.
+`opencode_service_file` takes precedence over the optional legacy `opencode_db`.
+Other CLI actions, such as submitting a reply, still use `opencode_bin`.

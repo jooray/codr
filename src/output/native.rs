@@ -27,10 +27,18 @@ pub fn session_id(value: &str) -> Result<String> {
         .to_string())
 }
 
+/// A valid session has not written a transcript yet.
+#[derive(Debug, thiserror::Error)]
+#[error("Native transcript has not been written yet")]
+pub struct NotWritten;
+
 pub fn find(roots: &[(PathBuf, usize)], matches: impl Fn(&str) -> bool) -> Result<PathBuf> {
     let mut found = Vec::new();
     for (root, depth) in roots {
         scan(root, *depth, &matches, &mut found)?;
+    }
+    if found.is_empty() {
+        return Err(NotWritten.into());
     }
     ensure!(
         found.len() == 1,

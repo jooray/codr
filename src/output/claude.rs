@@ -13,6 +13,7 @@ use std::{
 
 struct Row {
     id: String,
+    timestamp: Option<i64>,
     parent: Option<String>,
     kind: String,
     same_session: bool,
@@ -61,6 +62,7 @@ fn truthy(value: &Value) -> bool {
 #[derive(Default)]
 struct Response {
     message: Option<String>,
+    timestamp: Option<i64>,
     last_row: String,
     text: Vec<String>,
     complete: bool,
@@ -76,7 +78,13 @@ impl Response {
         if self.complete {
             let text = self.text.join("\n");
             if !text.trim().is_empty() {
-                super::record_message(recent, "Agent", &format!("claude:{}", self.last_row), &text);
+                super::record_message(
+                    recent,
+                    "Agent",
+                    &format!("claude:{}", self.last_row),
+                    &text,
+                    self.timestamp,
+                );
                 replies.push(FinalMessage {
                     id: format!("claude:{}", self.last_row),
                     text,
@@ -99,7 +107,14 @@ pub(super) fn snapshot(
     let session = native::session_id(session)?;
     let name = format!("{session}.jsonl");
     // Only project roots, never nested session/subagent directories. This also handles custom project keys.
-    let path = native::find(&[(home.join("projects"), 1)], |candidate| candidate == name)?;
+    // Claude writes the first transcript only after receiving its first prompt.
+    // Adapted from Juraj Bednar's PR #18; scan and ambiguity errors still fail.
+    let path = match native::find(&[(home.join("projects"), 1)], |candidate| candidate == name) {
+        Err(error) if error.is::<native::NotWritten>() => {
+            return Ok((super::SessionHistory::default(), None));
+        }
+        found => found?,
+    };
     let mut transcript = TRANSCRIPTS
         .lock()
         .unwrap()
@@ -186,6 +201,7 @@ impl Transcript {
             };
             let mut row = Row {
                 id: id.into(),
+                timestamp: super::source_timestamp(&value["timestamp"]),
                 parent: value["parentUuid"].as_str().map(str::to_owned),
                 kind: kind.into(),
                 same_session,
@@ -322,6 +338,7 @@ impl Transcript {
                     "You",
                     &format!("claude:{}", row.id),
                     &row.input_text,
+                    row.timestamp,
                 );
                 latest_turn = Some(format!("claude:{}", row.id));
                 turns.insert(latest_turn.clone().unwrap());
@@ -352,6 +369,7 @@ impl Transcript {
                 };
             }
             response.last_row = row.id.clone();
+            response.timestamp = response.timestamp.or(row.timestamp);
             response.text.extend(row.text.iter().cloned());
             // Duration/system markers and null stop reasons do not prove a successful final answer.
             response.complete = row.stop.as_deref() == Some("end_turn");
@@ -364,7 +382,9 @@ impl Transcript {
                 latest_turn,
                 turns: turns.into_iter().collect(),
                 user_inputs,
-                recent_messages,
+                recent_messages: recent_messages[recent_messages.len().saturating_sub(3)..]
+                    .to_vec(),
+                last_messages: recent_messages,
             },
             tasks.latest,
         ))

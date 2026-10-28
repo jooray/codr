@@ -33,6 +33,7 @@ fn config(dir: &std::path::Path) -> BridgeConfig {
         portr_enabled: false,
         control_chat: false,
         opencode_bin: dir.join("opencode"),
+        opencode_service_file: None,
         opencode_db: None,
         codex_home: dir.join("codex"),
         claude_home: dir.join("claude"),
@@ -337,6 +338,57 @@ async fn phone_followups_are_submitted_while_working_without_interrupting_or_clo
         saved.state.mappings[&observed.key()]
             .prompt_queue
             .is_empty()
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn cancel_clears_stale_questions_even_when_idle_and_persists_the_reset() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let observed = agent();
+    let calls = Arc::new(Mutex::new(vec![]));
+    let server = peer_for_agent(&config.herdr_socket, false, calls.clone(), observed.clone()).await;
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    let mut mapping = activity_mapping(observed.clone(), &"bb".repeat(16));
+    mapping.decision = Some(serde_json::from_value(json!({
+        "id":"stale-question", "form_id":"stale-form", "questions":[{"question":"Choose?", "options":[{"label":"Yes"}]}],
+        "announced":true
+    })).unwrap());
+    mapping.permission =
+        Some(serde_json::from_value(json!({"request":{"id":"stale-permission"}})).unwrap());
+    mapping.decision_refresh_pending = true;
+    bridge.state.mappings.insert(observed.key(), mapping);
+    bridge.save().unwrap();
+    let mut message = inbound(HEX, "reset-idle");
+    message["message"]["text"] = json!("/cancel");
+    bridge.inbound(&message).await.unwrap();
+    drop(bridge);
+    let mut bridge = Bridge::open(config).unwrap();
+    let mapping = &bridge.state.mappings[&observed.key()];
+    assert!(mapping.decision.is_none());
+    assert!(mapping.permission.is_none());
+    assert!(!mapping.decision_refresh_pending);
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|c| c["method"] != "agent.interrupt")
+    );
+    bridge.herdr_available = true;
+    bridge.agents.insert(observed.key(), observed.clone());
+    let mut next = inbound(HEX, "after-reset");
+    next["message"]["text"] = json!("Hello again");
+    bridge.inbound(&next).await.unwrap();
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c["method"] == "agent.prompt")
+            .count(),
+        1
     );
     server.abort();
 }
@@ -2183,10 +2235,8 @@ async fn shortcut_sync_sends_recent_excerpts_to_their_own_chats_without_unmuting
             .any(|c| { c["text"].as_str().unwrap().contains("1 unavailable") })
     );
     assert!(sent.iter().any(|c| {
-        c["text"]
-            .as_str()
-            .unwrap()
-            .contains("**You:**\nLocal prompt")
+        c["text"].as_str().unwrap().contains("**You:**\n_")
+            && c["text"].as_str().unwrap().contains("\nLocal prompt")
     }));
     let count = sent.len();
     let summary = sent
@@ -2245,7 +2295,17 @@ async fn shortcut_sync_sends_last_three_conversation_messages_with_speaker_label
     let mut event = inbound(HEX, "three-message-sync");
     event["message"]["text"] = json!("/recent");
     bridge.inbound(&event).await.unwrap();
-    assert!(bridge.state.outbox.iter().any(|item| item.manual && item.text == "**Agent:**\nEarlier answer\n\n---\n\n**You:**\nFollow-up question\n\n---\n\n**Agent:**\nLatest answer"));
+    let last_date = chrono::DateTime::from_timestamp(
+        data["messages"][4]["info"]["time"]["completed"]
+            .as_u64()
+            .unwrap() as i64
+            / 1000,
+        0,
+    )
+    .unwrap()
+    .format("%Y-%m-%d %H:%M:%S UTC")
+    .to_string();
+    assert!(bridge.state.outbox.iter().any(|item| item.manual && item.text == format!("**Agent:**\n_1970-01-01 00:00:00 UTC_\nEarlier answer\n\n---\n\n**You:**\n_Date unknown_\nFollow-up question\n\n---\n\n**Agent:**\n_{last_date}_\nLatest answer")));
     assert!(!bridge.state.forwarding_enabled);
     let batch = bridge.state.outbox.clone();
     drop(bridge);
@@ -2273,7 +2333,7 @@ async fn shortcut_help_is_a_short_command_list() {
     }
     assert_eq!(
         help,
-        "# codr commands\n\n### General\n\n**`/help`**  \nShow commands\n\n**`/status`**  \nConnection, state, queue and unmute\n\n**`/recent`**  \nGet newest 3 of all active <1h\n\n**`/update`**  \nCheck ngit for a stable bridge update; confirm before installing\n\n### Projects & Agents\n\n**`/new`**  \nSet up a project\n\n**`/agent`**  \nChoose agent (separate chat)\n\n**`/model`**  \nChoose model\n\n### Tasks\n\n**`/queue`**  \nView pending deliveries\n\n**`/cancel`**  \nInterrupt the current task\n\n### Sync\n\n**`/unmute`**  \nUnmute all chats and return to automatic sync\n\n**`/sync auto|on|off`**  \nSet persistent sync mode\nCurrent sync mode: Automatic\n\nCommands accept unambiguous prefixes (/n, /st, /sy). In the control chat the leading / is optional."
+        "# codr commands\n\n### General\n\n**`/help`**  \nShow commands\n\n**`/status`**  \nConnection, state, queue and unmute\n\n**`/last [count]`**  \nReplay the newest message in this chat without unmuting. Use /last4 or /last 4 for four; count 1–100.\n\n**`/recent [hours]`**  \nGet newest 3 messages per chat active in the past hour. Use /recent2 or /recent 2 for two hours.\n\n**`/update`**  \nCheck ngit for a stable bridge update; confirm before installing\n\n### Projects & Agents\n\n**`/new`**  \nSet up a project\n\n**`/agent`**  \nChoose agent (separate chat)\n\n**`/model`**  \nChoose model\n\n### Tasks\n\n**`/queue`**  \nView pending deliveries\n\n**`/cancel`**  \nInterrupt the current task\n\n### Sync\n\n**`/unmute`**  \nUnmute all chats and return to automatic sync\n\n**`/sync auto|on|off`**  \nSet persistent sync mode\nCurrent sync mode: Automatic\n\nCommands accept unambiguous prefixes (/n, /st, /sy). In the control chat the leading / is optional."
     );
 }
 
@@ -2312,7 +2372,8 @@ async fn shortcut_sync_includes_a_recent_user_message_without_an_assistant_reply
             .state
             .outbox
             .iter()
-            .any(|item| item.text == "**You:**\nA prompt still awaiting its answer")
+            .any(|item| item.text.starts_with("**You:**\n_")
+                && item.text.ends_with("\nA prompt still awaiting its answer"))
     );
 }
 
@@ -2396,7 +2457,9 @@ async fn shortcut_sync_does_not_resend_confirmed_or_pending_messages_after_resta
         .filter(|item| item.text.starts_with("**"))
         .collect();
     assert_eq!(excerpts.len(), 1);
-    assert_eq!(excerpts[0].text, "**You:**\nNew question");
+    assert!(excerpts[0].text.starts_with("**You:**\n_"));
+    assert!(excerpts[0].text.ends_with("\nNew question"));
+    assert!(!excerpts[0].text.contains("\n\n---\n\n"));
     mdk.abort();
 }
 
@@ -2438,7 +2501,7 @@ async fn shortcut_sync_skips_assistant_messages_confirmed_by_automatic_forwardin
             .state
             .outbox
             .iter()
-            .any(|item| item.text == "**You:**\nQuestion")
+            .any(|item| item.text == "**You:**\n_Date unknown_\nQuestion")
     );
     assert!(
         !bridge
@@ -2473,11 +2536,419 @@ printf '{"messages":[{"info":{"id":"reply","role":"assistant","time":{"completed
             .state
             .outbox
             .iter()
-            .any(|item| item.text == "**Agent:**\nNew during sync")
+            .any(|item| item.text.starts_with("**Agent:**\n_")
+                && item.text.ends_with("\nNew during sync"))
     );
 }
 
-/// /recent uses the current past hour, even when the persisted send clock is old.
+/// Explicit replay is local to one conversation and does not alter sync state.
+#[tokio::test]
+async fn last_replays_only_the_current_chat_without_unmuting_or_consuming_history() {
+    for (command, count) in [("/last", 1), ("/last4", 4), ("/last 4", 4), ("/LAST 20", 5)] {
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path());
+        let group = "bb".repeat(16);
+        input_history(
+            &config,
+            "ses_1",
+            &[
+                ("one", "First"),
+                ("two", "Second"),
+                ("three", "Third"),
+                ("four", "Fourth"),
+            ],
+            Some(("reply", "Fifth")),
+        );
+        input_history(
+            &config,
+            "ses_other",
+            &[("other", "Other chat private text")],
+            None,
+        );
+        let mut bridge = Bridge::open(config.clone()).unwrap();
+        let mut other = agent();
+        other.agent_session.as_mut().unwrap().value = "ses_other".into();
+        bridge
+            .state
+            .mappings
+            .insert(agent().key(), activity_mapping(agent(), &group));
+        bridge
+            .state
+            .mappings
+            .insert(other.key(), activity_mapping(other, &"cc".repeat(16)));
+        herdr_white_noise_bridge::forwarding::set_mode(
+            &config.state_path,
+            herdr_white_noise_bridge::forwarding::Mode::Off,
+        )
+        .unwrap();
+        let control_before =
+            std::fs::read(config.state_path.with_extension("forwarding.json")).ok();
+        let history = herdr_white_noise_bridge::output::read_history(
+            &config,
+            agent().agent_session.as_ref().unwrap(),
+        )
+        .await
+        .unwrap();
+        let delivered: Vec<_> = history.recent_messages.iter().map(|m| m.key()).collect();
+        bridge
+            .state
+            .delivered_messages
+            .insert(group.clone(), delivered.clone());
+        bridge.save().unwrap();
+        let mut event = inbound(HEX, "last-request");
+        event["message"]["text"] = json!(command);
+        bridge.inbound(&event).await.unwrap();
+        assert!(!bridge.state.forwarding_enabled);
+        assert_eq!(bridge.state.delivered_messages[&group], delivered);
+        assert_eq!(bridge.state.outbox.len(), 1);
+        let reply = &bridge.state.outbox[0];
+        assert_eq!(reply.group, group);
+        assert!(!reply.text.contains("Other chat private text"));
+        let expected = ["First", "Second", "Third", "Fourth", "Fifth"];
+        for (i, text) in expected.iter().enumerate() {
+            assert_eq!(
+                reply.text.contains(text),
+                i >= expected.len() - count,
+                "{command}: {text}"
+            );
+        }
+        if count > 1 {
+            assert!(reply.text.find("Fourth").unwrap() < reply.text.find("Fifth").unwrap());
+        }
+        assert_eq!(
+            std::fs::read(config.state_path.with_extension("forwarding.json")).ok(),
+            control_before
+        );
+        drop(bridge);
+        let mut bridge = Bridge::open(config).unwrap();
+        bridge.inbound(&event).await.unwrap();
+        assert_eq!(
+            bridge.state.outbox.len(),
+            1,
+            "transport replay must deduplicate"
+        );
+        event["message"]["message_id_hex"] = json!("fresh-last-request");
+        bridge.inbound(&event).await.unwrap();
+        assert_eq!(
+            bridge.state.outbox.len(),
+            2,
+            "a fresh explicit request may replay known text"
+        );
+        assert!(!bridge.state.forwarding_enabled);
+    }
+}
+
+#[tokio::test]
+async fn last_rejects_invalid_counts_and_nonstandalone_commands_without_waking() {
+    for text in [
+        "/last 0",
+        "/last0",
+        "/last -1",
+        "/last 1.5",
+        "/last 101",
+        "/last 999999999999999999999999",
+        "/last 4 extra",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path());
+        let mut bridge = Bridge::open(config.clone()).unwrap();
+        bridge
+            .state
+            .mappings
+            .insert(agent().key(), activity_mapping(agent(), &"bb".repeat(16)));
+        herdr_white_noise_bridge::forwarding::set_mode(
+            &config.state_path,
+            herdr_white_noise_bridge::forwarding::Mode::Off,
+        )
+        .unwrap();
+        let mut event = inbound(HEX, "invalid-last");
+        event["message"]["text"] = json!(text);
+        bridge.inbound(&event).await.unwrap();
+        assert!(
+            bridge.state.outbox[0].text.starts_with("Use /last"),
+            "{text}"
+        );
+        assert!(!bridge.state.forwarding_enabled);
+    }
+    for field in [
+        "text_truncated",
+        "attachments_truncated",
+        "attachments",
+        "media",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path());
+        let mut bridge = Bridge::open(config.clone()).unwrap();
+        bridge
+            .state
+            .mappings
+            .insert(agent().key(), activity_mapping(agent(), &"bb".repeat(16)));
+        let mut event = inbound(HEX, "attached-last");
+        event["message"]["text"] = json!("/last4");
+        event["message"][field] = if field.ends_with("truncated") {
+            json!(true)
+        } else {
+            json!([{"media_type":"image/png"}])
+        };
+        bridge.inbound(&event).await.unwrap();
+        assert!(bridge.state.outbox[0].text.contains("standalone"));
+    }
+}
+
+#[tokio::test]
+async fn last_reports_empty_unavailable_and_control_chats_without_agent_input() {
+    for case in ["empty", "unavailable", "control"] {
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path());
+        if case == "empty" {
+            input_history(&config, "ses_1", &[], None);
+        }
+        let mut bridge = Bridge::open(config.clone()).unwrap();
+        let mut mapping = activity_mapping(agent(), &"bb".repeat(16));
+        mapping.control = case == "control";
+        bridge.state.mappings.insert(agent().key(), mapping);
+        let mut event = inbound(HEX, "last-empty");
+        event["message"]["text"] = json!("/last");
+        bridge.inbound(&event).await.unwrap();
+        let text = &bridge.state.outbox[0].text;
+        assert!(
+            text.contains(match case {
+                "empty" => "No conversation",
+                "unavailable" => "unavailable",
+                _ => "agent chat",
+            }),
+            "{case}: {text}"
+        );
+        assert!(!bridge.state.mappings[&agent().key()].pending_prompt);
+    }
+}
+
+#[tokio::test]
+async fn last_manual_reply_is_delivered_while_sync_stays_off() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    input_history(
+        &config,
+        "ses_1",
+        &[("question", "Before")],
+        Some(("answer", "Replay this")),
+    );
+    let calls = Arc::new(Mutex::new(vec![]));
+    let mdk = peer(&config.wn_agent_socket, true, calls.clone()).await;
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge
+        .state
+        .mappings
+        .insert(agent().key(), activity_mapping(agent(), &"bb".repeat(16)));
+    herdr_white_noise_bridge::forwarding::set_mode(
+        &config.state_path,
+        herdr_white_noise_bridge::forwarding::Mode::Off,
+    )
+    .unwrap();
+    let mut event = inbound(HEX, "last-send");
+    event["message"]["text"] = json!("/last");
+    bridge.inbound(&event).await.unwrap();
+    bridge.flush().await.unwrap();
+    assert!(bridge.state.outbox.is_empty());
+    assert!(!bridge.state.forwarding_enabled);
+    assert!(calls.lock().unwrap().iter().any(|call| {
+        call["type"] == "send_final"
+            && call["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("Replay this"))
+    }));
+    mdk.abort();
+}
+
+#[tokio::test]
+async fn last_failed_save_keeps_request_retryable_and_preserves_accepted_work() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    input_history(
+        &config,
+        "ses_1",
+        &[("question", "Before")],
+        Some(("answer", "Replay this")),
+    );
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    let key = agent().key();
+    bridge
+        .state
+        .mappings
+        .insert(key.clone(), activity_mapping(agent(), &"bb".repeat(16)));
+    bridge.state.mappings.get_mut(&key).unwrap().pending_prompt = true;
+    accept_legacy_text(&mut bridge, &key, "accepted", "Keep accepted input");
+    let accepted = serde_json::to_value(&bridge.state.mappings[&key].prompt_queue).unwrap();
+    let durable = std::fs::read(&config.state_path).unwrap();
+    std::fs::remove_file(&config.state_path).unwrap();
+    std::fs::create_dir(&config.state_path).unwrap();
+    let mut event = inbound(HEX, "last-save-failure");
+    event["message"]["text"] = json!("/last");
+    assert!(bridge.inbound(&event).await.is_err());
+    assert!(bridge.state.outbox.is_empty());
+    assert!(
+        !bridge.state.mappings[&key]
+            .seen_messages
+            .iter()
+            .any(|id| id == "last-save-failure")
+    );
+    assert!(bridge.state.mappings[&key].pending_prompt);
+    assert_eq!(
+        serde_json::to_value(&bridge.state.mappings[&key].prompt_queue).unwrap(),
+        accepted
+    );
+    std::fs::remove_dir(&config.state_path).unwrap();
+    std::fs::write(&config.state_path, durable).unwrap();
+    bridge.inbound(&event).await.unwrap();
+    assert_eq!(bridge.state.outbox.len(), 1);
+    assert!(bridge.state.mappings[&key].pending_prompt);
+    assert_eq!(
+        serde_json::to_value(&bridge.state.mappings[&key].prompt_queue).unwrap(),
+        accepted
+    );
+}
+
+/// Hours change conversation eligibility, not the excerpt size or duplicate rules.
+#[tokio::test]
+async fn recent_optional_hours_select_the_window_without_changing_message_limit_or_sync() {
+    for (command, hours) in [
+        ("/recent", 1),
+        ("/recent 2", 2),
+        ("/recent2", 2),
+        ("/recent 4", 4),
+        ("/recent4", 4),
+        ("/recent 24", 24),
+        ("/recent24", 24),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path());
+        let mut bridge = Bridge::open(config.clone()).unwrap();
+        bridge.state.last_confirmed_send_at = Some(now() - 48 * 3600);
+        let cases = [
+            ("ses_1", "bb".repeat(16), 1800),
+            ("ses_2", "cc".repeat(16), 5400),
+            ("ses_3", "dd".repeat(16), 3 * 3600),
+            ("ses_4", "ee".repeat(16), 23 * 3600),
+            ("ses_5", "ff".repeat(16), 25 * 3600),
+        ];
+        for (session, group, age) in &cases {
+            let mut observed = agent();
+            observed.agent_session.as_mut().unwrap().value = (*session).into();
+            bridge
+                .state
+                .mappings
+                .insert(observed.key(), activity_mapping(observed, group));
+            input_history(
+                &config,
+                session,
+                &[("one", "First"), ("two", "Second"), ("three", "Third")],
+                Some(("reply", "Fourth")),
+            );
+            let path = config
+                .opencode_bin
+                .with_file_name(format!("{session}.json"));
+            let mut data: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            data["messages"][0]["info"]["time"] = json!({"created":(now()-age)*1000});
+            std::fs::write(path, data.to_string()).unwrap();
+        }
+        herdr_white_noise_bridge::forwarding::set(&config.state_path, false).unwrap();
+        bridge.save().unwrap();
+        let mut event = inbound(HEX, "hours-request");
+        event["message"]["text"] = json!(command);
+        bridge.inbound(&event).await.unwrap();
+        assert!(!bridge.state.forwarding_enabled);
+        for (_, group, age) in &cases {
+            let excerpts: Vec<_> = bridge
+                .state
+                .outbox
+                .iter()
+                .filter(|item| &item.group == group && item.text.starts_with("**You:**"))
+                .collect();
+            assert_eq!(
+                excerpts.len(),
+                usize::from(*age <= hours * 3600),
+                "{command}, {age}"
+            );
+            for excerpt in excerpts {
+                assert!(!excerpt.text.contains("First"));
+                assert!(
+                    excerpt.text.contains("Second")
+                        && excerpt.text.contains("Third")
+                        && excerpt.text.contains("Fourth")
+                );
+            }
+        }
+        let count = bridge
+            .state
+            .outbox
+            .iter()
+            .filter(|item| item.text.starts_with("**You:**"))
+            .count();
+        drop(bridge);
+        let mut bridge = Bridge::open(config).unwrap();
+        event["message"]["message_id_hex"] = json!("another-hours-request");
+        bridge.inbound(&event).await.unwrap();
+        assert_eq!(
+            bridge
+                .state
+                .outbox
+                .iter()
+                .filter(|item| item.text.starts_with("**You:**"))
+                .count(),
+            count
+        );
+    }
+}
+
+#[tokio::test]
+async fn recent_rejects_invalid_hours_without_prompting_or_waking_agents() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge
+        .state
+        .mappings
+        .insert(agent().key(), activity_mapping(agent(), &"bb".repeat(16)));
+    herdr_white_noise_bridge::forwarding::set(&config.state_path, false).unwrap();
+    for (i, command) in [
+        "/recent0",
+        "/recent 0",
+        "/recent -1",
+        "/recent 1.5",
+        "/recent many",
+        "/recent 2 4",
+        "/recent2 extra",
+        "/recent 18446744073709551615",
+        "/recent9999999999999999999999999",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let mut event = inbound(HEX, &format!("invalid-hours-{i}"));
+        event["message"]["text"] = json!(command);
+        bridge.inbound(&event).await.unwrap();
+        assert!(
+            !herdr_white_noise_bridge::forwarding::load(&config.state_path)
+                .unwrap()
+                .enabled
+        );
+        assert!(
+            bridge.state.mappings[&agent().key()]
+                .prompt_queue
+                .is_empty()
+        );
+    }
+    assert_eq!(
+        bridge
+            .state
+            .outbox
+            .iter()
+            .filter(|item| item.text.starts_with("Use /recent"))
+            .count(),
+        9
+    );
+}
+
 #[tokio::test]
 async fn recent_uses_the_past_hour_independently_of_the_persisted_send_clock() {
     let root = tempfile::tempdir().unwrap();
@@ -2888,7 +3359,7 @@ async fn shortcut_delivery_retries_the_same_idempotency_key_without_resending_hi
 /// Only complete standalone text is a shortcut, never a caption or truncated message.
 #[tokio::test]
 async fn shortcut_commands_reject_captions_truncation_and_longer_text() {
-    for command in ["/help", "/recent"] {
+    for command in ["/help", "/recent", "/recent2", "/recent 2"] {
         for invalid in [
             "caption",
             "media",
@@ -2910,6 +3381,17 @@ async fn shortcut_commands_reject_captions_truncation_and_longer_text() {
                 "media" => event["message"]["media"] = json!([{"media_type":"audio/ogg"}]),
                 "prose" => event["message"]["text"] = json!(format!("{command} please")),
                 field => event["message"][field] = json!(true),
+            }
+            if command != "/help" && invalid == "prose" {
+                bridge.inbound(&event).await.unwrap();
+                assert!(
+                    bridge
+                        .state
+                        .outbox
+                        .iter()
+                        .any(|item| item.text.starts_with("Use /recent"))
+                );
+                continue;
             }
             assert!(bridge.inbound(&event).await.is_err());
             assert!(bridge.state.outbox.is_empty());
@@ -9047,6 +9529,16 @@ async fn muted_new_sessions_are_invited_once_without_sending_messages() {
         reopened.reconcile(vec![agent()]).await.unwrap();
         reopened.flush().await.unwrap();
         let calls = calls.lock().unwrap();
+        let invitation = calls
+            .iter()
+            .find(|call| call["type"] == "group_create_with_admins")
+            .unwrap();
+        let description = invitation["description"].as_str().unwrap();
+        assert!(description.contains(&format!(
+            "Hi! This is your chat with {}.",
+            agent().group_name()
+        )));
+        assert!(description.contains("Send /help in any Codr chat to see available commands."));
         assert_eq!(
             calls
                 .iter()
@@ -9084,8 +9576,9 @@ async fn introduction_messages_use_the_current_agent_label() {
         }
         bridge.reconcile(vec![observed.clone()]).await.unwrap();
         let name = observed.group_name_with_suffix(suffix);
-        let greeting =
-            format!("Connected to {name}.\n\nType /help from anywhere to view commands.");
+        let greeting = format!(
+            "Hi! This is your chat with {name}.\n\nSend /help in any Codr chat to see available commands."
+        );
         assert!(bridge.state.outbox.iter().any(|item| item.text == greeting));
         assert!(
             bridge
@@ -9621,6 +10114,14 @@ async fn forwarding_reset_does_not_reannounce_an_unchanged_blocked_context() {
                 &[("prior-input", "Prior task")],
                 Some(("prior-reply", "Prior answer")),
             );
+            // Keep the fixture slower than the former 20 x 10 ms observation
+            // window, as can happen when full-binary CI runs contend for I/O.
+            let script = std::fs::read_to_string(&config.opencode_bin).unwrap();
+            std::fs::write(
+                &config.opencode_bin,
+                script.replacen("#!/bin/sh\n", "#!/bin/sh\nsleep 0.3\n", 1),
+            )
+            .unwrap();
             let mut bridge = Bridge::open(config.clone()).unwrap();
             let mut blocked = agent();
             blocked.agent_status = "blocked".into();
@@ -9688,10 +10189,28 @@ async fn forwarding_reset_does_not_reannounce_an_unchanged_blocked_context() {
                 "muted blocks must not consume an announcement"
             );
             herdr_white_noise_bridge::forwarding::set(&config.state_path, true).unwrap();
-            for _ in 0..20 {
+            for _ in 0..1000 {
                 let _ = bridge.poll_sessions(vec![blocked.clone()]).await;
+                // Wait for the asynchronous checkpoint and blocked-context read,
+                // not an assumed CLI completion time under CI contention.
+                if bridge.state.forwarding_enabled
+                    && !bridge.state.forwarding_resume_pending
+                    && bridge.state.mappings[&blocked.key()].blocked_context_seq
+                        == Some(blocked.state_change_seq)
+                {
+                    break;
+                }
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
+            assert!(
+                bridge.state.forwarding_enabled && !bridge.state.forwarding_resume_pending,
+                "forwarding checkpoint must complete before checking delivery"
+            );
+            assert_eq!(
+                bridge.state.mappings[&blocked.key()].blocked_context_seq,
+                Some(blocked.state_change_seq),
+                "blocked context must finish refreshing"
+            );
             assert!(
                 announced(&bridge) != delivered,
                 "mute/wake must retry only an undelivered blocked notice"

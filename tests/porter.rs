@@ -22,6 +22,7 @@ fn config(dir: &Path) -> BridgeConfig {
         portr_enabled: false,
         control_chat: false,
         opencode_bin: dir.join("opencode"),
+        opencode_service_file: None,
         opencode_db: None,
         codex_home: dir.join("codex"),
         claude_home: dir.join("claude"),

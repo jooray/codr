@@ -6,8 +6,8 @@ pub(crate) enum Normalized {
 }
 
 const COMMANDS: &[&str] = &[
-    "agent", "allow", "answer", "cancel", "help", "model", "new", "queue", "recent", "reject",
-    "status", "sync", "unmute", "update",
+    "agent", "allow", "answer", "cancel", "help", "last", "model", "new", "queue", "recent",
+    "reject", "status", "sync", "unmute", "update",
 ];
 
 pub(crate) fn normalize(text: &str, control: bool, menu_open: bool) -> Normalized {
@@ -22,6 +22,17 @@ pub(crate) fn normalize(text: &str, control: bool, menu_open: bool) -> Normalize
         return Normalized::Text(text.to_owned());
     }
     let lower = first.to_ascii_lowercase();
+    for command in ["recent", "last"] {
+        if let Some(number) = lower
+            .strip_prefix(command)
+            .filter(|number| !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()))
+        {
+            return Normalized::Text(format!(
+                "/{command} {number}{}",
+                body.strip_prefix(first).unwrap_or("")
+            ));
+        }
+    }
     let matches: Vec<&'static str> =
         if let Some(exact) = COMMANDS.iter().copied().find(|command| *command == lower) {
             vec![exact]
@@ -70,6 +81,35 @@ mod tests {
         assert_eq!(text("/N", false, false), "/new");
         assert_eq!(text("/StAtUs", false, false), "/status");
         assert_eq!(text("NeW", true, false), "/new");
+    }
+
+    #[test]
+    fn recent_hours_accept_compact_and_spaced_forms() {
+        for control in [false, true] {
+            for hours in ["2", "4", "24"] {
+                let expected = format!("/recent {hours}");
+                assert_eq!(text(&format!("/recent{hours}"), control, false), expected);
+                assert_eq!(text(&format!("/recent {hours}"), control, false), expected);
+            }
+        }
+        assert_eq!(text("recent24", true, false), "/recent 24");
+        assert_eq!(text("/ReCeNt2", false, false), "/recent 2");
+        assert_eq!(text("recent2", false, false), "recent2");
+        assert_eq!(text("recent2", true, true), "recent2");
+        assert_eq!(text("/recent2 extra", false, false), "/recent 2 extra");
+        assert_eq!(text("/recently", false, false), "/recently");
+    }
+
+    #[test]
+    fn last_counts_normalize_without_rewriting_menu_or_ordinary_input() {
+        for command in ["/last4", "/last 4", "/LAST4", "/l 4"] {
+            assert_eq!(text(command, false, false), "/last 4");
+        }
+        assert_eq!(text("last4", true, false), "/last 4");
+        assert_eq!(text("l 4", true, false), "/last 4");
+        assert_eq!(text("last4", false, false), "last4");
+        assert_eq!(text("last4", true, true), "last4");
+        assert_eq!(text("/lasting", false, false), "/lasting");
     }
 
     #[test]

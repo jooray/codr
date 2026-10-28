@@ -1,10 +1,72 @@
 # Changelog
 
-## Unreleased
+## [0.9.0] - Unreleased
+
+Release preparation is in progress. See the [draft release notes](docs/releases/0.9.0.md)
+and [readiness checklist](docs/releases/0.9.0-readiness.md). No 0.9.0 build has been published.
+
+### Added
+
+- Folder menus accept case-insensitive `ls <part>` filtering, adapted from Juraj
+  Bednar's [PR #17](https://github.com/tidley/codr/pull/17). Matching folders keep
+  the existing 200-item pages and numbered selection. Bare `ls` clears the filter
+  and refreshes page one; filtered lists survive restart without changing launch
+   safety checks. Its truncation and 0.8.1 version changes are not included;
+   the shared export-retry contribution is adapted separately with corrections.
+- `/last` replays the newest conversation message in the current chat without
+  unmuting or prompting its agent. `/last4` and `/last 4` replay the newest four
+  messages in source order. Counts from 1 to 100 are supported, including text
+  already delivered. Repeated transport events remain deduplicated; a new explicit
+  request can replay the same text again. Other chats and delivery records stay unchanged.
+
+### Changed
+
+- Optional `opencode_service_file` selects non-owning V2 HTTP polling. Failed
+  reads never start or replace the shared server. A durable log watermark reuses
+  unchanged history; forms and permissions remain separately refreshed. Changed
+  histories still use a bounded full export. The local mitigation preserved the
+  shared server and connector; that deployment did not install the separate OpenCode
+  recovery patch.
+- `/recent` catch-up messages include the original source date and time in UTC
+  alongside the You/Agent labels. OpenCode, Codex and Claude readers preserve
+  message timestamps. Missing or invalid dates are marked unknown, and existing
+  duplicate protection is unchanged.
+- `/recent` accepts an optional lookback in hours, with or without a space:
+  `/recent2` and `/recent 2` both select the past two hours. The default remains
+  one hour, with at most three messages per eligible chat and existing duplicate
+  protection. Invalid hour arguments receive usage guidance instead of prompting
+  an agent.
+- Session invitations and first chat messages identify the project and explain
+  that `/help` works in any Codr chat. Invitation descriptions include this
+  guidance even when automatic messages are muted.
+- `/cancel` now performs a soft reset for the current chat: clear cached questions,
+  permission cards, pending setup/model menus and update offers, even when the
+  agent is idle or the session has ended. Interrupt the current verified active
+  agent without affecting other sessions. Preserve chat history, accepted
+  deliveries and records of uncertain external operations.
 
 ### Fixed
 
-- On macOS, retry a connector or worker bootstrap once when launchd refuses it right after a bootout (`Bootstrap failed: 5: Input/output error`), and wait up to 90 s for a job that launchd is still spawning (`state = xpcproxy`, seen on the first launch of a new executable). Setup's connector upgrade no longer rolls back a working upgrade because of either. A job that is not spawning still fails after 15 s.
+- Fresh Claude sessions read as empty until the first transcript is written,
+  allowing initial chat setup to proceed. Invalid session IDs, ambiguous files
+  and scan errors still fail. Adapted from Juraj Bednar's PR #18.
+- CLI export fallback retries only incomplete JSON, at most three times per API
+  shape. Syntax/schema errors and refused commands are not retried on that shape.
+  Exhausted incomplete reads retain their diagnostic across an unsupported API
+  fallback. Adapted from Juraj Bednar's shared `afe4f38` contribution; configured
+  non-owning HTTP observation still cannot fall back to the managed CLI.
+- Recurring bridge log lines are throttled for ten minutes with repeat counts.
+  The 256-line cache evicts its oldest entry rather than hiding a new error.
+  Adapted from Juraj Bednar's PR #19. Evicted entries can print again early.
+- Retain the already merged PR #16 launchd bootstrap retry and slow-first-spawn
+  handling in local release preparation, preserving unrelated service changes.
+- The mute/wake regression waits for asynchronous checkpoint/context completion
+  instead of assuming transcript reads finish within 200 ms. A deliberately slow
+  fixture covers the race without changing runtime forwarding behavior.
+- The bridge's optional V2 service reader cannot enter managed-server recovery
+  when a history, form or permission read fails. It retries observation without
+  clearing pending prompts or changing delivery identities. This addresses the
+  confirmed recovery-storm mechanism, not the still-unproven initial stall.
 
 ## [0.8.0] - 2026-10-25
 

@@ -72,6 +72,493 @@ async fn model_code(bridge: &mut Bridge, key: &str) -> String {
 }
 
 #[tokio::test]
+async fn folder_pages_survive_restart_refresh_and_select_existing_projects() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    api(&config);
+    let (mut bridge, key) = bridge(&config, None);
+    let (server, _) = host(&config, None).await;
+    for i in 1..=400 {
+        std::fs::create_dir(config.launch_root.join(format!("project-{i:03}"))).unwrap();
+    }
+    let existing_file = config.launch_root.join("project-400/keep.txt");
+    std::fs::write(&existing_file, "existing project contents").unwrap();
+    bridge.inbound(&event("open", "/new")).await.unwrap();
+    bridge.inbound(&event("workspace", "new")).await.unwrap();
+    bridge.inbound(&event("folders", "ls")).await.unwrap();
+    assert_eq!(
+        bridge.state.mappings[&key]
+            .launch_draft
+            .as_ref()
+            .unwrap()
+            .folder_choices
+            .len(),
+        401
+    );
+    bridge.inbound(&event("next-page", "next")).await.unwrap();
+    assert_eq!(
+        bridge.state.mappings[&key]
+            .launch_draft
+            .as_ref()
+            .unwrap()
+            .page,
+        1
+    );
+
+    drop(bridge);
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge.inbound(&event("last-page", "next")).await.unwrap();
+    assert!(last(&bridge).contains("401. project-400"));
+    assert!(!last(&bridge).contains("Next page:"));
+    bridge.inbound(&event("past-end", "next")).await.unwrap();
+    assert_eq!(
+        bridge.state.mappings[&key]
+            .launch_draft
+            .as_ref()
+            .unwrap()
+            .page,
+        2
+    );
+    bridge
+        .inbound(&event("previous-page", "previous"))
+        .await
+        .unwrap();
+    assert_eq!(
+        bridge.state.mappings[&key]
+            .launch_draft
+            .as_ref()
+            .unwrap()
+            .page,
+        1
+    );
+    bridge
+        .inbound(&event("hidden-choice", "401"))
+        .await
+        .unwrap();
+    assert_eq!(
+        bridge.state.mappings[&key]
+            .launch_draft
+            .as_ref()
+            .unwrap()
+            .step,
+        herdr_white_noise_bridge::launch_flow::Step::FolderList
+    );
+    bridge.inbound(&event("refresh", "ls")).await.unwrap();
+    assert_eq!(
+        bridge.state.mappings[&key]
+            .launch_draft
+            .as_ref()
+            .unwrap()
+            .page,
+        0
+    );
+    bridge
+        .inbound(&event("first-page-previous", "previous"))
+        .await
+        .unwrap();
+    assert_eq!(
+        bridge.state.mappings[&key]
+            .launch_draft
+            .as_ref()
+            .unwrap()
+            .page,
+        0
+    );
+    bridge
+        .inbound(&event("second-again", "next"))
+        .await
+        .unwrap();
+    bridge.inbound(&event("last-again", "next")).await.unwrap();
+    bridge
+        .inbound(&event("pick-existing", "401"))
+        .await
+        .unwrap();
+    let draft = bridge.state.mappings[&key].launch_draft.as_ref().unwrap();
+    assert_eq!(
+        draft.step,
+        herdr_white_noise_bridge::launch_flow::Step::Agent
+    );
+    assert_eq!(draft.page, 0);
+    assert_eq!(
+        draft.directory.as_deref(),
+        Some(existing_file.parent().unwrap())
+    );
+    assert_eq!(
+        std::fs::read_to_string(existing_file).unwrap(),
+        "existing project contents"
+    );
+    assert!(bridge.state.mappings[&key].launch.is_none());
+    server.abort();
+}
+
+#[tokio::test]
+async fn folder_reuses_the_existing_conversation_without_starting_or_remapping() {
+    for list in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path());
+        api(&config);
+        let agent = source(&config, "opencode");
+        let (mut bridge, key) = bridge(&config, None);
+        let existing_key = agent.key();
+        let mapping = Mapping {
+            group_id_hex: Some("cc".repeat(16)),
+            group_name: Some("Existing project chat".into()),
+            agent_record: Some(agent.clone()),
+            active: true,
+            ..Mapping::default()
+        };
+        bridge
+            .state
+            .mappings
+            .insert(existing_key.clone(), mapping.clone());
+        bridge.save().unwrap();
+        let (server, calls) = host(&config, Some(agent)).await;
+        bridge.inbound(&event("open", "/new")).await.unwrap();
+        bridge.inbound(&event("workspace", "new")).await.unwrap();
+        if list {
+            bridge.inbound(&event("folders", "ls")).await.unwrap();
+        }
+        bridge
+            .inbound(&event("folder", if list { "1" } else { "existing" }))
+            .await
+            .unwrap();
+        assert!(last(&bridge).contains("Existing project chat"));
+        assert!(last(&bridge).contains("No new session"));
+        assert!(bridge.state.mappings[&key].launch_draft.is_none());
+        assert!(bridge.state.mappings[&key].launch.is_none());
+        assert_eq!(bridge.state.mappings[&existing_key], mapping);
+        assert!(calls.lock().unwrap().iter().all(|call| matches!(
+            call["method"].as_str(),
+            Some("workspace.list" | "session.snapshot" | "agent.get")
+        )));
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn folder_filter_preserves_pagination_restart_and_selection() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    api(&config);
+    let (mut bridge, key) = bridge(&config, None);
+    let (server, _) = host(&config, None).await;
+    for i in 0..405 {
+        std::fs::create_dir(config.launch_root.join(format!("Match-{i:03}"))).unwrap();
+    }
+    std::fs::create_dir(config.launch_root.join("other-folder")).unwrap();
+    let retained = config.launch_root.join("Match-404/keep.txt");
+    std::fs::write(&retained, "Keep existing contents").unwrap();
+    bridge.inbound(&event("open", "/new")).await.unwrap();
+    bridge.inbound(&event("workspace", "new")).await.unwrap();
+    bridge.inbound(&event("filter", "LS mAtCh")).await.unwrap();
+    let draft = bridge.state.mappings[&key].launch_draft.as_ref().unwrap();
+    assert_eq!(
+        draft.step,
+        herdr_white_noise_bridge::launch_flow::Step::FolderList
+    );
+    assert_eq!(draft.folder_choices.len(), 405);
+    assert!(last(&bridge).contains("page 1 of 3"));
+    assert!(!last(&bridge).contains("other-folder"));
+    bridge.inbound(&event("next", "next")).await.unwrap();
+    assert_eq!(
+        bridge.state.mappings[&key]
+            .launch_draft
+            .as_ref()
+            .unwrap()
+            .page,
+        1
+    );
+    drop(bridge);
+    let mut bridge = Bridge::open(config.clone()).unwrap();
+    bridge.inbound(&event("last-page", "next")).await.unwrap();
+    assert!(last(&bridge).contains("405. Match-404"));
+    bridge.inbound(&event("hidden-pick", "1")).await.unwrap();
+    let draft = bridge.state.mappings[&key].launch_draft.as_ref().unwrap();
+    assert_eq!(
+        draft.step,
+        herdr_white_noise_bridge::launch_flow::Step::FolderList
+    );
+    assert_eq!(draft.page, 2);
+    bridge.inbound(&event("pick", "405")).await.unwrap();
+    let draft = bridge.state.mappings[&key].launch_draft.as_ref().unwrap();
+    assert_eq!(
+        draft.step,
+        herdr_white_noise_bridge::launch_flow::Step::Agent
+    );
+    assert_eq!(draft.directory.as_deref(), retained.parent());
+    assert_eq!(
+        std::fs::read_to_string(retained).unwrap(),
+        "Keep existing contents"
+    );
+    assert!(bridge.state.mappings[&key].launch.is_none());
+    server.abort();
+}
+
+#[tokio::test]
+async fn folder_filter_clears_resets_and_accepts_literal_navigation_names() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    api(&config);
+    let (mut bridge, key) = bridge(&config, None);
+    let (server, _) = host(&config, None).await;
+    for i in 0..205 {
+        std::fs::create_dir(config.launch_root.join(format!("project-{i:03}"))).unwrap();
+    }
+    for name in ["next-project", "previous-project", "filter-project"] {
+        std::fs::create_dir(config.launch_root.join(name)).unwrap();
+    }
+    bridge.inbound(&event("open", "/new")).await.unwrap();
+    bridge.inbound(&event("workspace", "new")).await.unwrap();
+    bridge.inbound(&event("list", "ls")).await.unwrap();
+    bridge.inbound(&event("next-page", "next")).await.unwrap();
+    assert_eq!(
+        bridge.state.mappings[&key]
+            .launch_draft
+            .as_ref()
+            .unwrap()
+            .page,
+        1
+    );
+    for (id, command, expected) in [
+        ("next-name", "ls NEXT", "next-project"),
+        ("previous-name", "ls previous", "previous-project"),
+        ("filter-name", "ls filter", "filter-project"),
+    ] {
+        bridge.inbound(&event(id, command)).await.unwrap();
+        let draft = bridge.state.mappings[&key].launch_draft.as_ref().unwrap();
+        assert_eq!(draft.page, 0);
+        assert_eq!(draft.folder_choices, [expected]);
+    }
+    bridge
+        .inbound(&event("no-matches", "ls missing-name"))
+        .await
+        .unwrap();
+    assert!(
+        bridge.state.mappings[&key]
+            .launch_draft
+            .as_ref()
+            .unwrap()
+            .folder_choices
+            .is_empty()
+    );
+    assert!(last(&bridge).contains("No matching folders"));
+    bridge.inbound(&event("clear", "ls")).await.unwrap();
+    let draft = bridge.state.mappings[&key].launch_draft.as_ref().unwrap();
+    assert!(draft.folder_choices.len() > 205);
+    assert_eq!(draft.page, 0);
+    assert!(last(&bridge).contains("page 1 of 2"));
+    assert!(bridge.state.mappings[&key].launch.is_none());
+    server.abort();
+}
+
+#[tokio::test]
+async fn folder_existing_conversation_choices_survive_restart_and_reject_replacements() {
+    for replaced in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path());
+        api(&config);
+        let mut first = source(&config, "opencode");
+        first.tab_label = Some("First conversation".into());
+        let mut second = first.clone();
+        second.agent_session.as_mut().unwrap().value = "ses_second".into();
+        second.pane_id = "w1:p2".into();
+        second.terminal_id = "t2".into();
+        second.tab_label = Some("Second conversation".into());
+        let (mut bridge, key) = bridge(&config, None);
+        for (agent, name, group) in [(&first, "First chat", "cc"), (&second, "Second chat", "dd")] {
+            bridge.state.mappings.insert(
+                agent.key(),
+                Mapping {
+                    group_id_hex: Some(group.repeat(16)),
+                    group_name: Some(name.into()),
+                    agent_record: Some(agent.clone()),
+                    active: true,
+                    ..Mapping::default()
+                },
+            );
+        }
+        let workspaces = Arc::new(Mutex::new(vec![
+            json!({"workspace_id":"w1","label":"Main","snapshot_agents":[first,second]}),
+        ]));
+        let (server, calls) = host_with_workspaces(&config, None, workspaces.clone()).await;
+        bridge.inbound(&event("open", "/new")).await.unwrap();
+        bridge.inbound(&event("workspace", "new")).await.unwrap();
+        bridge.inbound(&event("folder", "existing")).await.unwrap();
+        assert!(last(&bridge).contains("Choose an existing conversation"));
+        assert!(last(&bridge).contains("First conversation"));
+        assert!(last(&bridge).contains("Second conversation"));
+        bridge.save().unwrap();
+        drop(bridge);
+        let mut bridge = Bridge::open(config.clone()).unwrap();
+        if replaced {
+            workspaces.lock().unwrap()[0]["snapshot_agents"][1]["agent_session"]["value"] =
+                json!("ses_replacement");
+        }
+        bridge.inbound(&event("pick", "2")).await.unwrap();
+        if replaced {
+            assert!(last(&bridge).contains("unavailable or changed"));
+        } else {
+            assert!(last(&bridge).contains("Second chat"));
+            assert!(bridge.state.mappings[&key].launch_draft.is_none());
+        }
+        assert!(bridge.state.mappings[&key].launch.is_none());
+        assert!(calls.lock().unwrap().iter().all(|call| matches!(
+            call["method"].as_str(),
+            Some("workspace.list" | "session.snapshot" | "agent.get")
+        )));
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn folder_existing_history_is_not_replaced_when_herdr_is_unavailable() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    api(&config);
+    let (mut bridge, key) = bridge(&config, None);
+    bridge.inbound(&event("open", "/new")).await.unwrap();
+    bridge.inbound(&event("workspace", "new")).await.unwrap();
+    bridge.inbound(&event("folder", "existing")).await.unwrap();
+    assert!(last(&bridge).contains("Could not check existing conversations"));
+    assert!(bridge.state.mappings[&key].launch.is_none());
+    assert!(
+        bridge.state.mappings[&key]
+            .launch_draft
+            .as_ref()
+            .unwrap()
+            .directory
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn folder_reuses_native_identity_when_the_detected_backend_label_is_missing() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    api(&config);
+    let mut agent = source(&config, "opencode");
+    agent.agent.clear();
+    let (mut bridge, key) = bridge(&config, None);
+    let (server, calls) = host(&config, Some(agent)).await;
+    bridge.inbound(&event("open", "/new")).await.unwrap();
+    bridge.inbound(&event("workspace", "new")).await.unwrap();
+    bridge.inbound(&event("folder", "existing")).await.unwrap();
+    assert!(last(&bridge).contains("No new session"));
+    assert!(bridge.state.mappings[&key].launch_draft.is_none());
+    assert!(bridge.state.mappings[&key].launch.is_none());
+    assert!(!calls.lock().unwrap().iter().any(|call| matches!(
+        call["method"].as_str(),
+        Some("workspace.create" | "tab.create" | "agent.start")
+    )));
+    server.abort();
+}
+
+#[tokio::test]
+async fn folder_missing_directory_does_not_replace_a_retained_conversation() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    api(&config);
+    let agent = source(&config, "opencode");
+    let (mut bridge, key) = bridge(&config, None);
+    std::fs::rename(
+        config.launch_root.join("existing"),
+        config.launch_root.join("relocated"),
+    )
+    .unwrap();
+    bridge.state.mappings.insert(
+        agent.key(),
+        Mapping {
+            agent_record: Some(agent),
+            group_id_hex: Some("cc".repeat(16)),
+            active: false,
+            ..Mapping::default()
+        },
+    );
+    bridge.inbound(&event("open", "/new")).await.unwrap();
+    bridge.inbound(&event("workspace", "new")).await.unwrap();
+    bridge.inbound(&event("folder", "existing")).await.unwrap();
+    assert!(last(&bridge).contains("folder for an existing conversation is missing"));
+    assert!(bridge.state.mappings[&key].launch.is_none());
+    assert!(!config.launch_root.join("existing").exists());
+}
+
+#[tokio::test]
+async fn folder_retained_conversation_requires_reattachment_instead_of_replacement() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    api(&config);
+    let agent = source(&config, "opencode");
+    let (mut bridge, key) = bridge(&config, None);
+    bridge.state.mappings.insert(
+        agent.key(),
+        Mapping {
+            agent_record: Some(agent),
+            group_id_hex: Some("cc".repeat(16)),
+            active: false,
+            ..Mapping::default()
+        },
+    );
+    let (server, calls) = host(&config, None).await;
+    bridge.inbound(&event("open", "/new")).await.unwrap();
+    bridge.inbound(&event("workspace", "new")).await.unwrap();
+    bridge.inbound(&event("folder", "existing")).await.unwrap();
+    assert!(last(&bridge).contains("Reattach the original session"));
+    assert!(bridge.state.mappings[&key].launch.is_none());
+    assert!(!calls.lock().unwrap().iter().any(|call| matches!(
+        call["method"].as_str(),
+        Some("workspace.create" | "tab.create" | "agent.start")
+    )));
+    server.abort();
+}
+
+#[tokio::test]
+async fn folder_rechecks_for_conversations_before_confirming_a_new_session() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    api(&config);
+    let (mut bridge, key) = bridge(&config, None);
+    let workspaces = Arc::new(Mutex::new(vec![
+        json!({"workspace_id":"w1","label":"Main","snapshot_agents":[]}),
+    ]));
+    let (server, calls) = host_with_workspaces(&config, None, workspaces.clone()).await;
+    new_model_preview(&mut bridge, &key).await;
+    std::fs::create_dir(config.launch_root.join("my-idea")).unwrap();
+    let mut agent = source(&config, "opencode");
+    agent.cwd = config
+        .launch_root
+        .join("my-idea")
+        .to_string_lossy()
+        .into_owned();
+    bridge.state.mappings.insert(
+        agent.key(),
+        Mapping {
+            group_id_hex: Some("cc".repeat(16)),
+            group_name: Some("Existing chat".into()),
+            agent_record: Some(agent.clone()),
+            active: true,
+            ..Mapping::default()
+        },
+    );
+    workspaces.lock().unwrap()[0]["snapshot_agents"] = json!([agent]);
+    bridge
+        .inbound(&event("folder-changed", "confirm"))
+        .await
+        .unwrap();
+    assert!(last(&bridge).contains("folder changed"));
+    bridge.inbound(&event("confirm", "confirm")).await.unwrap();
+    assert!(last(&bridge).contains("Existing chat"));
+    assert_eq!(
+        bridge.state.mappings[&key].launch.as_ref().unwrap().phase,
+        herdr_white_noise_bridge::launch::Phase::Cancelled
+    );
+    assert!(!calls.lock().unwrap().iter().any(|call| matches!(
+        call["method"].as_str(),
+        Some("workspace.create" | "tab.create" | "agent.start")
+    )));
+    server.abort();
+}
+
+#[tokio::test]
 async fn folder_menu_words_remain_valid_one_line_workspace_names() {
     for name in ["list", "pick"] {
         let root = tempfile::tempdir().unwrap();
@@ -668,7 +1155,7 @@ async fn location_steps_are_tidy_and_new_workspace_is_the_last_numbered_choice()
     );
     assert!(last(&bridge).starts_with("[2/4] Folder name:"));
     assert!(last(&bridge).contains(
-        "Reply with your chosen folder name, or ls to list existing folders.\n\n**0. Cancel**"
+        "Reply with your chosen folder name, **`ls`** to list existing folders, or **`ls <part>`** to filter them.\n\n**0. Cancel**"
     ));
     bridge
         .inbound(&event("folder", "side-project"))
@@ -692,6 +1179,28 @@ async fn location_steps_are_tidy_and_new_workspace_is_the_last_numbered_choice()
             .all(|c| c["method"] == "workspace.list")
     );
     server.abort();
+}
+
+#[tokio::test]
+async fn slash_cancel_resets_control_chat_setup_and_pending_confirmation() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path());
+    api(&config);
+    let (mut bridge, key) = bridge(&config, None);
+    new_model_preview(&mut bridge, &key).await;
+    bridge.inbound(&event("restart", "/new")).await.unwrap();
+    assert!(bridge.state.mappings[&key].launch_draft.is_some());
+    bridge
+        .inbound(&event("soft-reset", "/cancel"))
+        .await
+        .unwrap();
+    drop(bridge);
+    let bridge = Bridge::open(config).unwrap();
+    assert!(bridge.state.mappings[&key].launch_draft.is_none());
+    assert_ne!(
+        bridge.state.mappings[&key].launch.as_ref().unwrap().phase,
+        herdr_white_noise_bridge::launch::Phase::Awaiting
+    );
 }
 
 #[tokio::test]
@@ -1130,7 +1639,7 @@ async fn short_commands_select_options_but_only_explicit_text_confirms_a_model_s
         .await
         .unwrap();
     bridge
-        .inbound(&event("folder", "/new folder existing"))
+        .inbound(&event("folder", "/new folder another-project"))
         .await
         .unwrap();
     let index = bridge.state.mappings[&key]
@@ -1406,7 +1915,30 @@ async fn host_with_workspaces(
                 "workspace.get" => {
                     json!({"type":"workspace_info","workspace":workspaces.lock().unwrap().iter().find(|w|w["workspace_id"]==request["params"]["workspace_id"]).cloned()})
                 }
-                "agent.get" => json!({"agent":source}),
+                "session.snapshot" => {
+                    let agents = workspaces
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .find_map(|w| w["snapshot_agents"].as_array().cloned())
+                        .unwrap_or_else(|| source.clone().into_iter().map(|a| json!(a)).collect());
+                    json!({"snapshot":{"agents":agents}})
+                }
+                "agent.get" => {
+                    let agents = workspaces
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .find_map(|w| w["snapshot_agents"].as_array().cloned());
+                    let agent = agents
+                        .map(|agents| {
+                            agents
+                                .into_iter()
+                                .find(|a| a["pane_id"] == request["params"]["target"])
+                        })
+                        .unwrap_or_else(|| source.clone().map(|a| json!(a)));
+                    json!({"agent":agent})
+                }
                 "workspace.create" => {
                     json!({"type":"workspace_created","workspace":{"workspace_id":"w99"},"root_pane":{"pane_id":"w99:p1","terminal_id":"t99"}})
                 }
@@ -1865,6 +2397,7 @@ async fn saved_folder_drafts_from_before_workspace_selection_keep_the_new_worksp
     let config = config(root.path());
     api(&config);
     let (mut bridge, key) = bridge(&config, None);
+    let (server, _) = host(&config, None).await;
     bridge.inbound(&event("begin", "/new")).await.unwrap();
     let code = draft_code(&bridge, &key);
     let mut draft =
@@ -1891,6 +2424,7 @@ async fn saved_folder_drafts_from_before_workspace_selection_keep_the_new_worksp
             .target_workspace
             .is_none()
     );
+    server.abort();
 }
 
 #[tokio::test]
@@ -2223,6 +2757,7 @@ async fn model_pages_and_step_codes_survive_restart_without_consuming_ordinary_m
     let config = config(root.path());
     api(&config);
     let (mut bridge, key) = bridge(&config, None);
+    let (server, _) = host(&config, None).await;
     bridge.inbound(&event("start", "/new")).await.unwrap();
     let code = draft_code(&bridge, &key);
     bridge
@@ -2295,6 +2830,7 @@ async fn model_pages_and_step_codes_survive_restart_without_consuming_ordinary_m
         "model-11"
     );
     assert!(api_calls(&config).iter().all(|c| c[1] == "get"));
+    server.abort();
 }
 
 #[tokio::test]

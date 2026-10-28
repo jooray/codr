@@ -27,9 +27,16 @@ fn setup(root: &std::path::Path) -> Bridge {
 }
 
 fn release() -> update::Release {
-    serde_json::from_value(json!({"version":"0.8.1", "event_id":"ab".repeat(32), "commit":"cd".repeat(20),
-        "asset":{"filename":"codr-v0.8.1-linux-x86_64.tar.gz","url":"https://blossom.example/archive","sha256":"ef".repeat(32),"size":"100"},
-        "checksum":{"filename":"codr-v0.8.1-linux-x86_64.tar.gz.sha256","url":"https://blossom.example/checksum","sha256":"12".repeat(32),"size":"100"}})).unwrap()
+    let version = format!(
+        "{}.{}.{}",
+        env!("CARGO_PKG_VERSION_MAJOR"),
+        env!("CARGO_PKG_VERSION_MINOR"),
+        env!("CARGO_PKG_VERSION_PATCH").parse::<u64>().unwrap() + 1
+    );
+    let filename = format!("codr-v{version}-linux-x86_64.tar.gz");
+    serde_json::from_value(json!({"version":version, "event_id":"ab".repeat(32), "commit":"cd".repeat(20),
+        "asset":{"filename":filename,"url":"https://blossom.example/archive","sha256":"ef".repeat(32),"size":"100"},
+        "checksum":{"filename":format!("{filename}.sha256"),"url":"https://blossom.example/checksum","sha256":"12".repeat(32),"size":"100"}})).unwrap()
 }
 
 fn event(id: &str, text: &str) -> Value {
@@ -109,7 +116,7 @@ async fn confirmation_is_durable_before_launch_and_completion_goes_only_to_origi
         serde_json::from_slice(&std::fs::read(directory.join("ready.json")).unwrap()).unwrap();
     assert_eq!(ready["job_id"], job.id);
     assert_eq!(ready["version"], env!("CARGO_PKG_VERSION"));
-    std::fs::write(directory.join("result.json"), serde_json::to_vec(&json!({"version":"0.8.1","job_id":job.id,"status":"installed","message":"Updated codr to 0.8.1."})).unwrap()).unwrap();
+    std::fs::write(directory.join("result.json"), serde_json::to_vec(&json!({"version":job.version,"job_id":job.id,"status":"installed","message":format!("Updated codr to {}.",job.version)})).unwrap()).unwrap();
     update::poll(&mut bridge).await.unwrap();
     assert!(bridge.state.update_job.is_none());
     assert_eq!(bridge.state.outbox.last().unwrap().group, "bb".repeat(16));
@@ -216,7 +223,7 @@ async fn a_result_for_another_job_cannot_clear_the_pending_installation() {
         update::prepare(&mut bridge, "one", &"bb".repeat(16), "confirm", &code).unwrap();
     std::fs::write(
         directory.join("result.json"),
-        br#"{"job_id":"other","version":"0.8.1","status":"installed","message":"success"}"#,
+        serde_json::to_vec(&json!({"job_id":"other","version":release().version,"status":"installed","message":"success"})).unwrap(),
     )
     .unwrap();
     assert!(update::poll(&mut bridge).await.is_err());

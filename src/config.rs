@@ -22,6 +22,9 @@ pub struct BridgeConfig {
     pub control_chat: bool,
     #[serde(default = "default_opencode")]
     pub opencode_bin: PathBuf,
+    /// Read-only V2 HTTP connection; never starts or recovers the shared service.
+    #[serde(default)]
+    pub opencode_service_file: Option<PathBuf>,
     /// Explicit database/profile selection. None keeps the CLI export reader.
     #[serde(default)]
     pub opencode_db: Option<PathBuf>,

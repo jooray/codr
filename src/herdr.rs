@@ -184,7 +184,8 @@ impl Agent {
                 .collect::<String>()
         };
         format!(
-            "Workspace: {}\nAgent: {}\nManaged by codr via herdr.",
+            "Hi! This is your chat with {}.\n\nSend /help in any Codr chat to see available commands.\n\nWorkspace: {}\nAgent: {}\nManaged by codr via herdr.",
+            clean(&self.group_name()),
             clean(workspace),
             clean(agent)
         )

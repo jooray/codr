@@ -38,7 +38,13 @@ pub(super) fn snapshot(
                 user_inputs.len(),
                 row["timestamp"].as_str().unwrap_or("")
             );
-            super::record_message(&mut recent_messages, "You", &id, text);
+            super::record_message(
+                &mut recent_messages,
+                "You",
+                &id,
+                text,
+                super::source_timestamp(&row["timestamp"]),
+            );
             user_inputs.push(crate::activity::UserInput::new(id, text));
         }
         if ((row["type"] == "event_msg"
@@ -95,7 +101,13 @@ pub(super) fn snapshot(
             .ok_or_else(|| anyhow::anyhow!("Codex completion lacks its turn ID"))?;
         let id = format!("codex:{turn}");
         if seen.insert(id.clone()) {
-            super::record_message(&mut recent_messages, "Agent", &id, text);
+            super::record_message(
+                &mut recent_messages,
+                "Agent",
+                &id,
+                text,
+                super::source_timestamp(&row["timestamp"]),
+            );
             replies.push(FinalMessage {
                 turn: Some(id.clone()),
                 id,
@@ -115,7 +127,8 @@ pub(super) fn snapshot(
             latest_turn,
             turns: turns.into_iter().collect(),
             user_inputs,
-            recent_messages,
+            recent_messages: recent_messages[recent_messages.len().saturating_sub(3)..].to_vec(),
+            last_messages: recent_messages,
         },
         tasks.latest,
     ))

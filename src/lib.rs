@@ -1,3 +1,8 @@
+pub mod logging;
+/// Like `eprintln!`, but suppress repeated poll warnings for ten minutes.
+macro_rules! eprintln_throttled {
+    ($($arg:tt)*) => { $crate::logging::throttled(format!($($arg)*)) };
+}
 pub mod activity;
 pub mod bridge;
 pub mod catalogue;

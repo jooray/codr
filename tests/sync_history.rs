@@ -13,16 +13,19 @@ fn sync_section_breaks_only_appear_between_messages_and_keep_their_text() {
             id: "one".into(),
             speaker: "You",
             text: "First paragraph\n\nSecond paragraph".into(),
+            timestamp: None,
         },
         output::ConversationMessage {
             id: "two".into(),
             speaker: "Agent",
             text: "Reply 🐇".into(),
+            timestamp: None,
         },
         output::ConversationMessage {
             id: "three".into(),
             speaker: "You",
             text: "Follow-up".into(),
+            timestamp: None,
         },
     ];
     for count in 0..=3 {
@@ -40,7 +43,10 @@ fn sync_section_breaks_only_appear_between_messages_and_keep_their_text() {
         assert!(excerpt.starts_with("**You:**\n"));
         assert!(excerpt.ends_with(&messages[count - 1].text));
         for message in &messages[..count] {
-            assert!(excerpt.contains(&format!("**{}:**\n{}", message.speaker, message.text)));
+            assert!(excerpt.contains(&format!(
+                "**{}:**\n_Date unknown_\n{}",
+                message.speaker, message.text
+            )));
         }
     }
 }
@@ -51,15 +57,14 @@ async fn sync_excerpt_keeps_three_messages_in_order_across_all_transcript_reader
     for provider in ["opencode-v1", "opencode-v2", "codex", "claude"] {
         let root = tempfile::tempdir().unwrap();
         let config = config(root.path());
-        let v1_user = |id, text| json!({"info":{"id":id,"role":"user"},"parts":[{"type":"text","text":text}]});
+        let v1_user = |id, text| json!({"info":{"id":id,"role":"user","time":{"created":0}},"parts":[{"type":"text","text":text}]});
         let v1_answer = |id, text| json!({"info":{"id":id,"role":"assistant","finish":"stop","time":{"completed":1}},"parts":[{"type":"text","text":text}]});
-        let v2_user = |id, text| json!({"id":id,"type":"user","text":text});
+        let v2_user = |id, text| json!({"id":id,"type":"user","text":text,"time":{"created":0}});
         let v2_answer = |id, text| json!({"id":id,"type":"assistant","finish":"stop","time":{"completed":1},"content":[{"type":"text","text":text}]});
-        let codex_user =
-            |text| json!({"type":"event_msg","payload":{"type":"user_message","message":text}});
-        let codex_answer = |id, text| json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":id,"last_agent_message":text}});
-        let claude_user = |id, parent, text| json!({"sessionId":session,"uuid":id,"parentUuid":parent,"type":"user","message":{"content":text}});
-        let claude_answer = |id, parent, text| json!({"sessionId":session,"uuid":id,"parentUuid":parent,"type":"assistant","message":{"id":id,"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":text}]}});
+        let codex_user = |text| json!({"timestamp":"1970-01-01T00:00:00Z","type":"event_msg","payload":{"type":"user_message","message":text}});
+        let codex_answer = |id, text| json!({"timestamp":"1970-01-01T00:00:00Z","type":"event_msg","payload":{"type":"task_complete","turn_id":id,"last_agent_message":text}});
+        let claude_user = |id, parent, text| json!({"timestamp":"1970-01-01T00:00:00Z","sessionId":session,"uuid":id,"parentUuid":parent,"type":"user","message":{"content":text}});
+        let claude_answer = |id, parent, text| json!({"timestamp":"1970-01-01T00:00:00Z","sessionId":session,"uuid":id,"parentUuid":parent,"type":"assistant","message":{"id":id,"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":text}]}});
         let (path, mut rows, next_user) = match provider {
             "opencode-v1" => (
                 root.path().join("data.json"),
@@ -166,9 +171,9 @@ async fn sync_excerpt_keeps_three_messages_in_order_across_all_transcript_reader
             assert_eq!(
                 history.catch_up().as_deref(),
                 Some(if additional_user {
-                    "**You:**\nFollow-up\n\n---\n\n**Agent:**\nLatest answer\n\n---\n\n**You:**\nNewest prompt"
+                    "**You:**\n_1970-01-01 00:00:00 UTC_\nFollow-up\n\n---\n\n**Agent:**\n_1970-01-01 00:00:00 UTC_\nLatest answer\n\n---\n\n**You:**\n_1970-01-01 00:00:00 UTC_\nNewest prompt"
                 } else {
-                    "**Agent:**\nEarlier answer\n\n---\n\n**You:**\nFollow-up\n\n---\n\n**Agent:**\nLatest answer"
+                    "**Agent:**\n_1970-01-01 00:00:00 UTC_\nEarlier answer\n\n---\n\n**You:**\n_1970-01-01 00:00:00 UTC_\nFollow-up\n\n---\n\n**Agent:**\n_1970-01-01 00:00:00 UTC_\nLatest answer"
                 }),
                 "{provider}"
             );
@@ -192,12 +197,20 @@ fn sync_source_identity_distinguishes_messages_with_the_same_text_and_content_ed
         id: id.into(),
         speaker,
         text: text.into(),
+        timestamp: None,
     };
     let first = message("first", "Agent", "Hello").key();
     assert_eq!(first, message("first", "Agent", "Hello").key());
     assert_ne!(first, message("second", "Agent", "Hello").key());
     assert_ne!(first, message("first", "You", "Hello").key());
     assert_ne!(first, message("first", "Agent", "Corrected answer").key());
+    let mut dated = message("first", "Agent", "Hello");
+    dated.timestamp = Some(1_793_189_594);
+    assert_eq!(
+        first,
+        dated.key(),
+        "Date labels must not reset existing delivery deduplication"
+    );
 }
 
 /// Manual long replies keep stable, distinct chunk keys across persistence and retries.
@@ -218,6 +231,7 @@ fn sync_replies_chunk_utf8_without_loss_or_ordinary_mute_bypass() {
             id: speaker.into(),
             speaker,
             text,
+            timestamp: None,
         })
         .collect(),
         ..Default::default()
