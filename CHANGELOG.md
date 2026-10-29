@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Claude replies reach the phone while a background task (subagent, Monitor,
+  background shell) keeps herdr reporting the pane as working. Claude Code's
+  background-task notifications are no longer treated as local typing, so they
+  do not mute forwarding for every group or start a new turn. A completed reply
+  stays final when the agent answers again in the same turn.
+
 ## [0.9.0]
 
 See the [release notes](docs/releases/0.9.0.md) and
